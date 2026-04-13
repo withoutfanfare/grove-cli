@@ -391,7 +391,7 @@ EOF
 
 create_hooks_dir() {
   local hooks_dir="$HOME/.grove/hooks"
-  local hook_dirs=("pre-add.d" "post-add.d" "pre-rm.d" "post-rm.d" "post-pull.d" "post-sync.d")
+  local hook_dirs=("pre-add.d" "post-add.d" "pre-rm.d" "post-rm.d" "post-pull.d" "post-sync.d" "post-switch.d")
 
   echo -e "${BLUE}Setting up hooks directory...${NC}"
 
@@ -408,6 +408,22 @@ create_hooks_dir() {
     if [[ ! -d "$hooks_dir/$hook_subdir" ]]; then
       mkdir -p "$hooks_dir/$hook_subdir"
       echo -e "  ${GREEN}✓${NC} Created $hooks_dir/$hook_subdir"
+    fi
+  done
+}
+
+create_grove_dirs() {
+  echo -e "${BLUE}Setting up grove directories...${NC}"
+
+  local dirs=("templates" "aliases" "groups" "services")
+
+  for dir in "${dirs[@]}"; do
+    local full_path="$HOME/.grove/$dir"
+    if [[ ! -d "$full_path" ]]; then
+      mkdir -p "$full_path"
+      echo -e "  ${GREEN}✓${NC} Created ~/.grove/$dir"
+    else
+      echo -e "  ${GREEN}✓${NC} Already exists: ~/.grove/$dir"
     fi
   done
 }
@@ -561,6 +577,39 @@ install_hooks_overwrite() {
   fi
 }
 
+migrate_devctl_config() {
+  local old_config="$HOME/.devctl/apps.conf"
+  local new_dir="$HOME/.grove/services"
+  local new_config="$new_dir/apps.conf"
+
+  # Skip if no old devctl config exists
+  if [[ ! -f "$old_config" ]]; then
+    return
+  fi
+
+  # Skip if already migrated
+  if [[ -f "$new_config" ]]; then
+    return
+  fi
+
+  echo ""
+  echo -e "${BLUE}DevCTL Migration...${NC}"
+  echo -e "  Found existing DevCTL config at $old_config"
+  echo ""
+  read -r -p "  Migrate to grove services? [Y/n]: " choice
+  case "${choice:-y}" in
+    [Nn]*)
+      echo -e "  ${DIM}Skipped (you can migrate later by copying $old_config to $new_config)${NC}"
+      return
+      ;;
+  esac
+
+  mkdir -p "$new_dir"
+  cp "$old_config" "$new_config"
+  echo -e "  ${GREEN}✓${NC} Migrated apps.conf to ~/.grove/services/"
+  echo -e "  ${DIM}Original kept at $old_config as backup${NC}"
+}
+
 check_path() {
   # Check if INSTALL_DIR is in PATH
   if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
@@ -612,6 +661,8 @@ install_script
 install_completions
 create_config
 create_hooks_dir
+create_grove_dirs
+migrate_devctl_config
 install_example_hooks
 check_path
 check_completions_fpath
