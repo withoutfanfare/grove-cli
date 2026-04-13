@@ -1,0 +1,99 @@
+# grove configuration file
+# Copy to ~/.groverc and customise for your environment
+#
+# All settings have sensible defaults - only uncomment what you need to change.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CORE SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Where your Laravel Herd sites live
+# Default: $HOME/Herd
+HERD_ROOT=$HOME/Herd
+
+# Default base branch for new worktrees (used by 'grove add' and 'grove sync')
+# Default: origin/staging
+# DEFAULT_BASE=origin/staging
+
+# Editor to open with 'grove code' command
+# Default: cursor
+# Options: cursor, code, zed, subl, atom, vim, nvim, etc.
+# DEFAULT_EDITOR=cursor
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATABASE SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# MySQL connection details
+# DB_HOST=127.0.0.1
+# DB_USER=root
+# DB_PASSWORD=
+
+# Auto-create database when running 'grove add'
+# Set to 'false' to disable automatic database creation
+# Default: true
+# DB_CREATE=true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATABASE BACKUP SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Backup database when running 'grove rm'
+# Set to 'false' to disable (or use --no-backup flag)
+# Default: true
+# DB_BACKUP=true
+
+# Where to store database backups
+# Backups are organised by repo name: $DB_BACKUP_DIR/<repo>/<db>_<timestamp>.sql
+# Default: $HOME/Code/Project Support/Worktree/Database/Backup
+# DB_BACKUP_DIR="$HOME/Code/Project Support/Worktree/Database/Backup"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SAFETY SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Protected branches that require --force to remove
+# Space-separated list of branch names
+# Default: staging main master
+# PROTECTED_BRANCHES="staging main master"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HOOKS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Directory containing hook scripts
+# Default: ~/.grove/hooks
+# GROVE_HOOKS_DIR="$HOME/.grove/hooks"
+
+# Available hooks:
+#   post-add    Run after 'grove add' creates a worktree
+#
+# Create executable scripts in GROVE_HOOKS_DIR with the hook name.
+# The following environment variables are available in hooks:
+#   GROVE_REPO       Repository name
+#   GROVE_BRANCH     Branch name
+#   GROVE_PATH       Worktree path
+#   GROVE_URL        Application URL
+#   GROVE_DB_NAME    Database name
+#
+# Example ~/.grove/hooks/post-add:
+#   #!/bin/bash
+#   # Run npm install and migrations after creating a worktree
+#   npm ci
+#   npm run build
+#   php artisan migrate
+#
+# For multiple hooks, create a directory with numbered scripts:
+#   ~/.grove/hooks/post-add.d/01-npm.sh
+#   ~/.grove/hooks/post-add.d/02-migrate.sh
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROJECT-SPECIFIC CONFIG
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# You can also create $HERD_ROOT/.groveconfig for settings that apply to all
+# projects in that directory. This is useful for team-shared configurations.
+#
+# Example ~/.Herd/.groveconfig:
+#   DEFAULT_BASE=origin/main
+#   PROTECTED_BRANCHES="main production"

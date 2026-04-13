@@ -1,0 +1,242 @@
+#compdef grove
+
+# Zsh completion for grove (Git worktree manager)
+# Place this file in your fpath (e.g., ~/.zsh/completions/_grove)
+# Or source it directly: source /path/to/_grove
+
+_grove_repos() {
+  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local repos=()
+  for dir in "$herd_root"/*.git(N); do
+    [[ -d "$dir" ]] && repos+=("${${dir:t}%.git}")
+  done
+  _describe 'repository' repos
+}
+
+_grove_branches() {
+  local repo="$1"
+  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local git_dir="$herd_root/${repo}.git"
+
+  [[ -d "$git_dir" ]] || return 1
+
+  local branches=()
+  local line
+  while IFS= read -r line; do
+    branches+=("$line")
+  done < <(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null | \
+    grep '^branch refs/heads/' | sed 's|^branch refs/heads/||')
+
+  _describe 'branch' branches
+}
+
+_grove_all_branches() {
+  local repo="$1"
+  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local git_dir="$herd_root/${repo}.git"
+
+  [[ -d "$git_dir" ]] || return 1
+
+  # Background fetch for fresh branches (non-blocking)
+  git --git-dir="$git_dir" fetch --quiet 2>/dev/null &
+
+  local branches=()
+  local line
+  # Get all remote branches
+  while IFS= read -r line; do
+    # Strip origin/ prefix for cleaner display
+    branches+=("${line#origin/}")
+  done < <(git --git-dir="$git_dir" branch -r 2>/dev/null | sed 's/^[[:space:]]*//' | grep -v HEAD)
+
+  _describe 'branch' branches
+}
+
+_grove_recent_shortcuts() {
+  local shortcuts=('@1:Most recent worktree' '@2:Second most recent' '@3:Third most recent')
+  _describe 'shortcut' shortcuts
+}
+
+_grove_branch_or_shortcut() {
+  local repo="$1"
+  _alternative \
+    'shortcuts:recent:_grove_recent_shortcuts' \
+    "branches:branch:{ _grove_branches $repo }"
+}
+
+_grove_groups() {
+  local groups_file="$HOME/.grove/groups"
+  [[ -f "$groups_file" ]] || return 1
+
+  local groups=()
+  while IFS='=' read -r name repos; do
+    [[ -n "$name" && "$name" != \#* ]] && groups+=("$name")
+  done < "$groups_file"
+
+  _describe 'group' groups
+}
+
+_grove() {
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  local -a commands
+  commands=(
+    'add:Create a new worktree'
+    'rm:Remove a worktree'
+    'move:Rename or move a worktree'
+    'ls:List worktrees for a repository'
+    'repos:List all repositories'
+    'clone:Clone a repository as bare repo'
+    'status:Show status of all worktrees'
+    'health:Show health scores for worktrees'
+    'dashboard:Overview of all repositories'
+    'info:Show detailed worktree information'
+    'recent:List recently used worktrees'
+    'pull:Pull latest changes'
+    'pull-all:Pull all worktrees in parallel'
+    'sync:Rebase onto base branch'
+    'diff:Show diff against base branch'
+    'log:Show recent commits'
+    'prune:Clean up stale worktrees'
+    'fresh:Run migrate:fresh + npm ci + build'
+    'build-all:Build all worktrees in parallel'
+    'exec-all:Execute command in all worktrees'
+    'clean:Remove node_modules/vendor from inactive worktrees'
+    'migrate:Run artisan migrate'
+    'tinker:Run artisan tinker'
+    'code:Open worktree in editor'
+    'open:Open worktree URL in browser'
+    'cd:Print worktree path'
+    'switch:Switch to worktree (cd + code + open)'
+    'exec:Run command in worktree'
+    'alias:Manage branch aliases'
+    'templates:List/show worktree templates'
+    'report:Generate markdown status report'
+    'doctor:Check system requirements'
+    'cleanup-herd:Remove orphaned Herd nginx configs'
+    'unlock:Remove stale git lock files'
+    'repair:Fix worktree issues'
+    'upgrade:Self-update to latest version'
+    'version:Show version information'
+    'setup:First-time configuration wizard'
+    'group:Manage repository groups'
+    'share-deps:Enable shared dependencies for a repository'
+  )
+
+  local -a global_flags
+  global_flags=(
+    '(-q --quiet)'{-q,--quiet}'[Suppress informational output]'
+    '(-f --force)'{-f,--force}'[Skip confirmations / force operations]'
+    '(-i --interactive)'{-i,--interactive}'[Interactive mode with guided prompts]'
+    '--json[Output in JSON format]'
+    '--pretty[Pretty-print JSON output with colours]'
+    '--dry-run[Preview actions without executing]'
+    '--delete-branch[Delete branch when removing worktree]'
+    '--drop-db[Drop database when removing worktree]'
+    '--no-backup[Skip database backup when removing worktree]'
+    '--all-repos[Apply operation to all repositories]'
+    '--template=[Use worktree template]:template:'
+    '--check[Check for updates (with version command)]'
+    '(-v --version)'{-v,--version}'[Show version]'
+    '(-h --help)'{-h,--help}'[Show help]'
+  )
+
+  _arguments -C \
+    $global_flags \
+    '1: :->command' \
+    '*:: :->args'
+
+  case $state in
+    command)
+      _describe -t commands 'grove command' commands
+      ;;
+    args)
+      case $line[1] in
+        add)
+          _arguments \
+            '1:repository:_grove_repos' \
+            '2:branch:' \
+            '3:base branch:'
+          ;;
+        rm)
+          _arguments \
+            '1:repository:_grove_repos' \
+            '2:branch:{ _grove_branches $line[1] }'
+          ;;
+        move)
+          _arguments \
+            '1:repository:_grove_repos' \
+            '2:branch:{ _grove_branches $line[1] }' \
+            '3:new name:'
+          ;;
+        ls|status|pull-all|prune|health|report|build-all)
+          _arguments '1:repository:_grove_repos'
+          ;;
+        pull|sync|code|open|cd|switch|fresh|migrate|tinker|log|diff|info)
+          _arguments \
+            '1:repository:_grove_repos' \
+            '2:branch:{ _grove_branches $line[1] }'
+          ;;
+        exec)
+          _arguments \
+            '1:repository:_grove_repos' \
+            '2:branch:{ _grove_branches $line[1] }' \
+            '*:command:_command_names'
+          ;;
+        exec-all)
+          _arguments \
+            '1:repository:_grove_repos' \
+            '*:command:_command_names'
+          ;;
+        clone)
+          _arguments \
+            '1:git URL:' \
+            '2:repository name:'
+          ;;
+        alias)
+          _arguments \
+            '1:subcommand:(set get list remove)' \
+            '2:alias name:' \
+            '3:repository:_grove_repos' \
+            '4:branch:{ _grove_branches $line[3] }'
+          ;;
+        templates)
+          _arguments '1:template name:'
+          ;;
+        clean)
+          _arguments '1:repository:_grove_repos'
+          ;;
+        recent)
+          _arguments '1:limit:'
+          ;;
+        repos|doctor|cleanup-herd|dashboard|upgrade|version)
+          # No arguments
+          ;;
+        repair)
+          _arguments \
+            '1:repository:_grove_repos' \
+            '--recovery[Enable recovery mode for corrupted worktrees]'
+          ;;
+        unlock)
+          _arguments '1:repository:_grove_repos'
+          ;;
+        setup)
+          # No arguments - interactive wizard
+          ;;
+        group)
+          _arguments \
+            '1:subcommand:(list add rm show)' \
+            '2:group name:_grove_groups' \
+            '*:repository:_grove_repos'
+          ;;
+        share-deps)
+          _arguments \
+            '1:repository:_grove_repos' \
+            '2:action:(enable disable status)'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_grove "$@"

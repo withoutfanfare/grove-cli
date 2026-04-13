@@ -1,0 +1,17 @@
+#!/bin/bash
+# Clean up after removing a worktree
+#
+# This hook runs after 'grove rm' removes a worktree.
+# Use it to clean up any external references to the worktree.
+
+echo "  Worktree removed: ${GROVE_PATH##*/}"
+
+# Example: Remove from projects registry
+PROJECTS_FILE="$HOME/.projects"
+PROJECT_KEY="${GROVE_PATH##*/}"
+
+if [[ -f "$PROJECTS_FILE" ]] && grep -q "^${PROJECT_KEY}=" "$PROJECTS_FILE" 2>/dev/null; then
+  grep -v "^${PROJECT_KEY}=" "$PROJECTS_FILE" > "${PROJECTS_FILE}.tmp"
+  mv "${PROJECTS_FILE}.tmp" "$PROJECTS_FILE"
+  echo "  Unregistered project: ${PROJECT_KEY}"
+fi

@@ -1,0 +1,28 @@
+# Sample .groverc configuration file for testing
+# This file demonstrates all available configuration options
+
+# Directory containing Herd sites
+HERD_ROOT=/Users/test/Herd
+
+# Default base branch for new worktrees
+DEFAULT_BASE=origin/staging
+
+# Default editor command
+DEFAULT_EDITOR=cursor
+
+# Optional URL subdomain prefix
+# GROVE_URL_SUBDOMAIN=api
+
+# Database configuration
+DB_HOST=127.0.0.1
+DB_USER=root
+DB_PASSWORD=
+DB_CREATE=true
+DB_BACKUP=true
+DB_BACKUP_DIR=/Users/test/Backups
+
+# Hooks directory
+GROVE_HOOKS_DIR=/Users/test/.grove/hooks
+
+# Protected branches (require --force to remove)
+PROTECTED_BRANCHES=staging main master

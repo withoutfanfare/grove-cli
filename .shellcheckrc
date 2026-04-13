@@ -1,0 +1,39 @@
+# ShellCheck configuration for grove-cli
+# https://www.shellcheck.net/wiki/
+
+# The scripts are written for zsh. ShellCheck doesn't fully support zsh,
+# so we use 'shell=bash' as the closest approximation for linting.
+# Many zsh-specific warnings are disabled below.
+shell=bash
+
+# Disable specific warnings that don't apply to zsh or are intentional
+
+# SC2034: Variable appears unused - many are used in child processes/hooks
+disable=SC2034
+
+# SC2154: Variable referenced but not assigned - zsh handles this differently
+disable=SC2154
+
+# SC2086: Double quote to prevent globbing - zsh handles this better
+disable=SC2086
+
+# SC2128: Expanding array without index - zsh behaves differently
+disable=SC2128
+
+# SC2206: Quote to prevent word splitting - zsh arrays work differently
+disable=SC2206
+
+# SC2016: Expressions don't expand in single quotes - this is intentional
+disable=SC2016
+
+# SC1090: Can't follow non-constant source - we source config files dynamically
+disable=SC1090
+
+# SC1091: Not following sourced file - same reason
+disable=SC1091
+
+# SC2155: Declare and assign separately - common zsh pattern, less risky than in bash
+disable=SC2155
+
+# External sources - mark files that are sourced
+external-sources=true
