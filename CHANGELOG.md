@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`grove services` command** - Optional service management for Laravel apps using Supervisor, Horizon, Reverb, and scheduled tasks. Entirely opt-in -- invisible if no apps are registered
+  - `grove services add <name>` - Register an app with configurable services, supervisor process, and domain
+  - `grove services remove <name>` - Unregister an app
+  - `grove services apps` - List registered apps (supports `--json`)
+  - `grove services status [app]` - Show service status (supervisor, horizon, scheduler)
+  - `grove services start/stop/restart <app|all>` - Control services
+  - `grove services horizon <app>` - Open Horizon dashboard in browser
+  - `grove services logs <app> [type]` - Tail horizon, reverb, scheduler, or queue logs
+  - `grove services doctor` - Check service dependencies (brew, PHP, redis, supervisor)
+  - Config stored in `~/.grove/services/apps.conf` (pipe-delimited format)
+- **Installer improvements** - `install.sh` now creates `~/.grove/templates`, `~/.grove/aliases`, `~/.grove/groups`, `~/.grove/services` directories and `~/.grove/hooks/post-switch.d/`
+- **DevCTL migration** - Installer detects existing `~/.devctl/apps.conf` and offers one-click migration to `~/.grove/services/apps.conf`
+- **Tab completion** for `grove services` subcommands
+- **16 new unit tests** for services module config parsing and validation helpers
+- **`post-switch` hook documented** in help text and README hooks table
+- **`pre-move` and `post-move` hooks documented** in README hooks table
+
+### Changed
+- **Post-switch hook rewritten** - `02-devctl-restart.sh` now uses `grove services restart` instead of hardcoded devctl calls. Idempotent -- exits silently if app not registered
+- **README alias examples** updated from `wt` prefix (`wts`, `wtl`, `wtc`, `wtcd`) to `g` prefix (`gs`, `gl`, `gc`, `gcd`)
+
 ### Changed
 - **Rebranded from `wt` to `grove`** - The tool has been renamed from `wt` (wt-worktree-manager) to `grove` (grove-cli). All commands, environment variables, config files, and directory paths have been updated:
   - Command: `wt` → `grove`
