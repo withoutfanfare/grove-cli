@@ -544,6 +544,64 @@ Execution order: global hooks run first (alphabetically), then repo-specific hoo
 
 **Security:** Hooks are verified before execution - they must be owned by the current user and not be world-writable.
 
+### Service Management (Optional)
+
+Grove includes optional service management for Laravel apps that use Supervisor, Horizon, Reverb, or scheduled tasks. This is entirely opt-in -- if you don't register any apps, the feature stays invisible.
+
+#### Quick Setup
+
+```bash
+# Register an app
+grove services add myapp
+
+# With options
+grove services add myapp --system-name=myapp-repo --services=horizon:reverb --domain=myapp.test
+
+# Check dependencies
+grove services doctor
+```
+
+#### Daily Use
+
+```bash
+grove services status              # Show all app status
+grove services start myapp         # Start services for an app
+grove services stop myapp          # Stop services
+grove services restart all         # Restart all registered apps
+grove services horizon myapp       # Open Horizon dashboard
+grove services logs myapp          # Tail Horizon logs
+grove services logs myapp reverb   # Tail Reverb logs
+```
+
+#### App Registry
+
+Apps are registered in `~/.grove/services/apps.conf`:
+
+```text
+# app_name|system_name|services|supervisor_process|domain
+myapp|myapp|horizon|myapp-horizon|myapp.test
+```
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `app_name` | Short name for commands | (required) |
+| `system_name` | Directory name in Herd | Same as app_name |
+| `services` | `horizon`, `horizon:reverb`, or `none` | `horizon` |
+| `supervisor_process` | Supervisor process pattern | `<system_name>-horizon` |
+| `domain` | Local .test domain | `<system_name>.test` |
+
+#### Integration with `grove switch`
+
+When you run `grove switch`, the post-switch hook automatically restarts services for the switched app (if registered). No additional configuration needed.
+
+#### Service Types
+
+| Service | What it manages |
+|---------|----------------|
+| `horizon` | Laravel Horizon queue worker via Supervisor |
+| `horizon:reverb` | Horizon + Laravel Reverb WebSocket server |
+| `none` | App registered but no queue services |
+
 ## Getting Started
 
 ### Setting up a new project

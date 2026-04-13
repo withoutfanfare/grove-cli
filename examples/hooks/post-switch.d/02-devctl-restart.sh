@@ -1,51 +1,22 @@
-#!/bin/bash
-# Restart devctl services after worktree switch
+#!/usr/bin/env zsh
+# Restart services after worktree switch
 #
-# After the -current symlink is updated, this hook restarts the Horizon
-# and scheduler services so they pick up the new worktree immediately.
+# After the -current symlink is updated, this hook restarts the Supervisor
+# processes (Horizon, Reverb) so they pick up the new worktree immediately.
 #
-# Only runs for apps managed by devctl: knotbook, scooda, modernprintworks, enneagram
+# Only runs if the repo has a registered service app in grove services.
+# If grove services is not configured, this hook exits silently.
 #
-# Skip by setting: GROVE_SKIP_DEVCTL=true
+# Skip by setting: GROVE_SKIP_SERVICES=true
 
-if [[ "${GROVE_SKIP_DEVCTL:-}" == "true" ]]; then
-  echo "  Skipping devctl restart (GROVE_SKIP_DEVCTL=true)"
+if [[ "${GROVE_SKIP_SERVICES:-}" == "true" ]]; then
+  echo "  Skipping service restart (GROVE_SKIP_SERVICES=true)"
   exit 0
 fi
 
-# Check if devctl is available
-if ! command -v devctl &> /dev/null; then
-  echo "  Skipping devctl restart (devctl not found)"
-  exit 0
-fi
-
-# Validate required environment variable
-if [[ -z "$GROVE_REPO" ]]; then
-  echo "  Skipping devctl restart - missing GROVE_REPO"
-  exit 0
-fi
-
-# Map repo names to devctl app names
-case "$GROVE_REPO" in
-  knotbook|scooda|modernprintworks)
-    app="$GROVE_REPO"
-    ;;
-  enneagram|enneagram-assessment)
-    app="enneagram"
-    ;;
-  *)
-    echo "  Skipping devctl restart - $GROVE_REPO not managed by devctl"
-    exit 0
-    ;;
-esac
-
-echo "  Restarting $app services..."
-
-# Restart supervisor processes (Horizon + Reverb if applicable)
-if devctl restart "$app" > /dev/null 2>&1; then
-  echo "  Restarted $app Horizon"
-else
-  echo "  Failed to restart $app services (may not be running)"
+# Use grove services restart (idempotent - exits 0 if app not registered)
+if command -v grove &> /dev/null; then
+  grove services restart "$GROVE_REPO" 2>/dev/null || true
 fi
 
 exit 0

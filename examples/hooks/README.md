@@ -96,7 +96,7 @@ Hooks are discovered and executed in this order:
 │
 ├── post-switch.d/              # After grove switch succeeds
 │   ├── 01-update-current-link.sh  # Update {repo}-current symlink
-│   ├── 02-devctl-restart.sh    # Restart development services
+│   ├── 02-devctl-restart.sh    # Restart grove services
 │   └── myapp/
 │       └── 01-configure-env.sh # Set APP_URL + DB_DATABASE
 │
@@ -197,7 +197,7 @@ Available in all hooks:
 | Hook | Purpose |
 |------|---------|
 | `01-update-current-link.sh` | Update `{repo}-current` symlink to point to active worktree |
-| `02-devctl-restart.sh` | Restart development services (devctl) |
+| `02-devctl-restart.sh` | Restart grove services (Supervisor/Horizon) |
 
 ### Repo-Specific Post-Switch (post-switch.d/myapp/)
 

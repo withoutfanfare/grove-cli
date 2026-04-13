@@ -121,6 +121,7 @@ _grove() {
     'setup:First-time configuration wizard'
     'group:Manage repository groups'
     'share-deps:Enable shared dependencies for a repository'
+    'services:Manage app services (Supervisor, Horizon, scheduler)'
   )
 
   local -a global_flags
@@ -233,6 +234,24 @@ _grove() {
           _arguments \
             '1:repository:_grove_repos' \
             '2:action:(enable disable status)'
+          ;;
+        services)
+          local -a services_cmds
+          services_cmds=(
+            'status:Show status of all or specific app'
+            'start:Start supervisor processes and scheduler'
+            'stop:Stop supervisor processes and scheduler'
+            'restart:Restart supervisor processes'
+            'add:Register a new app'
+            'remove:Remove an app from registry'
+            'apps:List all registered apps'
+            'horizon:Open Horizon dashboard in browser'
+            'logs:Tail service logs'
+            'doctor:Check service dependencies'
+          )
+          _arguments \
+            '1:subcommand:_describe "services command" services_cmds' \
+            '*:app:'
           ;;
       esac
       ;;

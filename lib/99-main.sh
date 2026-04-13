@@ -70,6 +70,11 @@ usage() {
   print -r -- "  ${C_GREEN}unlock${C_RESET}   ${C_DIM}[repo]${C_RESET}                    Remove stale git lock files"
   print -r -- "  ${C_GREEN}share-deps${C_RESET} ${C_DIM}[enable|disable|status]${C_RESET} Share vendor/node_modules"
   print -r -- ""
+  print -r -- "${C_BOLD}SERVICE MANAGEMENT${C_RESET} ${C_DIM}(optional - for Laravel queue/scheduler management)${C_RESET}"
+  print -r -- "  ${C_GREEN}services${C_RESET} ${C_DIM}[subcommand]${C_RESET}                  Manage app services"
+  print -r -- "           ${C_DIM}status, start, stop, restart, add, remove, apps,${C_RESET}"
+  print -r -- "           ${C_DIM}horizon, logs, doctor${C_RESET}"
+  print -r -- ""
   print -r -- "${C_BOLD}FLAGS${C_RESET}"
   print -r -- "  ${C_YELLOW}-q, --quiet${C_RESET}          Suppress informational output"
   print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal"
@@ -301,6 +306,7 @@ main() {
     config)       cmd_config "$@" ;;
     group)        cmd_group "$@" ;;
     share-deps)   cmd_share_deps "$@" ;;
+    services)     cmd_services "$@" ;;
     "")           usage ;;
     *)            die "Unknown command: $cmd (try: grove --help)" ;;
   esac

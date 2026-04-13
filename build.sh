@@ -48,6 +48,7 @@ COMMAND_MODULES=(
   "discovery.sh"
   "config.sh"
   "laravel.sh"
+  "services.sh"
 )
 
 # Concatenate core modules
