@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Local testing
+grove-dev
+
+# Test dependencies
+test_modules/
+
+.claude/
+
+*.log
+
+nginx.pid
+
+# Separate repositories
+grove-app/
