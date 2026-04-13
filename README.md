@@ -472,6 +472,9 @@ Hooks allow you to run custom scripts at various points in the worktree lifecycl
 | `post-rm` | After worktree removal | No |
 | `post-pull` | After `grove pull` succeeds | No |
 | `post-sync` | After `grove sync` succeeds | No |
+| `post-switch` | After `grove switch` succeeds | No |
+| `pre-move` | Before `grove move` | Yes |
+| `post-move` | After `grove move` succeeds | No |
 
 **Available environment variables in hooks:**
 
@@ -2492,9 +2495,9 @@ Each worktree:
 Add to `~/.zshrc`:
 
 ```bash
-alias wts="grove status example-app"
-alias wtl="grove ls example-app"
-alias wtc="grove code example-app"
+alias gs="grove status example-app"
+alias gl="grove ls example-app"
+alias gc="grove code example-app"
 ```
 
 ### Quick navigation function
@@ -2502,8 +2505,8 @@ alias wtc="grove code example-app"
 Add to `~/.zshrc`:
 
 ```bash
-# Usage: wtcd example-app feature/login
-wtcd() {
+# Usage: gcd example-app feature/login
+gcd() {
   cd "$(grove cd "$@")"
 }
 ```

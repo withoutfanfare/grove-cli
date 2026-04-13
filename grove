@@ -9204,6 +9204,7 @@ usage() {
   print -r -- "  ${C_GREEN}post-rm${C_RESET}      Run after worktree removal"
   print -r -- "  ${C_GREEN}post-pull${C_RESET}    Run after grove pull succeeds"
   print -r -- "  ${C_GREEN}post-sync${C_RESET}    Run after grove sync succeeds"
+  print -r -- "  ${C_GREEN}post-switch${C_RESET}  Run after grove switch succeeds"
   print -r -- ""
   print -r -- "  ${C_DIM}Available environment variables in hooks:${C_RESET}"
   print -r -- "    GROVE_REPO       Repository name"
