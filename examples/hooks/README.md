@@ -13,6 +13,30 @@ cp examples/hooks/post-add.d/03-create-database.sh ~/.grove/hooks/post-add.d/
 cp examples/hooks/post-add.d/05-composer-install.sh ~/.grove/hooks/post-add.d/
 ```
 
+### Onboarding a new Laravel repo
+
+Once hooks are installed, each Laravel repo needs a one-time setup so that new
+worktrees get a matching `.env`, shared storage, and the Laravel-specific
+post-add symlinks:
+
+```bash
+# After cloning the repo with grove and creating the primary worktree:
+grove clone <url> <repo>
+grove add <repo> <default-branch>
+
+# Then run once:
+bash ~/.grove/hooks/setup-laravel-repo.sh <repo>
+```
+
+`setup-laravel-repo.sh` is idempotent and:
+- Symlinks `_laravel/*.sh` into `post-add.d/<repo>/`
+- Snapshots `.env` and `.env.example` from the primary worktree into
+  `~/Development/Code/Worktree/<repo>/<repo>-env/`
+- Ensures the shared `storage/app/` directory exists
+
+If you forget this step, `pre-add.d/00-laravel-preflight.sh` will print the
+exact command to run when you next attempt `grove add`.
+
 ## Architecture
 
 grove is a **generic git worktree manager**. All framework-specific setup (Laravel, Node.js, etc.) is handled via hooks:
@@ -155,19 +179,40 @@ Available in all hooks:
 
 ## Example Hooks Included
 
+### Pre-Add Hooks (pre-add.d/)
+
+| Hook | Purpose |
+|------|---------|
+| `00-laravel-preflight.sh` | Warn (non-blocking) when a Laravel repo is missing setup — unlinked hooks, missing `.env` template, missing primary worktree. Prints exact fix commands. |
+
 ### Global Hooks (post-add.d/)
 
 | Hook | Purpose |
 |------|---------|
 | `00-register-project.sh` | Register worktree in `~/.projects` for quick navigation |
 | `01-copy-env.sh` | Copy `.env.example` to `.env` |
+| `01a-inherit-db-from-primary.sh` | When `DB_CREATE=false`, sync `DB_DATABASE` from the primary worktree's `.env` (prevents stale `.env.example` DB names cascading into new worktrees) |
 | `02-configure-env.sh` | Set `APP_URL` in `.env` (early pass) |
 | `03-create-database.sh` | Create MySQL database |
 | `04-herd-secure.sh` | Secure site with Herd HTTPS |
+| `04-laravel-scaffold.sh` | Create missing Laravel runtime dirs (`bootstrap/cache`, `storage/framework/{cache/data,sessions,testing,views}`, `storage/logs`) before composer runs. Defensive against repos whose `.gitignore` excludes these dirs outright. |
 | `05-composer-install.sh` | Run `composer install` + generate app key |
 | `06-npm-install.sh` | Run `npm install` |
 | `07-build-assets.sh` | Run `npm run build` if build script exists |
 | `08-run-migrations.sh` | Run Laravel migrations |
+
+### Shared Laravel Hooks (post-add.d/_laravel/)
+
+Laravel-specific hooks that you opt into per repo by symlinking them via `link-repo.sh`:
+
+| Hook | Purpose |
+|------|---------|
+| `01-ai-files.sh` | Symlink shared AI/LLM context into the worktree |
+| `02-copy-env.sh` | Overwrite `.env` with pre-built template from `~/Development/Code/Worktree/<repo>/<repo>-env/.env` |
+| `03-configure-env.sh` | Set `APP_URL`, `VITE_APP_URL`, `SESSION_DOMAIN`, and `DB_DATABASE` for the worktree |
+| `04-import-database.sh` | Import gzipped SQL dump from the template folder |
+| `05-symlink-storage.sh` | Symlink `storage/app` to a shared directory (preserves uploads across worktrees) |
+| `link-repo.sh` | Run once per repo: `bash _laravel/link-repo.sh <repo>` — creates symlinks from `<repo>/*.sh` to `_laravel/*.sh` |
 
 ### Repo-Specific Hooks (post-add.d/myapp/)
 

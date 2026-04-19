@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Defensive Laravel hooks** - New example hooks that prevent silent first-boot failures on fresh worktrees:
+  - `post-add.d/04-laravel-scaffold.sh` - Creates missing Laravel runtime directories (`bootstrap/cache`, `storage/framework/{cache/data,sessions,testing,views}`, `storage/logs`) before composer runs. Defensive against repos whose `.gitignore` excludes these directories outright instead of using the Laravel convention of ignoring contents but tracking a `.gitignore` sentinel
+  - `post-add.d/01a-inherit-db-from-primary.sh` - When `DB_CREATE=false`, syncs `DB_DATABASE` from the primary worktree's `.env` so new worktrees do not inherit stale `.env.example` defaults
+  - `pre-add.d/00-laravel-preflight.sh` - First pre-add example hook. Warns (non-blocking) when a Laravel repo is missing its `_laravel` hook link, env template, or primary worktree, and prints exact fix commands
+  - `post-add.d/_laravel/` - Shared, opt-in Laravel hook set (env template copy, storage symlink, DB import, extended env config) that repos symlink into via `link-repo.sh`
+  - `setup-laravel-repo.sh` - Idempotent one-shot onboarder for new Laravel repos: links hooks, snapshots `.env` template, ensures shared storage exists
 - **`grove services` command** - Optional service management for Laravel apps using Supervisor, Horizon, Reverb, and scheduled tasks. Entirely opt-in -- invisible if no apps are registered
   - `grove services add <name>` - Register an app with configurable services, supervisor process, and domain
   - `grove services remove <name>` - Unregister an app
