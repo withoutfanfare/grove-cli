@@ -36,8 +36,9 @@ interactive_add() {
   # Step 2: Base branch selection
   print -r -- "${C_BOLD}Step 2/5:${C_RESET} Select base branch"
 
-  # Fetch first
-  with_spinner "Fetching branches" git --git-dir="$git_dir" fetch --all --prune --quiet
+  # Fetch first (non-fatal: a failed fetch shouldn't abort the wizard — local refs still work)
+  with_spinner "Fetching branches" git --git-dir="$git_dir" fetch --all --prune --quiet \
+    || warn "Fetch failed - continuing with local branch list"
 
   # Get remote branches for selection
   local branches; branches="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null | grep -v HEAD)"

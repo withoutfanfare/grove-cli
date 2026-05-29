@@ -31,7 +31,7 @@ check_os() {
       echo -e "  • macOS-specific path defaults"
       echo ""
       echo -e "${BLUE}Linux support is planned for a future release.${NC}"
-      echo -e "See: ${DIM}https://github.com/dannyharding10/grove-cli/blob/main/ROADMAP.md${NC}"
+      echo -e "See: ${DIM}https://github.com/withoutfanfare/grove-cli/blob/main/docs/development/roadmap.md${NC}"
       echo ""
       echo -e "Want to help? Contributions are welcome!"
       echo ""
@@ -49,7 +49,7 @@ check_os() {
       echo -e "  • macOS-specific integrations"
       echo ""
       echo -e "${BLUE}Windows support (via WSL) is planned for a future release.${NC}"
-      echo -e "See: ${DIM}https://github.com/dannyharding10/grove-cli/blob/main/ROADMAP.md${NC}"
+      echo -e "See: ${DIM}https://github.com/withoutfanfare/grove-cli/blob/main/docs/development/roadmap.md${NC}"
       echo ""
       echo -e "Want to help? Contributions are welcome!"
       echo ""
@@ -60,7 +60,7 @@ check_os() {
       echo -e "${RED}Unsupported operating system: $os_name${NC}"
       echo ""
       echo -e "grove currently only supports macOS."
-      echo -e "See: ${DIM}https://github.com/dannyharding10/grove-cli/blob/main/ROADMAP.md${NC}"
+      echo -e "See: ${DIM}https://github.com/withoutfanfare/grove-cli/blob/main/docs/development/roadmap.md${NC}"
       echo ""
       exit 1
       ;;
@@ -284,6 +284,21 @@ check_requirements() {
 install_script() {
   echo -e "${BLUE}Installing grove...${NC}"
 
+  # Ensure the grove artifact exists and is current. It is generated from lib/ by build.sh;
+  # build it if missing so we never symlink a stale or absent file and report success.
+  if [[ ! -f "$SCRIPT_DIR/grove" ]]; then
+    if [[ -x "$SCRIPT_DIR/build.sh" ]]; then
+      echo -e "  ${DIM}grove artifact missing - building from lib/...${NC}"
+      if ! "$SCRIPT_DIR/build.sh" >/dev/null; then
+        echo -e "  ${RED}✖${NC} build.sh failed - cannot install" >&2
+        exit 1
+      fi
+    else
+      echo -e "  ${RED}✖${NC} $SCRIPT_DIR/grove not found and no build.sh to generate it" >&2
+      exit 1
+    fi
+  fi
+
   # Create install directory if needed
   if [[ ! -d "$INSTALL_DIR" ]]; then
     echo -e "  Creating $INSTALL_DIR..."
@@ -307,6 +322,12 @@ install_script() {
   fi
   echo -e "  ${GREEN}✓${NC} Linked grove to $INSTALL_DIR/grove"
   echo -e "    ${DIM}→ $SCRIPT_DIR/grove${NC}"
+
+  # Sanity-check the linked binary actually runs before we later report success
+  if ! "$INSTALL_DIR/grove" --version >/dev/null 2>&1; then
+    echo -e "  ${RED}✖${NC} Installed grove did not run ('grove --version' failed)" >&2
+    exit 1
+  fi
 }
 
 install_completions() {
@@ -361,7 +382,7 @@ create_config() {
 
   cat > "$config_file" << EOF
 # grove configuration file
-# See: https://github.com/dannyharding10/grove-cli
+# See: https://github.com/withoutfanfare/grove-cli
 
 # Where your Herd/Valet sites live
 HERD_ROOT=$herd_root
@@ -380,7 +401,7 @@ DB_CREATE=true
 
 # Database backup on removal
 DB_BACKUP=true
-DB_BACKUP_DIR="\$HOME/Code/Project Support/Worktree/Database/Backup"
+DB_BACKUP_DIR="\$HOME/.grove/backups"
 
 # Protected branches (require -f to remove)
 PROTECTED_BRANCHES="staging main master"
@@ -497,7 +518,7 @@ install_hooks_merge() {
   # Find all example files (excluding README and directories)
   while IFS= read -r -d '' src_file; do
     # Get relative path from examples_dir
-    local rel_path="${src_file#$examples_dir/}"
+    local rel_path="${src_file#"$examples_dir"/}"
     local dest_file="$hooks_dir/$rel_path"
     local dest_dir="$(dirname "$dest_file")"
 
@@ -508,12 +529,12 @@ install_hooks_merge() {
     if [[ ! -e "$dest_file" ]]; then
       cp "$src_file" "$dest_file"
       chmod +x "$dest_file"
-      ((installed++))
+      installed=$((installed + 1))
       if [[ "$QUIET" != true ]]; then
         echo -e "  ${GREEN}+${NC} $rel_path"
       fi
     else
-      ((skipped++))
+      skipped=$((skipped + 1))
     fi
   done < <(find "$examples_dir" -type f ! -name "README*" -print0 2>/dev/null)
 
@@ -544,7 +565,7 @@ install_hooks_overwrite() {
 
     # Copy existing structure to backup
     find "$hooks_dir" -type f ! -name "README*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
-      local rel_path="${file#$hooks_dir/}"
+      local rel_path="${file#"$hooks_dir"/}"
       local backup_file="$backup_dir/$rel_path"
       mkdir -p "$(dirname "$backup_file")"
       cp "$file" "$backup_file"
@@ -559,14 +580,14 @@ install_hooks_overwrite() {
 
   # Install all examples
   while IFS= read -r -d '' src_file; do
-    local rel_path="${src_file#$examples_dir/}"
+    local rel_path="${src_file#"$examples_dir"/}"
     local dest_file="$hooks_dir/$rel_path"
     local dest_dir="$(dirname "$dest_file")"
 
     [[ -d "$dest_dir" ]] || mkdir -p "$dest_dir"
     cp "$src_file" "$dest_file"
     chmod +x "$dest_file"
-    ((installed++))
+    installed=$((installed + 1))
     if [[ "$QUIET" != true ]]; then
       echo -e "  ${GREEN}+${NC} $rel_path"
     fi

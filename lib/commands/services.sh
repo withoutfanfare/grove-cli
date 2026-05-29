@@ -123,7 +123,7 @@ svc_show_app_status() {
   # Supervisor process (skip if services=none)
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
     local sup_status
-    sup_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}" | head -1)" || true
+    sup_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1)" || true
     if [[ -n "$sup_status" ]]; then
       if print -r -- "$sup_status" | grep -q "RUNNING"; then
         ok "Supervisor: RUNNING"
@@ -208,8 +208,12 @@ svc_start_app() {
 
   # Start supervisor process (if app has services)
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
-    supervisorctl start "$process" 2>/dev/null || true
-    ok "Started supervisor process"
+    local sup_out
+    if sup_out="$(supervisorctl start "$process" 2>&1)"; then
+      ok "Started supervisor process"
+    else
+      warn "Could not start supervisor process '$process': ${sup_out:-unknown error}"
+    fi
   fi
 
   # Load scheduler LaunchAgent
@@ -256,8 +260,12 @@ svc_stop_app() {
 
   # Stop supervisor process
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
-    supervisorctl stop "$process" 2>/dev/null || true
-    ok "Stopped supervisor process"
+    local sup_out
+    if sup_out="$(supervisorctl stop "$process" 2>&1)"; then
+      ok "Stopped supervisor process"
+    else
+      warn "Could not stop supervisor process '$process': ${sup_out:-unknown error}"
+    fi
   fi
 
   # Unload scheduler LaunchAgent
@@ -296,8 +304,12 @@ svc_restart_app() {
   info "Restarting ${(C)app}..."
 
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
-    supervisorctl restart "$process" 2>/dev/null || true
-    ok "Restarted supervisor process"
+    local sup_out
+    if sup_out="$(supervisorctl restart "$process" 2>&1)"; then
+      ok "Restarted supervisor process"
+    else
+      warn "Could not restart supervisor process '$process': ${sup_out:-unknown error}"
+    fi
   fi
 
   print -r -- ""
@@ -312,30 +324,33 @@ cmd_services_restart() {
     return 0
   fi
 
-  # If app isn't registered, exit silently (idempotent for hooks)
-  if ! (( ${+SVC_APPS[$app]} )); then
-    return 0
-  fi
-
+  # Handle 'all' before the registration guard ('all' is a sentinel, never a registered key)
   if [[ "$app" == "all" ]]; then
     local app_name
     for app_name in $(svc_get_app_list); do
       svc_restart_app "$app_name"
     done
-  else
-    svc_restart_app "$app"
-  fi
-}
-
-cmd_services_apps() {
-  if ! svc_has_apps; then
-    dim "No apps registered. Run 'grove services add <name>' to get started."
     return 0
   fi
 
+  # If a specific app isn't registered, exit silently (idempotent for hooks)
+  if ! (( ${+SVC_APPS[$app]} )); then
+    return 0
+  fi
+
+  svc_restart_app "$app"
+}
+
+cmd_services_apps() {
+  # JSON mode must emit valid JSON even when no apps are registered (returns [])
   if [[ "$JSON_OUTPUT" == true ]]; then
     cmd_services_apps_json
     return $?
+  fi
+
+  if ! svc_has_apps; then
+    dim "No apps registered. Run 'grove services add <name>' to get started."
+    return 0
   fi
 
   print -r -- ""
@@ -359,21 +374,25 @@ cmd_services_apps() {
 }
 
 cmd_services_apps_json() {
+  # json_escape sets $REPLY (it does not print) — declare vars outside the loop and
+  # read $REPLY after each call, matching the pattern used by every other JSON command.
   local first=true
+  local app_name system_name services process domain
+  local je_name je_system je_services je_process je_domain
   print -r -- "["
-  local app_name
   for app_name in $(svc_get_app_list); do
     [[ "$first" == true ]] && first=false || print -r -- ","
-    local system_name="${SVC_SYSTEM_NAMES[$app_name]}"
-    local services="${SVC_SERVICES[$app_name]}"
-    local process="${SVC_SUPERVISOR_PROCESSES[$app_name]}"
-    local domain="${SVC_DOMAINS[$app_name]}"
+    system_name="${SVC_SYSTEM_NAMES[$app_name]}"
+    services="${SVC_SERVICES[$app_name]}"
+    process="${SVC_SUPERVISOR_PROCESSES[$app_name]}"
+    domain="${SVC_DOMAINS[$app_name]}"
+    json_escape "$app_name";     je_name="$REPLY"
+    json_escape "$system_name";  je_system="$REPLY"
+    json_escape "$services";     je_services="$REPLY"
+    json_escape "$process";      je_process="$REPLY"
+    json_escape "$domain";       je_domain="$REPLY"
     printf '  {"name":"%s","system_name":"%s","services":"%s","supervisor_process":"%s","domain":"%s"}' \
-      "$(json_escape "$app_name")" \
-      "$(json_escape "$system_name")" \
-      "$(json_escape "$services")" \
-      "$(json_escape "$process")" \
-      "$(json_escape "$domain")"
+      "$je_name" "$je_system" "$je_services" "$je_process" "$je_domain"
   done
   print -r -- ""
   print -r -- "]"
@@ -403,8 +422,9 @@ cmd_services_add() {
     die "Usage: grove services add <name> [--system-name=<name>] [--services=horizon|horizon:reverb|none] [--domain=<domain>]"
   fi
 
-  # Validate name
-  validate_repo_name "$name" 2>/dev/null || true
+  # Validate name (enforces the project whitelist: no path traversal, flag injection,
+  # or shell/pipe metacharacters that would corrupt the pipe-delimited apps.conf)
+  validate_name "$name" "repository"
 
   # Defaults
   [[ -z "$system_name" ]] && system_name="$name"
@@ -550,7 +570,7 @@ cmd_services_doctor() {
     ok "Installed"
   else
     warn "Not installed"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   # Check PHP
@@ -559,7 +579,7 @@ cmd_services_doctor() {
     ok "$(php -v | head -1)"
   else
     warn "Not installed"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   # Check Redis
@@ -568,7 +588,7 @@ cmd_services_doctor() {
     ok "Running"
   else
     warn "Not running (fix: brew services start redis)"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   # Check Supervisor
@@ -577,7 +597,7 @@ cmd_services_doctor() {
     ok "Running"
   else
     warn "Not running (fix: brew services start supervisor)"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   # Check supervisor.d directory
@@ -588,7 +608,7 @@ cmd_services_doctor() {
     ok "$config_count configs in $GROVE_SUPERVISOR_D"
   else
     warn "Directory missing: $GROVE_SUPERVISOR_D"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   if svc_has_apps; then
@@ -606,11 +626,11 @@ cmd_services_doctor() {
           ok "${system_name}-current -> ${target:t}"
         else
           warn "${system_name}-current -> $target (broken)"
-          ((issues++))
+          issues=$((issues + 1))
         fi
       else
         warn "${system_name}-current missing"
-        ((issues++))
+        issues=$((issues + 1))
       fi
     done
 
@@ -623,7 +643,7 @@ cmd_services_doctor() {
       local process
       process="$(svc_get_supervisor_process "$app")"
       local status
-      status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}" | head -1 || true)"
+      status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
       if [[ -n "$status" ]]; then
         if print -r -- "$status" | grep -q "RUNNING"; then
           ok "$app: RUNNING"
@@ -649,6 +669,30 @@ cmd_services_doctor() {
 
 # --- Main Entry Point ---
 
+svc_show_help() {
+  print -r -- ""
+  print -r -- "${C_BOLD}Grove Service Management${C_RESET}"
+  print -r -- ""
+  print -r -- "  Manage Supervisor, Horizon, Reverb, and scheduler for Laravel apps."
+  print -r -- ""
+  print -r -- "  ${C_GREEN}Get started:${C_RESET}"
+  print -r -- "    grove services add <name>         Register an app"
+  print -r -- "    grove services remove <name>      Remove an app from the registry"
+  print -r -- "    grove services doctor             Check service dependencies"
+  print -r -- ""
+  print -r -- "  ${C_GREEN}Daily use:${C_RESET}"
+  print -r -- "    grove services status             Show all app status"
+  print -r -- "    grove services start <app|all>    Start services"
+  print -r -- "    grove services stop <app|all>     Stop services"
+  print -r -- "    grove services restart <app|all>  Restart services"
+  print -r -- ""
+  print -r -- "  ${C_GREEN}Utilities:${C_RESET}"
+  print -r -- "    grove services apps               List registered apps"
+  print -r -- "    grove services horizon <app>       Open Horizon dashboard"
+  print -r -- "    grove services logs <app> [type]   Tail service logs"
+  print -r -- ""
+}
+
 cmd_services() {
   # Lazy-load config only when services is actually invoked
   svc_load_config
@@ -668,33 +712,17 @@ cmd_services() {
     logs)     cmd_services_logs "$@" ;;
     doctor)   cmd_services_doctor "$@" ;;
     "")
+      # Bare `grove services`: show status if apps are registered, else the help text.
+      # (Note: bare `help`/`-h`/`--help` are caught by the global flag parser, which prints
+      # the main `grove --help` — that already lists every services subcommand incl. remove.)
       if svc_has_apps; then
         cmd_services_status "$@"
       else
-        print -r -- ""
-        print -r -- "${C_BOLD}Grove Service Management${C_RESET}"
-        print -r -- ""
-        print -r -- "  Manage Supervisor, Horizon, Reverb, and scheduler for Laravel apps."
-        print -r -- ""
-        print -r -- "  ${C_GREEN}Get started:${C_RESET}"
-        print -r -- "    grove services add <name>        Register an app"
-        print -r -- "    grove services doctor             Check service dependencies"
-        print -r -- ""
-        print -r -- "  ${C_GREEN}Daily use:${C_RESET}"
-        print -r -- "    grove services status             Show all app status"
-        print -r -- "    grove services start <app|all>    Start services"
-        print -r -- "    grove services stop <app|all>     Stop services"
-        print -r -- "    grove services restart <app|all>  Restart services"
-        print -r -- ""
-        print -r -- "  ${C_GREEN}Utilities:${C_RESET}"
-        print -r -- "    grove services apps               List registered apps"
-        print -r -- "    grove services horizon <app>       Open Horizon dashboard"
-        print -r -- "    grove services logs <app> [type]   Tail service logs"
-        print -r -- ""
+        svc_show_help
       fi
       ;;
     *)
-      die "Unknown services command: $subcmd (try: grove services)"
+      die "Unknown services command: $subcmd (see 'grove --help' for the services subcommands)"
       ;;
   esac
 }

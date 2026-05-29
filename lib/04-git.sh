@@ -9,13 +9,17 @@ typeset -gA _GROVE_STATUS_CACHE
 GROVE_FETCH_CACHE_TTL="${GROVE_FETCH_CACHE_TTL:-30}"  # 30 seconds default
 GROVE_FETCH_CACHE_DIR="${TMPDIR:-/tmp}/grove-fetch-cache"
 
-# Get fetch cache file path for a repo
+# Get fetch cache file path for a repo + fetch-args combination
+# Keying on the args (not just the repo) prevents one fetch scope's cache from
+# satisfying a later fetch with different args.
 _fetch_cache_file() {
-  local git_dir="$1"
-  # Create hash of git dir path for unique cache file
+  local git_dir="$1"; shift
   local hash="${git_dir:t}"  # Use basename for simplicity
   hash="${hash//[^a-zA-Z0-9_-]/_}"
-  print -r -- "$GROVE_FETCH_CACHE_DIR/$hash"
+  # Sanitise the fetch args into a filename-safe suffix
+  local args_key="$*"
+  args_key="${args_key//[^a-zA-Z0-9]/_}"
+  print -r -- "$GROVE_FETCH_CACHE_DIR/${hash}${args_key:+__${args_key}}"
 }
 
 # Last computed fetch cache age (set by _fetch_cache_valid for reuse)
@@ -49,10 +53,11 @@ cached_fetch() {
   mkdir -p "$GROVE_FETCH_CACHE_DIR" 2>/dev/null
 
   local cache_file
-  cache_file="$(_fetch_cache_file "$git_dir")"
+  cache_file="$(_fetch_cache_file "$git_dir" "${fetch_args[@]}")"
 
   if _fetch_cache_valid "$cache_file"; then
-    dim "(using cached fetch, ${_FETCH_CACHE_AGE}s old)"
+    # Diagnostic only — never emit in JSON mode (would contaminate the data contract)
+    [[ "$JSON_OUTPUT" == true ]] || dim "(using cached fetch, ${_FETCH_CACHE_AGE}s old)"
     return 0
   fi
 
@@ -69,7 +74,7 @@ force_fetch() {
   shift
 
   local cache_file
-  cache_file="$(_fetch_cache_file "$git_dir")"
+  cache_file="$(_fetch_cache_file "$git_dir" "$@")"
   rm -f "$cache_file" 2>/dev/null
 
   git --git-dir="$git_dir" fetch "$@"
@@ -352,7 +357,7 @@ get_last_commit_age() {
     return 0
   fi
 
-  (( age_seconds = now - epoch_seconds ))
+  age_seconds=$(( now - epoch_seconds ))
 
   # Bounds check to prevent overflow (max ~68 years for safety)
   # If age exceeds 2^31 seconds (~68 years), cap it
@@ -361,7 +366,7 @@ get_last_commit_age() {
     return 0
   fi
 
-  (( age_days = age_seconds / 86400 ))
+  age_days=$(( age_seconds / 86400 ))
 
   # Additional sanity check on days (max 100 years)
   if (( age_days > 36500 )); then
@@ -401,7 +406,7 @@ get_commit_age_days() {
     return 0
   fi
 
-  (( age_seconds = now - epoch_seconds ))
+  age_seconds=$(( now - epoch_seconds ))
 
   # Bounds check to prevent overflow (max 100 years = 36500 days)
   local age_days=$(( age_seconds / 86400 ))

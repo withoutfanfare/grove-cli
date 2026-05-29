@@ -46,8 +46,9 @@ check_index_locks() {
         dim "  Removed stale lock: ${lock_file##*/worktrees/}"
       else
         warn "Stale lock found: ${lock_file##*/worktrees/}"
-        locks_found=$((locks_found + 1))
       fi
+      # Count every stale lock (found or auto-cleaned) so callers report it accurately
+      locks_found=$((locks_found + 1))
     fi
   done
 

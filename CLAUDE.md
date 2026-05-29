@@ -94,6 +94,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Worktree discovery** (recent, clean, info) → `lib/commands/discovery.sh`
 - **Configuration** (setup, templates, alias, group) → `lib/commands/config.sh`
 - **Laravel-specific** → `lib/commands/laravel.sh`
+- **Service management** (services: status/start/stop/restart/add/remove/apps/horizon/logs/doctor — Supervisor, Horizon, Reverb, scheduler) → `lib/commands/services.sh` *(also emits the `services apps --json` data contract)*
 
 ## Development Commands
 
@@ -144,7 +145,8 @@ lib/
     ├── bulk-ops.sh      # Bulk operations (build_all, exec_all)
     ├── discovery.sh     # Worktree discovery (recent, clean, info)
     ├── config.sh        # Configuration (setup, templates, alias, group)
-    └── laravel.sh       # Laravel-specific commands
+    ├── laravel.sh       # Laravel-specific commands (migrate, tinker, fresh)
+    └── services.sh      # App service management (Supervisor, Horizon, Reverb, scheduler)
 ```
 
 **Command pattern:** Each command is a `cmd_<name>()` function. Adding a new command requires:
@@ -161,7 +163,7 @@ Uses BATS (Bash Automated Testing System). Test files are in `tests/`:
 - `tests/unit/*.bats` - Pure function tests (validation, slugification, JSON escaping)
 - `tests/integration/*.bats` - Config parsing, command integration
 
-Current coverage: 168 tests focusing on security-critical validation, path handling, and database naming.
+Current coverage: ~270 tests focusing on security-critical validation, path handling, database naming, hooks, and the .env rewrite used by move/restructure.
 
 Install BATS: `brew install bats-core` or clone to `test_modules/bats`
 

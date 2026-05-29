@@ -27,6 +27,11 @@ ok() { echo -e "${GREEN}✔${NC} $*"; }
 warn() { echo -e "${YELLOW}⚠${NC} $*"; }
 error() { echo -e "${RED}✖${NC} $*"; }
 
+# Lint state (set during a full run so the summary never claims a clean pass when
+# static analysis was skipped or found issues)
+LINT_SKIPPED=0
+LINT_FAILED=0
+
 # Check for shellcheck
 check_shellcheck() {
   if command -v shellcheck >/dev/null 2>&1; then
@@ -37,14 +42,39 @@ check_shellcheck() {
 
 # Run shellcheck static analysis
 run_shellcheck() {
-  if ! check_shellcheck; then
-    warn "shellcheck not found - skipping static analysis"
-    echo "  Install: brew install shellcheck"
-    return 0
+  local failed=0
+
+  # The zsh sources (grove, build.sh) cannot be linted by shellcheck — it is a bash/sh
+  # linter and cannot parse zsh globs/parameter flags (e.g. *.git(N), ${(k)arr}). Parse-check
+  # them with `zsh -n` instead; shellcheck is reserved for the genuine bash scripts below.
+  if command -v zsh >/dev/null 2>&1; then
+    info "Parse-checking zsh sources (zsh -n)..."
+    local zfile
+    for zfile in "$SCRIPT_DIR/grove" "$SCRIPT_DIR/build.sh"; do
+      [[ -f "$zfile" ]] || continue
+      if zsh -n "$zfile" 2>&1; then
+        echo -e "  ${GREEN}✔${NC} ${zfile##*/}"
+      else
+        echo -e "  ${RED}✖${NC} ${zfile##*/}"
+        failed=1
+      fi
+    done
   fi
 
-  info "Running shellcheck..."
-  local files=("$SCRIPT_DIR/grove" "$SCRIPT_DIR/run-tests.sh" "$SCRIPT_DIR/install.sh")
+  if ! check_shellcheck; then
+    warn "shellcheck NOT INSTALLED - bash static analysis SKIPPED (not run)"
+    echo "  Install it (recommended dev dependency): brew install shellcheck"
+    # A failed zsh parse-check is still a hard failure; otherwise report 'skipped'
+    [[ $failed -eq 0 ]] && return 2 || return 1
+  fi
+
+  info "Running shellcheck on bash scripts..."
+  local files=(
+    "$SCRIPT_DIR/run-tests.sh"
+    "$SCRIPT_DIR/install.sh"
+    "$SCRIPT_DIR/uninstall.sh"
+    "$SCRIPT_DIR/migrate-from-wt.sh"
+  )
 
   # Add hook examples if they exist
   if [[ -d "$SCRIPT_DIR/examples/hooks" ]]; then
@@ -53,22 +83,22 @@ run_shellcheck() {
     done < <(find "$SCRIPT_DIR/examples/hooks" -type f -name "*.sh" -print0 2>/dev/null)
   fi
 
-  local failed=0
+  local file
   for file in "${files[@]}"; do
     if [[ -f "$file" ]]; then
       if shellcheck "$file" 2>&1; then
-        echo -e "  ${GREEN}✔${NC} $file"
+        echo -e "  ${GREEN}✔${NC} ${file##*/}"
       else
-        echo -e "  ${RED}✖${NC} $file"
+        echo -e "  ${RED}✖${NC} ${file##*/}"
         failed=1
       fi
     fi
   done
 
   if [[ $failed -eq 0 ]]; then
-    ok "shellcheck passed"
+    ok "Static analysis passed"
   else
-    error "shellcheck found issues"
+    error "Static analysis found issues"
     return 1
   fi
 }
@@ -108,7 +138,13 @@ run_tests() {
 
   if [[ -z "$test_target" ]]; then
     # Run all tests (lint + unit + integration)
-    run_shellcheck || true
+    local lint_rc=0
+    run_shellcheck || lint_rc=$?
+    if (( lint_rc == 2 )); then
+      LINT_SKIPPED=1
+    elif (( lint_rc != 0 )); then
+      LINT_FAILED=1
+    fi
     echo ""
     info "Running all tests..."
     test_files=("$TESTS_DIR"/unit/*.bats "$TESTS_DIR"/integration/*.bats)
@@ -164,10 +200,16 @@ run_tests() {
   local exit_code=$?
 
   echo ""
-  if [[ $exit_code -eq 0 ]]; then
-    ok "All tests passed!"
+  if [[ $exit_code -eq 0 && $LINT_FAILED -eq 0 ]]; then
+    if [[ $LINT_SKIPPED -eq 1 ]]; then
+      ok "All tests passed (⚠ lint SKIPPED — install shellcheck to run static analysis)"
+    else
+      ok "All tests passed!"
+    fi
   else
-    error "Some tests failed"
+    [[ $exit_code -ne 0 ]] && error "Some tests failed"
+    [[ $LINT_FAILED -ne 0 ]] && error "shellcheck found issues"
+    [[ $exit_code -eq 0 ]] && exit_code=1
   fi
 
   return $exit_code

@@ -17,7 +17,7 @@ A command-line tool for managing git worktrees with optional Laravel Herd integr
 
 ```bash
 # 1) Clone the repo
-git clone https://github.com/dannyharding10/grove-cli.git ~/Projects/grove-cli
+git clone git@github.com:withoutfanfare/grove-cli.git ~/Projects/grove-cli
 
 # 2) Run the installer
 cd ~/Projects/grove-cli
@@ -389,6 +389,8 @@ For full setup, config format, and troubleshooting, see [docs/guides/services.md
 | `--delete-branch` | Delete branch when removing worktree |
 | `--drop-db` | Drop database when removing worktree |
 | `--no-backup` | Skip database backup when removing worktree |
+| `--no-cache` | Bypass the fetch cache (always fetch fresh) |
+| `--refresh` | Clear the fetch cache before running the command |
 | `--template=<name>` | Apply template when creating worktree |
 | `--all-repos` | Apply operation across all repositories |
 | `-v, --version` | Show version (add `--check` to check for updates) |

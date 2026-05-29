@@ -56,6 +56,7 @@ usage() {
   print -r -- "  ${C_GREEN}setup${C_RESET}                               First-time configuration wizard"
   print -r -- "  ${C_GREEN}doctor${C_RESET}                              Check system requirements"
   print -r -- "  ${C_GREEN}health${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Check repository health"
+  print -r -- "  ${C_GREEN}dashboard${C_RESET}                            Overview of all repositories and worktrees"
   print -r -- "  ${C_GREEN}branches${C_RESET} ${C_DIM}<repo>${C_RESET}                     List available branches"
   print -r -- "  ${C_GREEN}info${C_RESET}     ${C_DIM}[repo] [branch]${C_RESET}            Detailed worktree information"
   print -r -- "  ${C_GREEN}recent${C_RESET}   ${C_DIM}[count]${C_RESET}                    List recently accessed worktrees"
@@ -64,6 +65,7 @@ usage() {
   print -r -- "  ${C_GREEN}group${C_RESET}    ${C_DIM}[add|rm|show] <name> ...${C_RESET}   Manage repository groups"
   print -r -- "  ${C_GREEN}repair${C_RESET}   ${C_DIM}[repo]${C_RESET}                     Fix common issues"
   print -r -- "           ${C_DIM}--recovery${C_RESET}                   Attempt aggressive recovery"
+  print -r -- "  ${C_GREEN}restructure${C_RESET} ${C_DIM}<repo>${C_RESET}                  Migrate worktrees to nested layout (repo-worktrees/)"
   print -r -- "  ${C_GREEN}upgrade${C_RESET}                             Self-update grove to latest version"
   print -r -- "  ${C_GREEN}report${C_RESET}   ${C_DIM}<repo> [--output <file>]${C_RESET}  Generate markdown status report"
   print -r -- "  ${C_GREEN}cleanup-herd${C_RESET}                        Remove orphaned Herd nginx configs"
@@ -155,6 +157,8 @@ usage() {
   print -r -- "  ${C_GREEN}post-pull${C_RESET}    Run after grove pull succeeds"
   print -r -- "  ${C_GREEN}post-sync${C_RESET}    Run after grove sync succeeds"
   print -r -- "  ${C_GREEN}post-switch${C_RESET}  Run after grove switch succeeds"
+  print -r -- "  ${C_GREEN}pre-move${C_RESET}     Run before worktree move/rename (can abort)"
+  print -r -- "  ${C_GREEN}post-move${C_RESET}    Run after worktree move/rename"
   print -r -- ""
   print -r -- "  ${C_DIM}Available environment variables in hooks:${C_RESET}"
   print -r -- "    GROVE_REPO       Repository name"
@@ -283,6 +287,7 @@ main() {
     cleanup-herd) cmd_cleanup_herd "$@" ;;
     unlock)       cmd_unlock "$@" ;;
     fresh)        cmd_fresh "$@" ;;
+    migrate)      cmd_migrate "$@" ;;
     restructure)  cmd_restructure "$@" ;;
     build-all)    cmd_build_all "$@" ;;
     exec-all)     cmd_exec_all "$@" ;;

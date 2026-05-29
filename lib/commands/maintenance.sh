@@ -436,9 +436,10 @@ _repair_repo() {
 
   # 2. Clean stale index locks
   info "Checking for stale index locks..."
+  # check_index_locks returns the lock count; guard with || so a non-zero count does not
+  # abort cmd_repair under set -e.
   local locks_cleaned=0
-  check_index_locks "$git_dir" "--auto-clean"
-  locks_cleaned=$?
+  check_index_locks "$git_dir" "--auto-clean" || locks_cleaned=$?
   if (( locks_cleaned > 0 )); then
     fixed=$((fixed + 1))
   else

@@ -1,5 +1,10 @@
 # Grove-CLI Implementation Plan
 
+> **Historical / archived.** A point-in-time review snapshot from 2026-02-08. Items marked
+> `[x]` are resolved (e.g. the `sed_inplace`/APP_URL crash — the `.env` rewrite now lives in
+> `_update_env_app_url` in `lib/commands/lifecycle.sh`). Kept for provenance, not as a
+> description of current behaviour.
+
 **Date**: 2026-02-08
 **Branch**: develop
 **Review scope**: ~8,800 lines across 22 source modules + tests
