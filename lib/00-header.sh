@@ -21,7 +21,7 @@ DB_HOST="${GROVE_DB_HOST:-127.0.0.1}"
 DB_USER="${GROVE_DB_USER:-root}"
 DB_PASSWORD="${GROVE_DB_PASSWORD:-}"
 DB_CREATE="${GROVE_DB_CREATE:-true}"
-DB_BACKUP_DIR="${GROVE_DB_BACKUP_DIR:-$HOME/Code/Project Support/Worktree/Database/Backup}"
+DB_BACKUP_DIR="${GROVE_DB_BACKUP_DIR:-$HOME/.grove/backups}"
 DB_BACKUP="${GROVE_DB_BACKUP:-true}"
 
 # Hooks directory (for custom post-add scripts, etc.)

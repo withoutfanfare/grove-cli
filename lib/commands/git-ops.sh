@@ -331,6 +331,11 @@ cmd_sync() {
       conflicts=true
     fi
 
+    # On any rebase failure, abort to restore the pre-sync state (don't leave the worktree mid-rebase)
+    if (( sync_exit_code != 0 )); then
+      GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase --abort 2>/dev/null || true
+    fi
+
     # Extract commit count from rebase output (e.g., "Rebasing (3/5)" or count applied commits)
     if [[ "$sync_output" =~ Successfully\ rebased\ and\ updated ]]; then
       # Count commits between base and HEAD after successful rebase
@@ -353,7 +358,11 @@ cmd_sync() {
 
   # Text output mode
   info "Rebasing ${C_MAGENTA}$branch${C_RESET} onto ${C_DIM}$base${C_RESET}..."
-  GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase "$base"
+  if ! GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase "$base"; then
+    # Abort to restore the pre-sync state rather than leaving the worktree mid-rebase
+    GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase --abort 2>/dev/null || true
+    error_exit "GIT_ERROR" "rebase onto '$base' hit conflicts - aborted and restored; resolve and retry manually" 4
+  fi
   ok "Sync complete"
 
   # Run post-sync hooks
@@ -460,37 +469,53 @@ cmd_prune() {
   fi
   [[ "$JSON_OUTPUT" != true ]] && [[ -n "$prune_output" ]] && print -r -- "$prune_output"
 
-  [[ "$JSON_OUTPUT" != true ]] && info "Looking for merged branches..."
+  # Determine the base branch to compare against: the repo's configured base, with
+  # sensible fallbacks. Avoids hardcoding origin/staging on main-based repos.
+  load_repo_config "$git_dir"
+  local base="$DEFAULT_BASE"
+  if ! git --git-dir="$git_dir" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+    if git --git-dir="$git_dir" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+      base="origin/main"
+    elif git --git-dir="$git_dir" rev-parse --verify --quiet origin/master >/dev/null 2>&1; then
+      base="origin/master"
+    fi
+  fi
 
-  # Get list of branches that have been merged to staging/main
-  # Get merged branches and trim whitespace using Zsh
-  local merged_raw; merged_raw="$(git --git-dir="$git_dir" branch --merged origin/staging 2>/dev/null | grep -v 'staging\|main\|master')" || merged_raw=""
+  [[ "$JSON_OUTPUT" != true ]] && info "Looking for branches merged into ${base}..."
+
+  # Get clean merged-branch names (no '* '/'+ ' markers), excluding protected branches
+  # by exact name (is_protected_branch), not a loose substring grep.
+  local merged_raw; merged_raw="$(git --git-dir="$git_dir" branch --merged "$base" --format='%(refname:short)' 2>/dev/null)" || merged_raw=""
   local merged=""
   local branch_line
   while IFS= read -r branch_line; do
     # Trim leading/trailing whitespace using Zsh parameter expansion
     branch_line="${branch_line#"${branch_line%%[![:space:]]*}"}"
     branch_line="${branch_line%"${branch_line##*[![:space:]]}"}"
-    [[ -n "$branch_line" ]] && merged+="${merged:+$'\n'}$branch_line"
+    [[ -n "$branch_line" ]] || continue
+    is_protected_branch "$branch_line" && continue
+    merged+="${merged:+$'\n'}$branch_line"
   done <<< "$merged_raw"
 
   # JSON output mode
   if [[ "$JSON_OUTPUT" == true ]]; then
     local merged_branches=()
     local branches_found=0 branches_deleted=0
+    local deleted
+    json_escape "$base"; local _je_base="$REPLY"
 
     if [[ -n "$merged" ]]; then
       while IFS= read -r b; do
         [[ -n "$b" ]] || continue
         branches_found=$((branches_found + 1))
-        local deleted=false
+        deleted=false
         if [[ "$FORCE" == true ]]; then
           if git --git-dir="$git_dir" branch -D "$b" >/dev/null 2>&1; then
             deleted=true
             branches_deleted=$((branches_deleted + 1))
           fi
         fi
-        json_escape "$b"; merged_branches+=("{\"name\":\"$REPLY\",\"deleted\":$deleted,\"reason\":\"merged to origin/staging\"}")
+        json_escape "$b"; merged_branches+=("{\"name\":\"$REPLY\",\"deleted\":$deleted,\"reason\":\"merged to $_je_base\"}")
       done <<< "$merged"
     fi
 
@@ -657,8 +682,8 @@ cmd_diff() {
   validate_git_ref "$base" "base ref"
 
   # Fetch to ensure we have latest base
-  info "Fetching latest..."
-  cached_fetch "$git_dir" --all --prune --quiet || warn "Fetch failed (continuing with local refs)"
+  [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
+  cached_fetch "$git_dir" --all --prune --quiet || { [[ "$JSON_OUTPUT" != true ]] && warn "Fetch failed (continuing with local refs)"; }
 
   # Check if base exists
   if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
@@ -668,6 +693,18 @@ cmd_diff() {
   # Get stats
   local commits; commits="$(git -C "$wt_path" rev-list --count "$base"..HEAD 2>/dev/null)" || commits="?"
   local files; files="$(git -C "$wt_path" diff --stat "$base"..HEAD 2>/dev/null | tail -1)" || files=""
+
+  # JSON output mode
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    local commits_num="$commits"
+    [[ "$commits_num" =~ ^[0-9]+$ ]] || commits_num=0
+    json_escape "$repo"; local _je_repo="$REPLY"
+    json_escape "$branch"; local _je_branch="$REPLY"
+    json_escape "$base"; local _je_base="$REPLY"
+    json_escape "$files"; local _je_files="$REPLY"
+    format_json "{\"repo\":\"$_je_repo\",\"branch\":\"$_je_branch\",\"base\":\"$_je_base\",\"commits\":$commits_num,\"summary\":\"$_je_files\"}"
+    return 0
+  fi
 
   print -r -- ""
   print -r -- "${C_BOLD}Diff: ${C_MAGENTA}$branch${C_RESET} ${C_DIM}vs${C_RESET} ${C_CYAN}$base${C_RESET}"
@@ -723,8 +760,8 @@ cmd_summary() {
   validate_git_ref "$base" "base ref"
 
   # Best-effort fetch for up-to-date comparison (non-fatal if offline)
-  info "Fetching latest..."
-  cached_fetch "$git_dir" --all --prune --quiet || warn "Fetch failed (continuing with local refs)"
+  [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
+  cached_fetch "$git_dir" --all --prune --quiet || { [[ "$JSON_OUTPUT" != true ]] && warn "Fetch failed (continuing with local refs)"; }
 
   if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
     error_exit "BRANCH_NOT_FOUND" "base branch '$base' not found, try: origin/main, origin/staging, or origin/master" 3

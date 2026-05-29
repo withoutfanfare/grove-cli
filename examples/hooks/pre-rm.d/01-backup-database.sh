@@ -61,7 +61,8 @@ fi
 
 # Build mysql command to check if database exists
 mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
-[[ -n "$DB_PASSWORD" ]] && mysql_cmd+=(-p"$DB_PASSWORD")
+# Use MYSQL_PWD env var instead of -p to keep the password out of 'ps' output
+[[ -n "$DB_PASSWORD" ]] && export MYSQL_PWD="$DB_PASSWORD"
 
 # Check if database exists
 if ! "${mysql_cmd[@]}" -e "USE \`${GROVE_DB_NAME}\`;" 2>/dev/null; then
@@ -79,7 +80,8 @@ backup_file="$backup_dir/${GROVE_DB_NAME}_${timestamp}.sql"
 
 # Build mysqldump command
 mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
-[[ -n "$DB_PASSWORD" ]] && mysqldump_cmd+=(-p"$DB_PASSWORD")
+# Use MYSQL_PWD env var instead of -p to keep the password out of 'ps' output
+[[ -n "$DB_PASSWORD" ]] && export MYSQL_PWD="$DB_PASSWORD"
 
 echo "  Backing up database ${GROVE_DB_NAME}..."
 if "${mysqldump_cmd[@]}" "$GROVE_DB_NAME" > "$backup_file" 2>/dev/null; then

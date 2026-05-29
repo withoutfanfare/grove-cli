@@ -8,7 +8,7 @@ If you’re brand new to worktrees, skim the “Golden Rule” section in `READM
 
 ```bash
 # 1) Install / update grove
-git clone https://github.com/dannyharding10/grove-cli.git ~/Projects/grove-cli
+git clone https://github.com/withoutfanfare/grove-cli.git ~/Projects/grove-cli
 cd ~/Projects/grove-cli
 ./install.sh
 

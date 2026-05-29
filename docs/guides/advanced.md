@@ -379,7 +379,7 @@ Checking for updates...
 
 Run 'grove upgrade' to update.
 
-Release notes: https://github.com/dannyharding10/grove-cli/releases
+Release notes: https://github.com/withoutfanfare/grove-cli/releases
 ```
 
 ### Upgrading

@@ -1,5 +1,12 @@
 #!/usr/bin/env zsh
 # 05-database.sh - Database and Herd operations
+#
+# NOTE ON THE DB MODEL: grove does NOT create/back-up/drop databases itself during the
+# worktree lifecycle. That work is delegated to user lifecycle hooks (see examples/hooks/
+# post-add.d/, pre-rm.d/, post-rm.d/), which receive GROVE_DB_NAME / GROVE_DROP_DB /
+# GROVE_NO_BACKUP from run_hooks. The create_database/backup_database/drop_database helpers
+# below are a safe, MYSQL_PWD-based reference implementation that hooks may call (or copy);
+# db_name_for() IS used directly (by health/info) to derive the canonical database name.
 
 # db_name_for — Generate MySQL-safe database name for a repo/branch pair (≤64 chars)
 db_name_for() {

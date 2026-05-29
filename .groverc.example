@@ -45,8 +45,8 @@ HERD_ROOT=$HOME/Herd
 
 # Where to store database backups
 # Backups are organised by repo name: $DB_BACKUP_DIR/<repo>/<db>_<timestamp>.sql
-# Default: $HOME/Code/Project Support/Worktree/Database/Backup
-# DB_BACKUP_DIR="$HOME/Code/Project Support/Worktree/Database/Backup"
+# Default: $HOME/.grove/backups
+# DB_BACKUP_DIR="$HOME/.grove/backups"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SAFETY SETTINGS
@@ -65,16 +65,26 @@ HERD_ROOT=$HOME/Herd
 # Default: ~/.grove/hooks
 # GROVE_HOOKS_DIR="$HOME/.grove/hooks"
 
-# Available hooks:
-#   post-add    Run after 'grove add' creates a worktree
+# Available hooks (each runs at the matching point in a worktree's lifecycle):
+#   pre-add      Run before 'grove add' creates a worktree (non-zero exit aborts)
+#   post-add     Run after 'grove add' creates a worktree
+#   pre-rm       Run before 'grove rm' removes a worktree (non-zero exit aborts)
+#   post-rm      Run after 'grove rm' removes a worktree
+#   post-pull    Run after 'grove pull' succeeds
+#   post-sync    Run after 'grove sync' succeeds
+#   post-switch  Run after 'grove switch' succeeds
+#   pre-move     Run before 'grove move' renames a worktree (non-zero exit aborts)
+#   post-move    Run after 'grove move' renames a worktree
 #
 # Create executable scripts in GROVE_HOOKS_DIR with the hook name.
 # The following environment variables are available in hooks:
-#   GROVE_REPO       Repository name
-#   GROVE_BRANCH     Branch name
-#   GROVE_PATH       Worktree path
-#   GROVE_URL        Application URL
-#   GROVE_DB_NAME    Database name
+#   GROVE_REPO        Repository name
+#   GROVE_BRANCH      Branch name
+#   GROVE_BRANCH_SLUG Filesystem-safe branch slug
+#   GROVE_PATH        Worktree path
+#   GROVE_URL         Application URL
+#   GROVE_DB_NAME     Database name
+#   GROVE_HOOK_NAME   The hook event name (e.g. post-add)
 #
 # Example ~/.grove/hooks/post-add:
 #   #!/bin/bash
