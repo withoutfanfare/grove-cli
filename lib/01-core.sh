@@ -60,6 +60,11 @@ _read_config_pairs() {
     fi
     value="${value%"${value##*[![:space:]]}"}"
 
+    # Expand $HOME and a leading ~ so path values like HERD_ROOT=$HOME/Herd or ~/Herd work
+    # (the parser does not source the file, so the shell never expands these itself).
+    value="${value//\$HOME/$HOME}"
+    [[ "$value" == "~" || "$value" == "~/"* ]] && value="${HOME}${value#\~}"
+
     # Pass to handler
     "$handler" "$key" "$value"
   done < "$file"

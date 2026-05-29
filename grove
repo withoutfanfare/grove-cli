@@ -21,7 +21,7 @@ DB_HOST="${GROVE_DB_HOST:-127.0.0.1}"
 DB_USER="${GROVE_DB_USER:-root}"
 DB_PASSWORD="${GROVE_DB_PASSWORD:-}"
 DB_CREATE="${GROVE_DB_CREATE:-true}"
-DB_BACKUP_DIR="${GROVE_DB_BACKUP_DIR:-$HOME/Code/Project Support/Worktree/Database/Backup}"
+DB_BACKUP_DIR="${GROVE_DB_BACKUP_DIR:-$HOME/.grove/backups}"
 DB_BACKUP="${GROVE_DB_BACKUP:-true}"
 
 # Hooks directory (for custom post-add scripts, etc.)
@@ -126,6 +126,11 @@ _read_config_pairs() {
       value="${value%%#*}"
     fi
     value="${value%"${value##*[![:space:]]}"}"
+
+    # Expand $HOME and a leading ~ so path values like HERD_ROOT=$HOME/Herd or ~/Herd work
+    # (the parser does not source the file, so the shell never expands these itself).
+    value="${value//\$HOME/$HOME}"
+    [[ "$value" == "~" || "$value" == "~/"* ]] && value="${HOME}${value#\~}"
 
     # Pass to handler
     "$handler" "$key" "$value"
@@ -609,13 +614,19 @@ validate_name() {
 }
 
 # validate_branch_pattern — Check branch name against BRANCH_PATTERN regex (if configured)
+#
+# SECURITY NOTE: BRANCH_PATTERN is a config-supplied value used UNQUOTED as a Zsh regex
+# below. It must be a trusted, repo-owner-controlled value (it is read from ~/.groverc,
+# $HERD_ROOT/.groveconfig, or a per-repo <bare>.git/.groveconfig). It cannot reach a
+# shell, but a malformed/hostile pattern can weaken branch validation or cause a ReDoS on
+# a shared HERD_ROOT. It is treated as a regex, not a literal.
 validate_branch_pattern() {
   local branch="$1"
 
   # Skip if no pattern configured
   [[ -z "${BRANCH_PATTERN:-}" ]] && return 0
 
-  # Check against pattern
+  # Check against pattern (BRANCH_PATTERN is a regex — see SECURITY NOTE above)
   if [[ ! "$branch" =~ $BRANCH_PATTERN ]]; then
     local suggestion=""
 
@@ -1169,13 +1180,17 @@ typeset -gA _GROVE_STATUS_CACHE
 GROVE_FETCH_CACHE_TTL="${GROVE_FETCH_CACHE_TTL:-30}"  # 30 seconds default
 GROVE_FETCH_CACHE_DIR="${TMPDIR:-/tmp}/grove-fetch-cache"
 
-# Get fetch cache file path for a repo
+# Get fetch cache file path for a repo + fetch-args combination
+# Keying on the args (not just the repo) prevents one fetch scope's cache from
+# satisfying a later fetch with different args.
 _fetch_cache_file() {
-  local git_dir="$1"
-  # Create hash of git dir path for unique cache file
+  local git_dir="$1"; shift
   local hash="${git_dir:t}"  # Use basename for simplicity
   hash="${hash//[^a-zA-Z0-9_-]/_}"
-  print -r -- "$GROVE_FETCH_CACHE_DIR/$hash"
+  # Sanitise the fetch args into a filename-safe suffix
+  local args_key="$*"
+  args_key="${args_key//[^a-zA-Z0-9]/_}"
+  print -r -- "$GROVE_FETCH_CACHE_DIR/${hash}${args_key:+__${args_key}}"
 }
 
 # Last computed fetch cache age (set by _fetch_cache_valid for reuse)
@@ -1209,10 +1224,11 @@ cached_fetch() {
   mkdir -p "$GROVE_FETCH_CACHE_DIR" 2>/dev/null
 
   local cache_file
-  cache_file="$(_fetch_cache_file "$git_dir")"
+  cache_file="$(_fetch_cache_file "$git_dir" "${fetch_args[@]}")"
 
   if _fetch_cache_valid "$cache_file"; then
-    dim "(using cached fetch, ${_FETCH_CACHE_AGE}s old)"
+    # Diagnostic only — never emit in JSON mode (would contaminate the data contract)
+    [[ "$JSON_OUTPUT" == true ]] || dim "(using cached fetch, ${_FETCH_CACHE_AGE}s old)"
     return 0
   fi
 
@@ -1229,7 +1245,7 @@ force_fetch() {
   shift
 
   local cache_file
-  cache_file="$(_fetch_cache_file "$git_dir")"
+  cache_file="$(_fetch_cache_file "$git_dir" "$@")"
   rm -f "$cache_file" 2>/dev/null
 
   git --git-dir="$git_dir" fetch "$@"
@@ -1512,7 +1528,7 @@ get_last_commit_age() {
     return 0
   fi
 
-  (( age_seconds = now - epoch_seconds ))
+  age_seconds=$(( now - epoch_seconds ))
 
   # Bounds check to prevent overflow (max ~68 years for safety)
   # If age exceeds 2^31 seconds (~68 years), cap it
@@ -1521,7 +1537,7 @@ get_last_commit_age() {
     return 0
   fi
 
-  (( age_days = age_seconds / 86400 ))
+  age_days=$(( age_seconds / 86400 ))
 
   # Additional sanity check on days (max 100 years)
   if (( age_days > 36500 )); then
@@ -1561,7 +1577,7 @@ get_commit_age_days() {
     return 0
   fi
 
-  (( age_seconds = now - epoch_seconds ))
+  age_seconds=$(( now - epoch_seconds ))
 
   # Bounds check to prevent overflow (max 100 years = 36500 days)
   local age_days=$(( age_seconds / 86400 ))
@@ -1703,6 +1719,13 @@ check_worktree_mismatches() {
 }
 
 # 05-database.sh - Database and Herd operations
+#
+# NOTE ON THE DB MODEL: grove does NOT create/back-up/drop databases itself during the
+# worktree lifecycle. That work is delegated to user lifecycle hooks (see examples/hooks/
+# post-add.d/, pre-rm.d/, post-rm.d/), which receive GROVE_DB_NAME / GROVE_DROP_DB /
+# GROVE_NO_BACKUP from run_hooks. The create_database/backup_database/drop_database helpers
+# below are a safe, MYSQL_PWD-based reference implementation that hooks may call (or copy);
+# db_name_for() IS used directly (by health/info) to derive the canonical database name.
 
 # db_name_for — Generate MySQL-safe database name for a repo/branch pair (≤64 chars)
 db_name_for() {
@@ -2243,6 +2266,15 @@ json_escape() {
   s="${s//$'\r'/\\r}"     # Carriage return
   s="${s//$'\f'/\\f}"     # Form feed
   s="${s//$'\b'/\\b}"     # Backspace
+  # Escape any remaining control characters (U+0001–U+001F) as \u00XX so the output is
+  # valid per RFC 8259. Fast-path guarded — the loop only runs when one is present (rare).
+  if [[ "$s" == *[$'\x01'-$'\x1f']* ]]; then
+    local i c
+    for i in {1..31}; do
+      c="${(#)i}"
+      [[ "$s" == *"$c"* ]] && s="${s//$c/$(printf '\\u%04x' $i)}"
+    done
+  fi
   REPLY="$s"
 }
 
@@ -2593,8 +2625,9 @@ interactive_add() {
   # Step 2: Base branch selection
   print -r -- "${C_BOLD}Step 2/5:${C_RESET} Select base branch"
 
-  # Fetch first
-  with_spinner "Fetching branches" git --git-dir="$git_dir" fetch --all --prune --quiet
+  # Fetch first (non-fatal: a failed fetch shouldn't abort the wizard — local refs still work)
+  with_spinner "Fetching branches" git --git-dir="$git_dir" fetch --all --prune --quiet \
+    || warn "Fetch failed - continuing with local branch list"
 
   # Get remote branches for selection
   local branches; branches="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null | grep -v HEAD)"
@@ -2961,8 +2994,9 @@ check_index_locks() {
         dim "  Removed stale lock: ${lock_file##*/worktrees/}"
       else
         warn "Stale lock found: ${lock_file##*/worktrees/}"
-        locks_found=$((locks_found + 1))
       fi
+      # Count every stale lock (found or auto-cleaned) so callers report it accurately
+      locks_found=$((locks_found + 1))
     fi
   done
 
@@ -3440,6 +3474,34 @@ cmd_share_deps_clean() {
 
 # lifecycle.sh - Worktree creation and removal commands
 
+# _update_env_app_url — Rewrite ONLY the APP_URL= line in a .env file, preserving every
+# other line. Uses a line-anchored loop (NOT a whole-file glob, which would greedily match
+# across newlines and delete everything after APP_URL=). Writes via a temp file.
+# Args: $1 = path to .env file, $2 = new URL. Returns 0 if APP_URL was found and updated.
+_update_env_app_url() {
+  local env_file="$1" new_url="$2"
+  [[ -f "$env_file" ]] || return 1
+
+  local line found=false
+  local tmp="${env_file}.grove.tmp"
+  : > "$tmp" || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == APP_URL=* ]]; then
+      print -r -- "APP_URL=$new_url" >> "$tmp"
+      found=true
+    else
+      print -r -- "$line" >> "$tmp"
+    fi
+  done < "$env_file"
+
+  if [[ "$found" == true ]]; then
+    mv "$tmp" "$env_file"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 # cmd_add — Create a new worktree for a branch, optionally from a base ref
 cmd_add() {
   local repo="${1:-}"; local branch="${2:-}"; local base_arg="${3:-}"; local base="$base_arg"
@@ -3806,8 +3868,9 @@ cmd_move() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  # Validate new name using shared validation (checks empty, path traversal, leading dash)
-  validate_identifier_common "$new_name" "directory name"
+  # Validate new name with the full whitelist (charset, leading/trailing dots, traversal,
+  # flag injection) — consistent with repo/branch validation elsewhere.
+  validate_name "$new_name" "directory name"
   # Additional check: directory names must not contain slashes
   if [[ "$new_name" == */* ]]; then
     error_exit "INVALID_INPUT" "invalid directory name '$new_name', slashes not allowed" 2
@@ -3853,23 +3916,22 @@ cmd_move() {
     error_exit "HOOK_FAILED" "pre-move hook failed, aborting" 5
   fi
 
-  # Unsecure old site if it was secured
-  if [[ "$was_secured" == true ]]; then
-    info "Unsecuring old site ${C_CYAN}${old_site_name}.test${C_RESET}"
-    herd unsecure "$old_site_name" >/dev/null 2>&1 || true
-  fi
-
-  # Clean up old Herd nginx configs and certificates
-  if command -v herd >/dev/null 2>&1; then
-    cleanup_herd_site "$old_site_name"
-  fi
-
-  # Move the worktree
+  # Move the worktree FIRST — before tearing down the old Herd site — so that a move
+  # failure leaves the old site intact rather than unsecured with no worktree to serve.
   info "Moving worktree..."
   if [[ "$FORCE" == true ]]; then
     git --git-dir="$git_dir" worktree move --force "$wt_path" "$new_wt_path"
   else
     git --git-dir="$git_dir" worktree move "$wt_path" "$new_wt_path"
+  fi
+
+  # Move succeeded — now retire the old Herd site (unsecure + clean nginx/certificates)
+  if [[ "$was_secured" == true ]]; then
+    info "Unsecuring old site ${C_CYAN}${old_site_name}.test${C_RESET}"
+    herd unsecure "$old_site_name" >/dev/null 2>&1 || true
+  fi
+  if command -v herd >/dev/null 2>&1; then
+    cleanup_herd_site "$old_site_name"
   fi
 
   # Re-secure new site if old was secured
@@ -3888,16 +3950,9 @@ cmd_move() {
     new_url="https://${GROVE_URL_SUBDOMAIN}.${new_site_name}.test"
   fi
 
-  # Update APP_URL in .env if it exists
-  local env_file="$new_wt_path/.env"
-  if [[ -f "$env_file" ]]; then
-    local content
-    content="$(<"$env_file")"
-    if [[ "$content" == *APP_URL=* ]]; then
-      content="${content/APP_URL=*/APP_URL=$new_url}"
-      print -r -- "$content" > "$env_file"
-      dim "  Updated APP_URL in .env"
-    fi
+  # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
+  if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
+    dim "  Updated APP_URL in .env"
   fi
 
   # Run post-move hooks (with new path, URL, and db_name)
@@ -4097,6 +4152,12 @@ cmd_restructure() {
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
+  # Confirm before a bulk, multi-worktree operation that moves directories and rewrites
+  # each worktree's APP_URL in .env (gated by --force / non-interactive fails safe).
+  if ! confirm "Restructure all old-layout worktrees for '$repo'? This moves directories and updates APP_URL in each .env."; then
+    die "Restructure aborted"
+  fi
+
   # Create the new worktrees container if it doesn't exist
   local new_container="$HERD_ROOT/${repo}-worktrees"
   if [[ ! -d "$new_container" ]]; then
@@ -4109,7 +4170,7 @@ cmd_restructure() {
 
   local wt_path="" branch=""
   local -i migrated=0 skipped=0
-  local line=""
+  local line="" move_err="" new_site_name=""
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
       if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git ]]; then
@@ -4124,7 +4185,7 @@ cmd_restructure() {
           skipped+=1
         # Migrate if in old structure (at HERD_ROOT level with repo-- prefix)
         elif [[ "$parent" == "$HERD_ROOT" && "$folder" == "${repo}--"* ]]; then
-          local new_site_name; new_site_name="$(site_name_for "$repo" "$branch")"
+          new_site_name="$(site_name_for "$repo" "$branch")"
           local new_path="$new_container/$new_site_name"
 
           if [[ -d "$new_path" ]]; then
@@ -4134,8 +4195,8 @@ cmd_restructure() {
             dim "  From: $wt_path"
             dim "  To:   $new_path"
 
-            # Use git worktree move
-            if git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>/dev/null; then
+            # Use git worktree move (capture stderr so failures are surfaced, not hidden)
+            if move_err="$(git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>&1)"; then
               ok "  Migrated successfully"
 
               # Update Herd site (unsecure old, secure new)
@@ -4144,23 +4205,17 @@ cmd_restructure() {
                 herd secure "$new_site_name" 2>/dev/null || true
                 dim "  Updated Herd SSL for $new_site_name"
 
-                # Update APP_URL in .env if it exists
-                local env_file="$new_path/.env"
-                if [[ -f "$env_file" ]]; then
-                  local new_url="https://${new_site_name}.test"
-                  local content
-                  content="$(<"$env_file")"
-                  if [[ "$content" == *APP_URL=* ]]; then
-                    content="${content/APP_URL=*/APP_URL=$new_url}"
-                    print -r -- "$content" > "$env_file"
-                  fi
+                # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
+                local new_url="https://${new_site_name}.test"
+                if _update_env_app_url "$new_path/.env" "$new_url"; then
                   dim "  Updated APP_URL in .env"
                 fi
               fi
 
               migrated+=1
             else
-              warn "  Failed to migrate (try manually: git worktree move)"
+              warn "  Failed to migrate: ${move_err:-unknown error}"
+              dim "  Try manually: git --git-dir=\"$git_dir\" worktree move \"$wt_path\" \"$new_path\""
             fi
           fi
         else
@@ -4181,13 +4236,15 @@ cmd_restructure() {
     local folder="${wt_path:t}"
     local parent="${wt_path:h}"
     if [[ "$parent" == "$HERD_ROOT" && "$folder" == "${repo}--"* ]]; then
-      local new_site_name; new_site_name="$(site_name_for "$repo" "$branch")"
+      new_site_name="$(site_name_for "$repo" "$branch")"
       local new_path="$new_container/$new_site_name"
       if [[ ! -d "$new_path" ]]; then
         info "Migrating: ${C_MAGENTA}$branch${C_RESET}"
-        if git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>/dev/null; then
+        if move_err="$(git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>&1)"; then
           ok "  Migrated successfully"
           migrated+=1
+        else
+          warn "  Failed to migrate: ${move_err:-unknown error}"
         fi
       fi
     fi
@@ -4530,6 +4587,11 @@ cmd_sync() {
       conflicts=true
     fi
 
+    # On any rebase failure, abort to restore the pre-sync state (don't leave the worktree mid-rebase)
+    if (( sync_exit_code != 0 )); then
+      GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase --abort 2>/dev/null || true
+    fi
+
     # Extract commit count from rebase output (e.g., "Rebasing (3/5)" or count applied commits)
     if [[ "$sync_output" =~ Successfully\ rebased\ and\ updated ]]; then
       # Count commits between base and HEAD after successful rebase
@@ -4552,7 +4614,11 @@ cmd_sync() {
 
   # Text output mode
   info "Rebasing ${C_MAGENTA}$branch${C_RESET} onto ${C_DIM}$base${C_RESET}..."
-  GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase "$base"
+  if ! GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase "$base"; then
+    # Abort to restore the pre-sync state rather than leaving the worktree mid-rebase
+    GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase --abort 2>/dev/null || true
+    error_exit "GIT_ERROR" "rebase onto '$base' hit conflicts - aborted and restored; resolve and retry manually" 4
+  fi
   ok "Sync complete"
 
   # Run post-sync hooks
@@ -4659,37 +4725,53 @@ cmd_prune() {
   fi
   [[ "$JSON_OUTPUT" != true ]] && [[ -n "$prune_output" ]] && print -r -- "$prune_output"
 
-  [[ "$JSON_OUTPUT" != true ]] && info "Looking for merged branches..."
+  # Determine the base branch to compare against: the repo's configured base, with
+  # sensible fallbacks. Avoids hardcoding origin/staging on main-based repos.
+  load_repo_config "$git_dir"
+  local base="$DEFAULT_BASE"
+  if ! git --git-dir="$git_dir" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+    if git --git-dir="$git_dir" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+      base="origin/main"
+    elif git --git-dir="$git_dir" rev-parse --verify --quiet origin/master >/dev/null 2>&1; then
+      base="origin/master"
+    fi
+  fi
 
-  # Get list of branches that have been merged to staging/main
-  # Get merged branches and trim whitespace using Zsh
-  local merged_raw; merged_raw="$(git --git-dir="$git_dir" branch --merged origin/staging 2>/dev/null | grep -v 'staging\|main\|master')" || merged_raw=""
+  [[ "$JSON_OUTPUT" != true ]] && info "Looking for branches merged into ${base}..."
+
+  # Get clean merged-branch names (no '* '/'+ ' markers), excluding protected branches
+  # by exact name (is_protected_branch), not a loose substring grep.
+  local merged_raw; merged_raw="$(git --git-dir="$git_dir" branch --merged "$base" --format='%(refname:short)' 2>/dev/null)" || merged_raw=""
   local merged=""
   local branch_line
   while IFS= read -r branch_line; do
     # Trim leading/trailing whitespace using Zsh parameter expansion
     branch_line="${branch_line#"${branch_line%%[![:space:]]*}"}"
     branch_line="${branch_line%"${branch_line##*[![:space:]]}"}"
-    [[ -n "$branch_line" ]] && merged+="${merged:+$'\n'}$branch_line"
+    [[ -n "$branch_line" ]] || continue
+    is_protected_branch "$branch_line" && continue
+    merged+="${merged:+$'\n'}$branch_line"
   done <<< "$merged_raw"
 
   # JSON output mode
   if [[ "$JSON_OUTPUT" == true ]]; then
     local merged_branches=()
     local branches_found=0 branches_deleted=0
+    local deleted
+    json_escape "$base"; local _je_base="$REPLY"
 
     if [[ -n "$merged" ]]; then
       while IFS= read -r b; do
         [[ -n "$b" ]] || continue
         branches_found=$((branches_found + 1))
-        local deleted=false
+        deleted=false
         if [[ "$FORCE" == true ]]; then
           if git --git-dir="$git_dir" branch -D "$b" >/dev/null 2>&1; then
             deleted=true
             branches_deleted=$((branches_deleted + 1))
           fi
         fi
-        json_escape "$b"; merged_branches+=("{\"name\":\"$REPLY\",\"deleted\":$deleted,\"reason\":\"merged to origin/staging\"}")
+        json_escape "$b"; merged_branches+=("{\"name\":\"$REPLY\",\"deleted\":$deleted,\"reason\":\"merged to $_je_base\"}")
       done <<< "$merged"
     fi
 
@@ -4856,8 +4938,8 @@ cmd_diff() {
   validate_git_ref "$base" "base ref"
 
   # Fetch to ensure we have latest base
-  info "Fetching latest..."
-  cached_fetch "$git_dir" --all --prune --quiet || warn "Fetch failed (continuing with local refs)"
+  [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
+  cached_fetch "$git_dir" --all --prune --quiet || { [[ "$JSON_OUTPUT" != true ]] && warn "Fetch failed (continuing with local refs)"; }
 
   # Check if base exists
   if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
@@ -4867,6 +4949,18 @@ cmd_diff() {
   # Get stats
   local commits; commits="$(git -C "$wt_path" rev-list --count "$base"..HEAD 2>/dev/null)" || commits="?"
   local files; files="$(git -C "$wt_path" diff --stat "$base"..HEAD 2>/dev/null | tail -1)" || files=""
+
+  # JSON output mode
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    local commits_num="$commits"
+    [[ "$commits_num" =~ ^[0-9]+$ ]] || commits_num=0
+    json_escape "$repo"; local _je_repo="$REPLY"
+    json_escape "$branch"; local _je_branch="$REPLY"
+    json_escape "$base"; local _je_base="$REPLY"
+    json_escape "$files"; local _je_files="$REPLY"
+    format_json "{\"repo\":\"$_je_repo\",\"branch\":\"$_je_branch\",\"base\":\"$_je_base\",\"commits\":$commits_num,\"summary\":\"$_je_files\"}"
+    return 0
+  fi
 
   print -r -- ""
   print -r -- "${C_BOLD}Diff: ${C_MAGENTA}$branch${C_RESET} ${C_DIM}vs${C_RESET} ${C_CYAN}$base${C_RESET}"
@@ -4922,8 +5016,8 @@ cmd_summary() {
   validate_git_ref "$base" "base ref"
 
   # Best-effort fetch for up-to-date comparison (non-fatal if offline)
-  info "Fetching latest..."
-  cached_fetch "$git_dir" --all --prune --quiet || warn "Fetch failed (continuing with local refs)"
+  [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
+  cached_fetch "$git_dir" --all --prune --quiet || { [[ "$JSON_OUTPUT" != true ]] && warn "Fetch failed (continuing with local refs)"; }
 
   if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
     error_exit "BRANCH_NOT_FOUND" "base branch '$base' not found, try: origin/main, origin/staging, or origin/master" 3
@@ -5768,8 +5862,11 @@ cmd_status() {
   git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
-  info "Fetching latest..."
-  cached_fetch "$git_dir" --all --prune --quiet
+  [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
+  if ! cached_fetch "$git_dir" --all --prune --quiet; then
+    # Non-fatal: a failed fetch (e.g. offline) should still show local state
+    [[ "$JSON_OUTPUT" == true ]] || warn "Could not fetch latest - showing local state"
+  fi
 
   # Clear any stale cache and collect fresh statuses
   clear_git_cache
@@ -5778,7 +5875,11 @@ cmd_status() {
   # Collect worktrees using shared helper
   local status_worktrees=()
   collect_worktrees "$git_dir" status_worktrees
-  (( ${#status_worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
+  if (( ${#status_worktrees[@]} == 0 )); then
+    [[ "$JSON_OUTPUT" == true ]] && { format_json "[]"; return 0; }
+    dim "No worktrees found."
+    return 0
+  fi
 
   # JSON output mode
   local json_items=()
@@ -6583,19 +6684,20 @@ cmd_health() {
   # Check for orphaned databases
   print -r -- "${C_BOLD}Database Health${C_RESET}"
   if command -v mysql >/dev/null 2>&1; then
+    # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
     local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
-    [[ -n "$DB_PASSWORD" ]] && mysql_cmd+=(-p"$DB_PASSWORD")
 
-    local dbs; dbs="$("${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
+    local dbs; dbs="$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
 
     if [[ -n "$dbs" ]]; then
       local orphaned=0
+      local db found wt_db hw_branch
       while read -r db; do
-        local found=false
+        found=false
         # Reuse already-collected worktrees instead of calling git worktree list per database
         for wt_entry in "${health_worktrees[@]}"; do
-          local hw_branch="${wt_entry##*|}"
-          local wt_db; wt_db="$(db_name_for "$repo" "$hw_branch")"
+          hw_branch="${wt_entry##*|}"
+          wt_db="$(db_name_for "$repo" "$hw_branch")"
           [[ "$wt_db" == "$db" ]] && found=true && break
         done
 
@@ -6641,9 +6743,10 @@ cmd_health() {
 
   # Check for branch/directory mismatches
   print -r -- "${C_BOLD}Branch Consistency${C_RESET}"
+  # check_worktree_mismatches returns the mismatch count; guard with || so a non-zero
+  # count does not abort the command under set -e (which would skip the Summary).
   local mismatches=0
-  check_worktree_mismatches "$git_dir"
-  mismatches=$?
+  check_worktree_mismatches "$git_dir" || mismatches=$?
   if [[ $mismatches -eq 0 ]]; then
     ok "All worktrees match their expected branches"
   else
@@ -7250,9 +7353,10 @@ _repair_repo() {
 
   # 2. Clean stale index locks
   info "Checking for stale index locks..."
+  # check_index_locks returns the lock count; guard with || so a non-zero count does not
+  # abort cmd_repair under set -e.
   local locks_cleaned=0
-  check_index_locks "$git_dir" "--auto-clean"
-  locks_cleaned=$?
+  check_index_locks "$git_dir" "--auto-clean" || locks_cleaned=$?
   if (( locks_cleaned > 0 )); then
     fixed=$((fixed + 1))
   else
@@ -7859,9 +7963,9 @@ cmd_info() {
   # Database check
   local db_exists=false
   if command -v mysql >/dev/null 2>&1; then
+    # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
     local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
-    [[ -n "$DB_PASSWORD" ]] && mysql_cmd+=(-p"$DB_PASSWORD")
-    if "${mysql_cmd[@]}" -e "SELECT 1 FROM information_schema.schemata WHERE schema_name='$db_name'" 2>/dev/null | grep -q 1; then
+    if MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1 FROM information_schema.schemata WHERE schema_name='$db_name'" 2>/dev/null | grep -q 1; then
       db_exists=true
     fi
   fi
@@ -9178,7 +9282,7 @@ svc_show_app_status() {
   # Supervisor process (skip if services=none)
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
     local sup_status
-    sup_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}" | head -1)" || true
+    sup_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1)" || true
     if [[ -n "$sup_status" ]]; then
       if print -r -- "$sup_status" | grep -q "RUNNING"; then
         ok "Supervisor: RUNNING"
@@ -9263,8 +9367,12 @@ svc_start_app() {
 
   # Start supervisor process (if app has services)
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
-    supervisorctl start "$process" 2>/dev/null || true
-    ok "Started supervisor process"
+    local sup_out
+    if sup_out="$(supervisorctl start "$process" 2>&1)"; then
+      ok "Started supervisor process"
+    else
+      warn "Could not start supervisor process '$process': ${sup_out:-unknown error}"
+    fi
   fi
 
   # Load scheduler LaunchAgent
@@ -9311,8 +9419,12 @@ svc_stop_app() {
 
   # Stop supervisor process
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
-    supervisorctl stop "$process" 2>/dev/null || true
-    ok "Stopped supervisor process"
+    local sup_out
+    if sup_out="$(supervisorctl stop "$process" 2>&1)"; then
+      ok "Stopped supervisor process"
+    else
+      warn "Could not stop supervisor process '$process': ${sup_out:-unknown error}"
+    fi
   fi
 
   # Unload scheduler LaunchAgent
@@ -9351,8 +9463,12 @@ svc_restart_app() {
   info "Restarting ${(C)app}..."
 
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
-    supervisorctl restart "$process" 2>/dev/null || true
-    ok "Restarted supervisor process"
+    local sup_out
+    if sup_out="$(supervisorctl restart "$process" 2>&1)"; then
+      ok "Restarted supervisor process"
+    else
+      warn "Could not restart supervisor process '$process': ${sup_out:-unknown error}"
+    fi
   fi
 
   print -r -- ""
@@ -9367,30 +9483,33 @@ cmd_services_restart() {
     return 0
   fi
 
-  # If app isn't registered, exit silently (idempotent for hooks)
-  if ! (( ${+SVC_APPS[$app]} )); then
-    return 0
-  fi
-
+  # Handle 'all' before the registration guard ('all' is a sentinel, never a registered key)
   if [[ "$app" == "all" ]]; then
     local app_name
     for app_name in $(svc_get_app_list); do
       svc_restart_app "$app_name"
     done
-  else
-    svc_restart_app "$app"
-  fi
-}
-
-cmd_services_apps() {
-  if ! svc_has_apps; then
-    dim "No apps registered. Run 'grove services add <name>' to get started."
     return 0
   fi
 
+  # If a specific app isn't registered, exit silently (idempotent for hooks)
+  if ! (( ${+SVC_APPS[$app]} )); then
+    return 0
+  fi
+
+  svc_restart_app "$app"
+}
+
+cmd_services_apps() {
+  # JSON mode must emit valid JSON even when no apps are registered (returns [])
   if [[ "$JSON_OUTPUT" == true ]]; then
     cmd_services_apps_json
     return $?
+  fi
+
+  if ! svc_has_apps; then
+    dim "No apps registered. Run 'grove services add <name>' to get started."
+    return 0
   fi
 
   print -r -- ""
@@ -9414,21 +9533,25 @@ cmd_services_apps() {
 }
 
 cmd_services_apps_json() {
+  # json_escape sets $REPLY (it does not print) — declare vars outside the loop and
+  # read $REPLY after each call, matching the pattern used by every other JSON command.
   local first=true
+  local app_name system_name services process domain
+  local je_name je_system je_services je_process je_domain
   print -r -- "["
-  local app_name
   for app_name in $(svc_get_app_list); do
     [[ "$first" == true ]] && first=false || print -r -- ","
-    local system_name="${SVC_SYSTEM_NAMES[$app_name]}"
-    local services="${SVC_SERVICES[$app_name]}"
-    local process="${SVC_SUPERVISOR_PROCESSES[$app_name]}"
-    local domain="${SVC_DOMAINS[$app_name]}"
+    system_name="${SVC_SYSTEM_NAMES[$app_name]}"
+    services="${SVC_SERVICES[$app_name]}"
+    process="${SVC_SUPERVISOR_PROCESSES[$app_name]}"
+    domain="${SVC_DOMAINS[$app_name]}"
+    json_escape "$app_name";     je_name="$REPLY"
+    json_escape "$system_name";  je_system="$REPLY"
+    json_escape "$services";     je_services="$REPLY"
+    json_escape "$process";      je_process="$REPLY"
+    json_escape "$domain";       je_domain="$REPLY"
     printf '  {"name":"%s","system_name":"%s","services":"%s","supervisor_process":"%s","domain":"%s"}' \
-      "$(json_escape "$app_name")" \
-      "$(json_escape "$system_name")" \
-      "$(json_escape "$services")" \
-      "$(json_escape "$process")" \
-      "$(json_escape "$domain")"
+      "$je_name" "$je_system" "$je_services" "$je_process" "$je_domain"
   done
   print -r -- ""
   print -r -- "]"
@@ -9458,8 +9581,9 @@ cmd_services_add() {
     die "Usage: grove services add <name> [--system-name=<name>] [--services=horizon|horizon:reverb|none] [--domain=<domain>]"
   fi
 
-  # Validate name
-  validate_repo_name "$name" 2>/dev/null || true
+  # Validate name (enforces the project whitelist: no path traversal, flag injection,
+  # or shell/pipe metacharacters that would corrupt the pipe-delimited apps.conf)
+  validate_name "$name" "repository"
 
   # Defaults
   [[ -z "$system_name" ]] && system_name="$name"
@@ -9605,7 +9729,7 @@ cmd_services_doctor() {
     ok "Installed"
   else
     warn "Not installed"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   # Check PHP
@@ -9614,7 +9738,7 @@ cmd_services_doctor() {
     ok "$(php -v | head -1)"
   else
     warn "Not installed"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   # Check Redis
@@ -9623,7 +9747,7 @@ cmd_services_doctor() {
     ok "Running"
   else
     warn "Not running (fix: brew services start redis)"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   # Check Supervisor
@@ -9632,7 +9756,7 @@ cmd_services_doctor() {
     ok "Running"
   else
     warn "Not running (fix: brew services start supervisor)"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   # Check supervisor.d directory
@@ -9643,7 +9767,7 @@ cmd_services_doctor() {
     ok "$config_count configs in $GROVE_SUPERVISOR_D"
   else
     warn "Directory missing: $GROVE_SUPERVISOR_D"
-    ((issues++))
+    issues=$((issues + 1))
   fi
 
   if svc_has_apps; then
@@ -9661,11 +9785,11 @@ cmd_services_doctor() {
           ok "${system_name}-current -> ${target:t}"
         else
           warn "${system_name}-current -> $target (broken)"
-          ((issues++))
+          issues=$((issues + 1))
         fi
       else
         warn "${system_name}-current missing"
-        ((issues++))
+        issues=$((issues + 1))
       fi
     done
 
@@ -9678,7 +9802,7 @@ cmd_services_doctor() {
       local process
       process="$(svc_get_supervisor_process "$app")"
       local status
-      status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}" | head -1 || true)"
+      status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
       if [[ -n "$status" ]]; then
         if print -r -- "$status" | grep -q "RUNNING"; then
           ok "$app: RUNNING"
@@ -9704,6 +9828,30 @@ cmd_services_doctor() {
 
 # --- Main Entry Point ---
 
+svc_show_help() {
+  print -r -- ""
+  print -r -- "${C_BOLD}Grove Service Management${C_RESET}"
+  print -r -- ""
+  print -r -- "  Manage Supervisor, Horizon, Reverb, and scheduler for Laravel apps."
+  print -r -- ""
+  print -r -- "  ${C_GREEN}Get started:${C_RESET}"
+  print -r -- "    grove services add <name>         Register an app"
+  print -r -- "    grove services remove <name>      Remove an app from the registry"
+  print -r -- "    grove services doctor             Check service dependencies"
+  print -r -- ""
+  print -r -- "  ${C_GREEN}Daily use:${C_RESET}"
+  print -r -- "    grove services status             Show all app status"
+  print -r -- "    grove services start <app|all>    Start services"
+  print -r -- "    grove services stop <app|all>     Stop services"
+  print -r -- "    grove services restart <app|all>  Restart services"
+  print -r -- ""
+  print -r -- "  ${C_GREEN}Utilities:${C_RESET}"
+  print -r -- "    grove services apps               List registered apps"
+  print -r -- "    grove services horizon <app>       Open Horizon dashboard"
+  print -r -- "    grove services logs <app> [type]   Tail service logs"
+  print -r -- ""
+}
+
 cmd_services() {
   # Lazy-load config only when services is actually invoked
   svc_load_config
@@ -9723,33 +9871,17 @@ cmd_services() {
     logs)     cmd_services_logs "$@" ;;
     doctor)   cmd_services_doctor "$@" ;;
     "")
+      # Bare `grove services`: show status if apps are registered, else the help text.
+      # (Note: bare `help`/`-h`/`--help` are caught by the global flag parser, which prints
+      # the main `grove --help` — that already lists every services subcommand incl. remove.)
       if svc_has_apps; then
         cmd_services_status "$@"
       else
-        print -r -- ""
-        print -r -- "${C_BOLD}Grove Service Management${C_RESET}"
-        print -r -- ""
-        print -r -- "  Manage Supervisor, Horizon, Reverb, and scheduler for Laravel apps."
-        print -r -- ""
-        print -r -- "  ${C_GREEN}Get started:${C_RESET}"
-        print -r -- "    grove services add <name>        Register an app"
-        print -r -- "    grove services doctor             Check service dependencies"
-        print -r -- ""
-        print -r -- "  ${C_GREEN}Daily use:${C_RESET}"
-        print -r -- "    grove services status             Show all app status"
-        print -r -- "    grove services start <app|all>    Start services"
-        print -r -- "    grove services stop <app|all>     Stop services"
-        print -r -- "    grove services restart <app|all>  Restart services"
-        print -r -- ""
-        print -r -- "  ${C_GREEN}Utilities:${C_RESET}"
-        print -r -- "    grove services apps               List registered apps"
-        print -r -- "    grove services horizon <app>       Open Horizon dashboard"
-        print -r -- "    grove services logs <app> [type]   Tail service logs"
-        print -r -- ""
+        svc_show_help
       fi
       ;;
     *)
-      die "Unknown services command: $subcmd (try: grove services)"
+      die "Unknown services command: $subcmd (see 'grove --help' for the services subcommands)"
       ;;
   esac
 }
@@ -9811,6 +9943,7 @@ usage() {
   print -r -- "  ${C_GREEN}setup${C_RESET}                               First-time configuration wizard"
   print -r -- "  ${C_GREEN}doctor${C_RESET}                              Check system requirements"
   print -r -- "  ${C_GREEN}health${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Check repository health"
+  print -r -- "  ${C_GREEN}dashboard${C_RESET}                            Overview of all repositories and worktrees"
   print -r -- "  ${C_GREEN}branches${C_RESET} ${C_DIM}<repo>${C_RESET}                     List available branches"
   print -r -- "  ${C_GREEN}info${C_RESET}     ${C_DIM}[repo] [branch]${C_RESET}            Detailed worktree information"
   print -r -- "  ${C_GREEN}recent${C_RESET}   ${C_DIM}[count]${C_RESET}                    List recently accessed worktrees"
@@ -9819,6 +9952,7 @@ usage() {
   print -r -- "  ${C_GREEN}group${C_RESET}    ${C_DIM}[add|rm|show] <name> ...${C_RESET}   Manage repository groups"
   print -r -- "  ${C_GREEN}repair${C_RESET}   ${C_DIM}[repo]${C_RESET}                     Fix common issues"
   print -r -- "           ${C_DIM}--recovery${C_RESET}                   Attempt aggressive recovery"
+  print -r -- "  ${C_GREEN}restructure${C_RESET} ${C_DIM}<repo>${C_RESET}                  Migrate worktrees to nested layout (repo-worktrees/)"
   print -r -- "  ${C_GREEN}upgrade${C_RESET}                             Self-update grove to latest version"
   print -r -- "  ${C_GREEN}report${C_RESET}   ${C_DIM}<repo> [--output <file>]${C_RESET}  Generate markdown status report"
   print -r -- "  ${C_GREEN}cleanup-herd${C_RESET}                        Remove orphaned Herd nginx configs"
@@ -9910,6 +10044,8 @@ usage() {
   print -r -- "  ${C_GREEN}post-pull${C_RESET}    Run after grove pull succeeds"
   print -r -- "  ${C_GREEN}post-sync${C_RESET}    Run after grove sync succeeds"
   print -r -- "  ${C_GREEN}post-switch${C_RESET}  Run after grove switch succeeds"
+  print -r -- "  ${C_GREEN}pre-move${C_RESET}     Run before worktree move/rename (can abort)"
+  print -r -- "  ${C_GREEN}post-move${C_RESET}    Run after worktree move/rename"
   print -r -- ""
   print -r -- "  ${C_DIM}Available environment variables in hooks:${C_RESET}"
   print -r -- "    GROVE_REPO       Repository name"
@@ -10038,6 +10174,7 @@ main() {
     cleanup-herd) cmd_cleanup_herd "$@" ;;
     unlock)       cmd_unlock "$@" ;;
     fresh)        cmd_fresh "$@" ;;
+    migrate)      cmd_migrate "$@" ;;
     restructure)  cmd_restructure "$@" ;;
     build-all)    cmd_build_all "$@" ;;
     exec-all)     cmd_exec_all "$@" ;;

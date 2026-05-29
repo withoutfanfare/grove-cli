@@ -1,6 +1,34 @@
 #!/usr/bin/env zsh
 # lifecycle.sh - Worktree creation and removal commands
 
+# _update_env_app_url — Rewrite ONLY the APP_URL= line in a .env file, preserving every
+# other line. Uses a line-anchored loop (NOT a whole-file glob, which would greedily match
+# across newlines and delete everything after APP_URL=). Writes via a temp file.
+# Args: $1 = path to .env file, $2 = new URL. Returns 0 if APP_URL was found and updated.
+_update_env_app_url() {
+  local env_file="$1" new_url="$2"
+  [[ -f "$env_file" ]] || return 1
+
+  local line found=false
+  local tmp="${env_file}.grove.tmp"
+  : > "$tmp" || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == APP_URL=* ]]; then
+      print -r -- "APP_URL=$new_url" >> "$tmp"
+      found=true
+    else
+      print -r -- "$line" >> "$tmp"
+    fi
+  done < "$env_file"
+
+  if [[ "$found" == true ]]; then
+    mv "$tmp" "$env_file"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 # cmd_add — Create a new worktree for a branch, optionally from a base ref
 cmd_add() {
   local repo="${1:-}"; local branch="${2:-}"; local base_arg="${3:-}"; local base="$base_arg"
@@ -367,8 +395,9 @@ cmd_move() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  # Validate new name using shared validation (checks empty, path traversal, leading dash)
-  validate_identifier_common "$new_name" "directory name"
+  # Validate new name with the full whitelist (charset, leading/trailing dots, traversal,
+  # flag injection) — consistent with repo/branch validation elsewhere.
+  validate_name "$new_name" "directory name"
   # Additional check: directory names must not contain slashes
   if [[ "$new_name" == */* ]]; then
     error_exit "INVALID_INPUT" "invalid directory name '$new_name', slashes not allowed" 2
@@ -414,23 +443,22 @@ cmd_move() {
     error_exit "HOOK_FAILED" "pre-move hook failed, aborting" 5
   fi
 
-  # Unsecure old site if it was secured
-  if [[ "$was_secured" == true ]]; then
-    info "Unsecuring old site ${C_CYAN}${old_site_name}.test${C_RESET}"
-    herd unsecure "$old_site_name" >/dev/null 2>&1 || true
-  fi
-
-  # Clean up old Herd nginx configs and certificates
-  if command -v herd >/dev/null 2>&1; then
-    cleanup_herd_site "$old_site_name"
-  fi
-
-  # Move the worktree
+  # Move the worktree FIRST — before tearing down the old Herd site — so that a move
+  # failure leaves the old site intact rather than unsecured with no worktree to serve.
   info "Moving worktree..."
   if [[ "$FORCE" == true ]]; then
     git --git-dir="$git_dir" worktree move --force "$wt_path" "$new_wt_path"
   else
     git --git-dir="$git_dir" worktree move "$wt_path" "$new_wt_path"
+  fi
+
+  # Move succeeded — now retire the old Herd site (unsecure + clean nginx/certificates)
+  if [[ "$was_secured" == true ]]; then
+    info "Unsecuring old site ${C_CYAN}${old_site_name}.test${C_RESET}"
+    herd unsecure "$old_site_name" >/dev/null 2>&1 || true
+  fi
+  if command -v herd >/dev/null 2>&1; then
+    cleanup_herd_site "$old_site_name"
   fi
 
   # Re-secure new site if old was secured
@@ -449,16 +477,9 @@ cmd_move() {
     new_url="https://${GROVE_URL_SUBDOMAIN}.${new_site_name}.test"
   fi
 
-  # Update APP_URL in .env if it exists
-  local env_file="$new_wt_path/.env"
-  if [[ -f "$env_file" ]]; then
-    local content
-    content="$(<"$env_file")"
-    if [[ "$content" == *APP_URL=* ]]; then
-      content="${content/APP_URL=*/APP_URL=$new_url}"
-      print -r -- "$content" > "$env_file"
-      dim "  Updated APP_URL in .env"
-    fi
+  # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
+  if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
+    dim "  Updated APP_URL in .env"
   fi
 
   # Run post-move hooks (with new path, URL, and db_name)
@@ -658,6 +679,12 @@ cmd_restructure() {
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
+  # Confirm before a bulk, multi-worktree operation that moves directories and rewrites
+  # each worktree's APP_URL in .env (gated by --force / non-interactive fails safe).
+  if ! confirm "Restructure all old-layout worktrees for '$repo'? This moves directories and updates APP_URL in each .env."; then
+    die "Restructure aborted"
+  fi
+
   # Create the new worktrees container if it doesn't exist
   local new_container="$HERD_ROOT/${repo}-worktrees"
   if [[ ! -d "$new_container" ]]; then
@@ -670,7 +697,7 @@ cmd_restructure() {
 
   local wt_path="" branch=""
   local -i migrated=0 skipped=0
-  local line=""
+  local line="" move_err="" new_site_name=""
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
       if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git ]]; then
@@ -685,7 +712,7 @@ cmd_restructure() {
           skipped+=1
         # Migrate if in old structure (at HERD_ROOT level with repo-- prefix)
         elif [[ "$parent" == "$HERD_ROOT" && "$folder" == "${repo}--"* ]]; then
-          local new_site_name; new_site_name="$(site_name_for "$repo" "$branch")"
+          new_site_name="$(site_name_for "$repo" "$branch")"
           local new_path="$new_container/$new_site_name"
 
           if [[ -d "$new_path" ]]; then
@@ -695,8 +722,8 @@ cmd_restructure() {
             dim "  From: $wt_path"
             dim "  To:   $new_path"
 
-            # Use git worktree move
-            if git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>/dev/null; then
+            # Use git worktree move (capture stderr so failures are surfaced, not hidden)
+            if move_err="$(git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>&1)"; then
               ok "  Migrated successfully"
 
               # Update Herd site (unsecure old, secure new)
@@ -705,23 +732,17 @@ cmd_restructure() {
                 herd secure "$new_site_name" 2>/dev/null || true
                 dim "  Updated Herd SSL for $new_site_name"
 
-                # Update APP_URL in .env if it exists
-                local env_file="$new_path/.env"
-                if [[ -f "$env_file" ]]; then
-                  local new_url="https://${new_site_name}.test"
-                  local content
-                  content="$(<"$env_file")"
-                  if [[ "$content" == *APP_URL=* ]]; then
-                    content="${content/APP_URL=*/APP_URL=$new_url}"
-                    print -r -- "$content" > "$env_file"
-                  fi
+                # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
+                local new_url="https://${new_site_name}.test"
+                if _update_env_app_url "$new_path/.env" "$new_url"; then
                   dim "  Updated APP_URL in .env"
                 fi
               fi
 
               migrated+=1
             else
-              warn "  Failed to migrate (try manually: git worktree move)"
+              warn "  Failed to migrate: ${move_err:-unknown error}"
+              dim "  Try manually: git --git-dir=\"$git_dir\" worktree move \"$wt_path\" \"$new_path\""
             fi
           fi
         else
@@ -742,13 +763,15 @@ cmd_restructure() {
     local folder="${wt_path:t}"
     local parent="${wt_path:h}"
     if [[ "$parent" == "$HERD_ROOT" && "$folder" == "${repo}--"* ]]; then
-      local new_site_name; new_site_name="$(site_name_for "$repo" "$branch")"
+      new_site_name="$(site_name_for "$repo" "$branch")"
       local new_path="$new_container/$new_site_name"
       if [[ ! -d "$new_path" ]]; then
         info "Migrating: ${C_MAGENTA}$branch${C_RESET}"
-        if git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>/dev/null; then
+        if move_err="$(git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>&1)"; then
           ok "  Migrated successfully"
           migrated+=1
+        else
+          warn "  Failed to migrate: ${move_err:-unknown error}"
         fi
       fi
     fi

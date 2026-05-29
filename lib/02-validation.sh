@@ -88,13 +88,19 @@ validate_name() {
 }
 
 # validate_branch_pattern — Check branch name against BRANCH_PATTERN regex (if configured)
+#
+# SECURITY NOTE: BRANCH_PATTERN is a config-supplied value used UNQUOTED as a Zsh regex
+# below. It must be a trusted, repo-owner-controlled value (it is read from ~/.groverc,
+# $HERD_ROOT/.groveconfig, or a per-repo <bare>.git/.groveconfig). It cannot reach a
+# shell, but a malformed/hostile pattern can weaken branch validation or cause a ReDoS on
+# a shared HERD_ROOT. It is treated as a regex, not a literal.
 validate_branch_pattern() {
   local branch="$1"
 
   # Skip if no pattern configured
   [[ -z "${BRANCH_PATTERN:-}" ]] && return 0
 
-  # Check against pattern
+  # Check against pattern (BRANCH_PATTERN is a regex — see SECURITY NOTE above)
   if [[ ! "$branch" =~ $BRANCH_PATTERN ]]; then
     local suggestion=""
 

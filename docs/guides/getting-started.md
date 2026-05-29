@@ -39,7 +39,7 @@ brew install fzf jq mysql
 
 ```bash
 # Clone the repo
-git clone https://github.com/dannyharding10/grove-cli.git ~/Projects/grove-cli
+git clone https://github.com/withoutfanfare/grove-cli.git ~/Projects/grove-cli
 
 # Run the installer
 cd ~/Projects/grove-cli
@@ -76,7 +76,7 @@ Because these are symlinks, updating the repo updates the tool.
 
 ```bash
 # Clone the repo
-git clone https://github.com/dannyharding10/grove-cli.git ~/Projects/grove-cli
+git clone https://github.com/withoutfanfare/grove-cli.git ~/Projects/grove-cli
 
 # Symlink the script
 sudo ln -sf ~/Projects/grove-cli/grove /usr/local/bin/grove

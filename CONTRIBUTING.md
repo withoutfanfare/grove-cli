@@ -31,31 +31,41 @@ Be respectful and constructive. We're all here to make a useful tool.
 
 ## Development Setup
 
+> ⚠️ **`grove` is a generated file — never edit it directly.** It is compiled from the
+> modular sources in `lib/` by `./build.sh`. Any hand-edit to `grove` is overwritten on the
+> next build (and `grove upgrade` runs `./build.sh` too). **All real source lives in `lib/`.**
+
 ```bash
 # Clone your fork
 git clone https://github.com/YOUR_USERNAME/grove-cli.git
 cd grove-cli
 
+# Edit the SOURCE in lib/, then rebuild the grove artifact
+$EDITOR lib/commands/lifecycle.sh   # for example
+./build.sh                          # regenerates ./grove from lib/
+
 # Create a test symlink (don't overwrite your installed version)
 ln -s "$(pwd)/grove" /usr/local/bin/grove-dev
 
-# Test your changes
+# Test your changes (rebuild first if you changed anything in lib/)
+./build.sh
 grove-dev doctor
 grove-dev --help
 ```
 
 ## Testing Checklist
 
-Before submitting a PR, please test:
+Before submitting a PR, please:
 
-- [ ] `grove --version` shows correct version
+- [ ] Edit only files in `lib/` (and `tests/`, docs) — **never** the generated `grove`
+- [ ] `./build.sh` — regenerate `grove` (commit the rebuilt artifact alongside your `lib/` change)
+- [ ] `./run-tests.sh` — lint + unit + integration all pass
+- [ ] `shellcheck` is installed so the lint stage actually runs (`brew install shellcheck`)
+- [ ] If you changed a `--json` command, validate it: `./grove <cmd> --json | python3 -c 'import json,sys; json.load(sys.stdin)'`
+- [ ] `grove --version` shows the correct version
 - [ ] `grove doctor` passes all checks
-- [ ] `grove clone <repo>` works
-- [ ] `grove add <repo> <branch>` creates worktree correctly
-- [ ] `grove ls <repo>` shows worktrees
-- [ ] `grove rm <repo> <branch>` removes worktree
-- [ ] Tab completion works
-- [ ] Works with and without fzf installed
+- [ ] `grove add <repo> <branch>` / `grove ls <repo>` / `grove rm <repo> <branch>` work end-to-end
+- [ ] Tab completion works, and works with and without fzf installed
 
 ## Code Style
 
@@ -78,21 +88,36 @@ refactor: simplify branch detection logic
 
 ## Architecture Notes
 
-The script is organised into sections:
+`grove` is **generated** from modular sources in `lib/` by `./build.sh`, which concatenates
+the modules in dependency order. Edit `lib/`, never the generated `grove`.
 
-1. **Configuration** - Defaults and config file loading
-2. **Helpers** - Colour output, notifications, utilities
-3. **Core functions** - Path resolution, git operations
-4. **Commands** - Each `cmd_*` function is a subcommand
-5. **Main** - Argument parsing and dispatch
+```text
+lib/
+├── 00-header.sh      # Version, defaults, global flags
+├── 01-core.sh        # Config loading, colour output, helpers
+├── 02-validation.sh  # Input validation (security-critical)
+├── 03-paths.sh       # Worktree path/URL/slug generation
+├── 04-git.sh         # Git operations, fetch cache
+├── 05-database.sh    # MySQL helpers (DB work is delegated to hooks)
+├── 06-hooks.sh       # Lifecycle hook execution
+├── 07-templates.sh   # Templates + json_escape/format_json
+├── 08-spinner.sh     # Progress spinner
+├── 09-parallel.sh    # Parallel operations
+├── 10-interactive.sh # fzf interactive flows
+├── 11-resilience.sh  # Lock handling, recovery
+├── 12-deps.sh        # Shared dependency management
+├── 99-main.sh        # usage() + argument dispatch
+└── commands/         # One file per command group (cmd_* functions)
+```
 
 When adding a new command:
 
-1. Create `cmd_yourcommand()` function
-2. Add to the `case` statement in `main()`
-3. Add to help text in `show_help()`
+1. Create `cmd_yourcommand()` in the appropriate `lib/commands/*.sh` file
+2. Add a `yourcommand)` branch to the `case` statement in `lib/99-main.sh`
+3. Add it to `usage()` in `lib/99-main.sh`
 4. Update the completion script `_grove`
-5. Add documentation to README.md
+5. Run `./build.sh`, then `./run-tests.sh`
+6. Add documentation to `README.md`
 
 ## Questions?
 

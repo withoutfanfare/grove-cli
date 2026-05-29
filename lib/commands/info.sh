@@ -345,8 +345,11 @@ cmd_status() {
   git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
-  info "Fetching latest..."
-  cached_fetch "$git_dir" --all --prune --quiet
+  [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
+  if ! cached_fetch "$git_dir" --all --prune --quiet; then
+    # Non-fatal: a failed fetch (e.g. offline) should still show local state
+    [[ "$JSON_OUTPUT" == true ]] || warn "Could not fetch latest - showing local state"
+  fi
 
   # Clear any stale cache and collect fresh statuses
   clear_git_cache
@@ -355,7 +358,11 @@ cmd_status() {
   # Collect worktrees using shared helper
   local status_worktrees=()
   collect_worktrees "$git_dir" status_worktrees
-  (( ${#status_worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
+  if (( ${#status_worktrees[@]} == 0 )); then
+    [[ "$JSON_OUTPUT" == true ]] && { format_json "[]"; return 0; }
+    dim "No worktrees found."
+    return 0
+  fi
 
   # JSON output mode
   local json_items=()
@@ -1160,19 +1167,20 @@ cmd_health() {
   # Check for orphaned databases
   print -r -- "${C_BOLD}Database Health${C_RESET}"
   if command -v mysql >/dev/null 2>&1; then
+    # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
     local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
-    [[ -n "$DB_PASSWORD" ]] && mysql_cmd+=(-p"$DB_PASSWORD")
 
-    local dbs; dbs="$("${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
+    local dbs; dbs="$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
 
     if [[ -n "$dbs" ]]; then
       local orphaned=0
+      local db found wt_db hw_branch
       while read -r db; do
-        local found=false
+        found=false
         # Reuse already-collected worktrees instead of calling git worktree list per database
         for wt_entry in "${health_worktrees[@]}"; do
-          local hw_branch="${wt_entry##*|}"
-          local wt_db; wt_db="$(db_name_for "$repo" "$hw_branch")"
+          hw_branch="${wt_entry##*|}"
+          wt_db="$(db_name_for "$repo" "$hw_branch")"
           [[ "$wt_db" == "$db" ]] && found=true && break
         done
 
@@ -1218,9 +1226,10 @@ cmd_health() {
 
   # Check for branch/directory mismatches
   print -r -- "${C_BOLD}Branch Consistency${C_RESET}"
+  # check_worktree_mismatches returns the mismatch count; guard with || so a non-zero
+  # count does not abort the command under set -e (which would skip the Summary).
   local mismatches=0
-  check_worktree_mismatches "$git_dir"
-  mismatches=$?
+  check_worktree_mismatches "$git_dir" || mismatches=$?
   if [[ $mismatches -eq 0 ]]; then
     ok "All worktrees match their expected branches"
   else

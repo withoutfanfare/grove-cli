@@ -214,6 +214,15 @@ json_escape() {
   s="${s//$'\r'/\\r}"     # Carriage return
   s="${s//$'\f'/\\f}"     # Form feed
   s="${s//$'\b'/\\b}"     # Backspace
+  # Escape any remaining control characters (U+0001–U+001F) as \u00XX so the output is
+  # valid per RFC 8259. Fast-path guarded — the loop only runs when one is present (rare).
+  if [[ "$s" == *[$'\x01'-$'\x1f']* ]]; then
+    local i c
+    for i in {1..31}; do
+      c="${(#)i}"
+      [[ "$s" == *"$c"* ]] && s="${s//$c/$(printf '\\u%04x' $i)}"
+    done
+  fi
   REPLY="$s"
 }
 
