@@ -190,6 +190,7 @@ Common hooks:
 - `post-add` - install dependencies, copy `.env`, run migrations
 - `pre-rm` - backup database, stop you deleting with uncommitted changes
 - `post-switch` - update `.env` values when switching worktrees
+- `pre-move` / `post-move` - run before and after renaming or moving a worktree
 
 Hooks live in `~/.grove/hooks/` and are executed in this order:
 

@@ -163,6 +163,8 @@ grove branches example-app
 grove prune example-app
 grove recent 10
 grove health example-app
+grove report example-app                              # markdown status report
+grove report example-app --output report.md          # write report to a file
 
 # Parallel commands
 grove build-all example-app
@@ -192,7 +194,10 @@ grove code example-app feat-auth        # fuzzy match: feature/auth-improvements
 # Utilities
 grove clean example-app
 grove alias add login example-app/feature/login
-grove group add client-work example-app
+grove switch login                          # use the alias in place of a repo
+grove group add client-work example-app another-app
+grove build-all @client-work                # run across every repo in the group
+grove exec-all @client-work npm test        # exec across the group
 grove templates
 grove repair example-app
 grove cleanup-herd
@@ -321,7 +326,7 @@ DEFAULT_BASE=origin/staging             # Base branch for new worktrees
 DEFAULT_EDITOR=cursor                   # Editor command (cursor, code, phpstorm)
 DB_USER=root                            # MySQL user
 DB_PASSWORD=                            # MySQL password
-DB_BACKUP_DIR=$HOME/Code/Backups        # Where database backups go
+DB_BACKUP_DIR=$HOME/.grove/backups      # Where database backups go
 PROTECTED_BRANCHES="staging main master"
 ```
 
@@ -343,7 +348,7 @@ Hooks run custom scripts at various points in the worktree lifecycle. Create exe
 | `pre-move` | Before `grove move` | Yes |
 | `post-move` | After `grove move` succeeds | No |
 
-**Hook variables available:** `GROVE_REPO`, `GROVE_BRANCH`, `GROVE_PATH`, `GROVE_URL`, `GROVE_DB_NAME`
+**Hook variables available:** `GROVE_REPO`, `GROVE_BRANCH`, `GROVE_BRANCH_SLUG`, `GROVE_PATH`, `GROVE_URL`, `GROVE_DB_NAME`, `GROVE_HOOK_NAME`
 
 **Multiple hooks:** Create a `.d` directory (e.g., `~/.grove/hooks/post-add.d/`) with numbered scripts. Repo-specific hooks go in subdirectories matching the repo name.
 
@@ -441,9 +446,12 @@ grove rm -f example-app staging
 
 ### Database not created
 
-1. Check MySQL is running: `mysql -u root -e "SELECT 1"`
-2. Set password in `~/.groverc` if needed: `DB_PASSWORD=your_password`
-3. Or disable auto-creation: `DB_CREATE=false`
+Database work is delegated to the lifecycle hooks (see `examples/hooks/`), gated by `DB_CREATE`. If a worktree's database is missing:
+
+1. Check the example database hooks are installed and executable: `grove doctor`
+2. Check MySQL is running: `mysql -u root -e "SELECT 1"`
+3. Set password in `~/.groverc` if needed: `DB_PASSWORD=your_password`
+4. To opt a worktree out entirely, set `DB_CREATE=false`
 
 ### fzf picker not working
 
@@ -495,10 +503,10 @@ gcd() {
 
 ### Database per worktree
 
-Each worktree gets its own database named `<repo>__<branch_slug>`:
+Grove does not touch databases out of the box. `DB_CREATE` and `DB_BACKUP` are gates: when enabled, the reference helpers shipped in `examples/hooks/` (invoked by your lifecycle hooks) create and back up a per-worktree database named `<repo>__<branch_slug>`:
 - `example-app` + `feature/login` = `example_app__feature_login`
 
-Set `DB_DATABASE` in your `.env.example` and the hooks handle the rest.
+Install the example database hooks and set `DB_DATABASE` in your `.env.example`, and the hooks handle the rest.
 
 ---
 

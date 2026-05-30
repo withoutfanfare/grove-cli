@@ -12,6 +12,10 @@
 db_name_for() {
   local repo="$1"
   local branch="$2"
+  # Defence-in-depth: strip backticks so the name can never break out of a
+  # `quoted` MySQL identifier even if a caller bypasses upstream validation.
+  repo="${repo//\`/}"
+  branch="${branch//\`/}"
   slugify_branch "$branch"
   local slug="$REPLY"
   # Replace dashes with underscores for MySQL compatibility
@@ -22,8 +26,13 @@ db_name_for() {
   if (( ${#db_name} > 64 )); then
     # Truncate and add hash suffix for uniqueness
     local hash; hash="$(print -r -- "$slug" | { md5sum 2>/dev/null || md5 2>/dev/null; } | cut -c1-8)"
-    # Reserve space: 11 chars for (__<8-char-hash>)
-    local max_repo_len=$((64 - 11))
+    # Guard against an empty hash (no md5sum/md5 available): fall back to a
+    # length-based suffix so distinct long names cannot collapse to the same name.
+    if [[ -z "$hash" ]]; then
+      hash="${#slug}"
+    fi
+    # Reserve space: 10 chars for "__" + 8-char hash (2 + 8 = 10)
+    local max_repo_len=$((64 - 10))
 
     # Ensure at least 5 chars of repo name preserved
     if (( ${#repo} < max_repo_len )); then
@@ -86,11 +95,22 @@ backup_database() {
     return 0
   fi
 
-  # Check if database exists
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+  # Probe connectivity FIRST so a connection/auth failure is never mistaken for
+  # "database does not exist" — silently skipping the backup right before the
+  # worktree (and DB) is removed would be data-loss-adjacent.
+  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
 
   # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "USE \`$db_name\`;" 2>/dev/null; then
+  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
+    warn "Cannot reach MySQL ($DB_HOST as $DB_USER) - NOT skipping backup silently"
+    warn "Database may still exist; back up '$db_name' manually before removing the worktree"
+    return 1
+  fi
+
+  # Connection is good — now decide existence via information_schema (a failed
+  # USE could mean connection loss, so it is unsafe as an existence test).
+  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null | grep -q 1; then
     dim "  Database $db_name does not exist - skipping backup"
     return 0
   fi
@@ -123,14 +143,27 @@ drop_database() {
   local db_name="$1"
 
   if ! command -v mysql >/dev/null 2>&1; then
-    warn "MySQL client not found - cannot drop database"
+    # Consistent with create_database: a missing client is a non-fatal skip, not
+    # a hard failure (avoids blocking worktree cleanup over an absent tool).
+    warn "MySQL client not found - skipping database drop"
+    dim "  Drop manually: DROP DATABASE \`$db_name\`;"
+    return 0
+  fi
+
+  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+
+  # Probe connectivity first so a connection/auth failure is not mistaken for
+  # "database does not exist" (which would silently leave the DB behind).
+  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
+    warn "Cannot reach MySQL ($DB_HOST as $DB_USER) - could not drop database"
+    dim "  Drop manually: DROP DATABASE \`$db_name\`;"
     return 1
   fi
 
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
-
-  # Check if database exists (use MYSQL_PWD env var for password)
-  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "USE \`$db_name\`;" 2>/dev/null; then
+  # Decide existence via information_schema (a failed USE could mean a lost
+  # connection, so it is unsafe as an existence test).
+  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null | grep -q 1; then
     dim "  Database $db_name does not exist"
     return 0
   fi
@@ -170,6 +203,17 @@ unsecure_site() {
 # cleanup_herd_site — Remove stale Herd nginx config and certificate files for a site
 cleanup_herd_site() {
   local site_name="$1"
+
+  # Validate BEFORE deriving any path we rm: site_name is interpolated straight
+  # into delete targets, so a hostile value (path traversal, slash, dash, empty)
+  # must never reach the filesystem operations below.
+  if [[ -z "$site_name" || "$site_name" == *".."* || "$site_name" == */* \
+        || "$site_name" == .* || "$site_name" == -* \
+        || ! "$site_name" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    warn "Refusing to clean Herd files for invalid site name: '$site_name'"
+    return 1
+  fi
+
   local site_domain="${site_name}.test"
   local nginx_config="$HERD_CONFIG/valet/Nginx/$site_domain"
   local cert_dir="$HERD_CONFIG/valet/Certificates"
@@ -177,14 +221,14 @@ cleanup_herd_site() {
 
   # Remove nginx config if it exists
   if [[ -f "$nginx_config" ]]; then
-    /bin/rm -f "$nginx_config" 2>/dev/null && cleaned=true
+    rm -f "$nginx_config" 2>/dev/null && cleaned=true
   fi
 
   # Remove certificate files (crt, key, csr, conf)
   for ext in crt key csr conf; do
     local cert_file="$cert_dir/${site_domain}.${ext}"
     if [[ -f "$cert_file" ]]; then
-      /bin/rm -f "$cert_file" 2>/dev/null && cleaned=true
+      rm -f "$cert_file" 2>/dev/null && cleaned=true
     fi
   done
 

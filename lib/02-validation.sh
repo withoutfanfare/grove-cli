@@ -38,6 +38,46 @@ validate_identifier_common() {
   fi
 }
 
+# is_reserved_ref_segment — Return 0 if a slash-separated segment is a reserved
+# git ref token. HEAD and refs are reserved as WHOLE segments anywhere in the
+# path (so feature/HEAD and feature/heads/HEAD are caught), and @ on its own is
+# the reflog/upstream shorthand.
+is_reserved_ref_segment() {
+  local ref="$1" segment=""
+  # Bare @ is reserved (reflog/HEAD shorthand)
+  [[ "$ref" == "@" ]] && return 0
+  for segment in ${(s:/:)ref}; do
+    case "$segment" in
+      HEAD|refs|@) return 0 ;;
+    esac
+    # Trailing .lock is reserved by git on any segment
+    [[ "$segment" == *.lock ]] && return 0
+  done
+  return 1
+}
+
+# is_valid_ref_format — Authoritative ref-format check for branch names.
+#
+# Delegates to `git check-ref-format` when git is on PATH (it owns the canonical
+# rules: leading/trailing dots, hidden segments, the bare reserved refs, the
+# trailing .lock rule, etc.). When git is unavailable, falls back to a
+# pure-shell approximation covering the same high-value cases.
+is_valid_ref_format() {
+  local ref="$1"
+
+  if command -v git >/dev/null 2>&1; then
+    git check-ref-format "refs/heads/$ref" 2>/dev/null && return 0
+    return 1
+  fi
+
+  # Pure-shell fallback (git unavailable)
+  [[ "$ref" == .* || "$ref" == *. ]] && return 1          # leading/trailing dot
+  [[ "$ref" == *"/."* ]] && return 1                       # hidden segment
+  [[ "$ref" == *".lock" || "$ref" == *".lock/"* ]] && return 1  # trailing .lock on any segment
+  [[ "$ref" == *"//"* || "$ref" == */ ]] && return 1       # empty segments
+  return 0
+}
+
 # validate_name — Full security validation for repository or branch names
 validate_name() {
   local input="$1" type="$2"
@@ -71,11 +111,6 @@ validate_name() {
     error_exit "$error_code" "Invalid $type name: '$input' (trailing dot not allowed)" 2
   fi
 
-  # Block reserved git references
-  if [[ "$type" == "branch" && "$input" =~ ^(HEAD|refs/|@).*$ ]]; then
-    error_exit "$error_code" "Invalid $type name: '$input' (reserved git reference)" 2
-  fi
-
   # Allow alphanumeric, dash, underscore, forward slash, dot
   if [[ ! "$input" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
     error_exit "$error_code" "Invalid $type name: '$input' (only alphanumeric, dash, underscore, slash, dot allowed)" 2
@@ -84,6 +119,19 @@ validate_name() {
   # Block empty segments in paths
   if [[ "$input" =~ // || "$input" =~ /$ ]]; then
     error_exit "$error_code" "Invalid $type name: '$input' (malformed path)" 2
+  fi
+
+  # Branch-only: reserved git references and ref-format rules. The cheap
+  # charset/traversal pre-checks above run first; git owns the authoritative
+  # decision (trailing .lock, etc.), and we layer the stricter whole-segment
+  # HEAD/refs/@ rule on top.
+  if [[ "$type" == "branch" ]]; then
+    if is_reserved_ref_segment "$input"; then
+      error_exit "$error_code" "Invalid $type name: '$input' (reserved git reference)" 2
+    fi
+    if ! is_valid_ref_format "$input"; then
+      error_exit "$error_code" "Invalid $type name: '$input' (invalid git ref format)" 2
+    fi
   fi
 }
 
@@ -104,10 +152,15 @@ validate_branch_pattern() {
   if [[ ! "$branch" =~ $BRANCH_PATTERN ]]; then
     local suggestion=""
 
-    # Try to suggest a fix
-    local clean_branch="${branch//[^a-z0-9\/\-]/-}"  # Replace invalid chars
-    clean_branch="${clean_branch:l}"  # Lowercase
-    clean_branch="${clean_branch//--/-}"  # Remove double dashes
+    # Try to suggest a fix. Route each path segment through the shared slug
+    # transform (slugify_string) so the suggestion can't diverge from the slug
+    # used for paths/URLs, while preserving the slash structure for the prefix.
+    local seg slugged_segs=""
+    for seg in ${(s:/:)branch}; do
+      slugify_string "$seg"
+      [[ -n "$REPLY" ]] && slugged_segs+="${slugged_segs:+/}$REPLY"
+    done
+    local clean_branch="$slugged_segs"
 
     # Try common prefixes
     if [[ ! "$branch" =~ ^(feature|bugfix|hotfix|release)/ ]]; then
@@ -177,6 +230,25 @@ validate_git_ref() {
   # Block suspicious patterns (path traversal, flag injection, trailing slash)
   if [[ "$ref" == *".."* ]] || [[ "$ref" == -* ]] || [[ "$ref" == */ ]]; then
     error_exit "INVALID_INPUT" "Invalid $type: '$ref' (suspicious pattern)" 2
+  fi
+
+  # Parity with validate_name: hidden segments and leading/trailing dots
+  if [[ "$ref" == *"/."* || "$ref" == .* || "$ref" == *. ]]; then
+    error_exit "INVALID_INPUT" "Invalid $type: '$ref' (suspicious pattern)" 2
+  fi
+
+  # Parity with validate_name: empty path segments
+  if [[ "$ref" == *"//"* ]]; then
+    error_exit "INVALID_INPUT" "Invalid $type: '$ref' (malformed path)" 2
+  fi
+
+  # Parity with validate_name: reserved git references and ref-format rules
+  # (whole-segment HEAD/refs/@ and the trailing .lock rule, delegated to git).
+  if is_reserved_ref_segment "$ref"; then
+    error_exit "INVALID_INPUT" "Invalid $type: '$ref' (reserved git reference)" 2
+  fi
+  if ! is_valid_ref_format "$ref"; then
+    error_exit "INVALID_INPUT" "Invalid $type: '$ref' (invalid git ref format)" 2
   fi
 }
 

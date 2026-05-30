@@ -12,6 +12,13 @@ setup_test_environment() {
   export HERD_ROOT="$TEST_TEMP_DIR/Herd"
   mkdir -p "$HERD_ROOT"
 
+  # Keep tests hermetic from the developer's real ~/.groverc: point GROVE_CONFIG
+  # at an empty config so the user's HERD_ROOT (etc.) can never override the
+  # test environment. Without this, any test that execs the compiled grove
+  # picks up ~/.groverc and looks for repos in the wrong HERD_ROOT.
+  export GROVE_CONFIG="$TEST_TEMP_DIR/test.groverc"
+  : > "$GROVE_CONFIG"
+
   # Create a minimal test hooks directory
   export GROVE_HOOKS_DIR="$TEST_TEMP_DIR/.grove/hooks"
   mkdir -p "$GROVE_HOOKS_DIR"
@@ -49,10 +56,29 @@ source_grove_functions() {
 # These mirror the zsh implementations but work in bash
 # ============================================================================
 
-# Slugify branch name (replace / with -)
+# Slugify a string (shared transform — mirrors slugify_string in lib/03-paths.sh)
+#
+# Lowercase, replace every run of non-[a-z0-9] with a single dash, collapse
+# repeated dashes, then trim leading/trailing dashes. This must stay faithful to
+# the real zsh source so the bash mirror and the real code never diverge.
+slugify_string() {
+  local s="$1"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"  # Lowercase
+  # Replace every non-[a-z0-9] character with a dash (C locale so multi-byte
+  # unicode bytes are each treated as non-[a-z0-9], matching the zsh source).
+  s="$(LC_ALL=C printf '%s' "$s" | LC_ALL=C sed 's/[^a-z0-9]/-/g')"
+  # Collapse runs of dashes
+  while [[ "$s" == *"--"* ]]; do
+    s="${s//--/-}"
+  done
+  s="${s#-}"  # Trim leading dash
+  s="${s%-}"  # Trim trailing dash
+  echo "$s"
+}
+
+# Slugify branch name (mirrors slugify_branch in lib/03-paths.sh)
 slugify_branch() {
-  local b="$1"
-  echo "${b//\//-}"
+  slugify_string "$1"
 }
 
 # Extract feature name (last segment after /)
@@ -66,9 +92,14 @@ extract_feature_name() {
 }
 
 # Generate database name from repo and branch
+# Mirrors the real db_name_for() from lib/05-database.sh
 db_name_for() {
   local repo="$1"
   local branch="$2"
+  # Defence-in-depth: strip backticks so the name can never break out of a
+  # `quoted` MySQL identifier even if a caller bypasses upstream validation.
+  repo="${repo//\`/}"
+  branch="${branch//\`/}"
   local slug
   slug="$(slugify_branch "$branch")"
 
@@ -80,8 +111,23 @@ db_name_for() {
   if (( ${#db_name} > 64 )); then
     # Truncate and add hash suffix for uniqueness
     local hash
-    hash="$(echo -n "$slug" | md5sum | cut -c1-8)"
-    local max_repo_len=$((64 - 11))  # Leave room for __<8-char-hash>
+    hash="$(echo -n "$slug" | { md5sum 2>/dev/null || md5 2>/dev/null; } | cut -c1-8)"
+    # Guard against an empty hash (no md5sum/md5 available): fall back to a
+    # length-based suffix so distinct long names cannot collapse to the same name.
+    if [[ -z "$hash" ]]; then
+      hash="${#slug}"
+    fi
+    # Reserve space: 10 chars for "__" + 8-char hash (2 + 8 = 10)
+    local max_repo_len=$((64 - 10))
+
+    # Ensure at least 5 chars of repo name preserved
+    if (( ${#repo} < max_repo_len )); then
+      max_repo_len=${#repo}
+    fi
+    if (( max_repo_len < 5 )); then
+      max_repo_len=5
+    fi
+
     local truncated_repo="${repo:0:$max_repo_len}"
     db_name="${truncated_repo}__${hash}"
     db_name="${db_name//-/_}"
@@ -103,14 +149,18 @@ site_name_for() {
   if [[ "$branch" == "staging" || "$branch" == "main" || "$branch" == "master" ]]; then
     site_name="$repo"
   else
-    # Extract just the feature name (last segment after /)
-    local feature_name
-    if [[ "$branch" == */* ]]; then
-      feature_name="${branch##*/}"
-    else
-      feature_name="$branch"
-    fi
-    site_name="$(slugify_branch "$feature_name")"
+    # Use the FULL slugified branch so distinct branches that share a final
+    # segment (e.g. alice/dashboard and bob/dashboard) get distinct site names
+    # and never collide on directory, URL, or database.
+    site_name="$(slugify_branch "$branch")"
+  fi
+
+  # Guard against an empty or all-separator slug producing https://.test or the
+  # worktrees root. Fall back to a deterministic hash of the original branch.
+  if [[ -z "$site_name" ]]; then
+    local fallback_hash
+    fallback_hash="$(printf '%s' "$branch" | { md5sum 2>/dev/null || md5 2>/dev/null; } | cut -c1-8)"
+    site_name="wt-${fallback_hash}"
   fi
 
   # If within limit, return as-is
@@ -219,7 +269,57 @@ validate_directory_name() {
   return 0
 }
 
+# is_reserved_ref_segment — mirrors lib/02-validation.sh
+# Returns 0 if any slash-separated segment is a reserved git ref token. HEAD,
+# refs and @ are reserved as WHOLE segments anywhere in the path (so feature/HEAD
+# and feature/heads/HEAD are caught), and a trailing .lock on any segment is
+# reserved by git. Bare @ is the reflog/upstream shorthand.
+is_reserved_ref_segment() {
+  local ref="$1"
+  local segment=""
+  # Note: declare `rest` on its own line — assigning `rest="$ref"` on the same
+  # `local` line as `ref="$1"` reads the OUTER (empty) ref in bash 5.x.
+  local rest="$ref"
+  # Bare @ is reserved (reflog/HEAD shorthand)
+  [[ "$ref" == "@" ]] && return 0
+  # Split on '/' and inspect each segment
+  while [[ "$rest" == */* ]]; do
+    segment="${rest%%/*}"
+    rest="${rest#*/}"
+    case "$segment" in
+      HEAD|refs|@) return 0 ;;
+    esac
+    [[ "$segment" == *.lock ]] && return 0
+  done
+  segment="$rest"
+  case "$segment" in
+    HEAD|refs|@) return 0 ;;
+  esac
+  [[ "$segment" == *.lock ]] && return 0
+  return 1
+}
+
+# is_valid_ref_format — mirrors lib/02-validation.sh
+# Delegates to `git check-ref-format` when git is available (it owns the
+# canonical rules), with a pure-shell fallback covering the high-value cases.
+is_valid_ref_format() {
+  local ref="$1"
+
+  if command -v git >/dev/null 2>&1; then
+    git check-ref-format "refs/heads/$ref" 2>/dev/null && return 0
+    return 1
+  fi
+
+  # Pure-shell fallback (git unavailable)
+  [[ "$ref" == .* || "$ref" == *. ]] && return 1               # leading/trailing dot
+  [[ "$ref" == *"/."* ]] && return 1                            # hidden segment
+  [[ "$ref" == *".lock" || "$ref" == *".lock/"* ]] && return 1  # trailing .lock on any segment
+  [[ "$ref" == *"//"* || "$ref" == */ ]] && return 1            # empty segments
+  return 0
+}
+
 # Validate name (repo or branch)
+# Mirrors the real validate_name() from lib/02-validation.sh
 # Returns 0 if valid, 1 if invalid with error message to stderr
 validate_name() {
   local input="$1"
@@ -243,12 +343,16 @@ validate_name() {
     return 1
   fi
 
-  # Block reserved git references (only for branches)
-  if [[ "$type" == "branch" ]]; then
-    if [[ "$input" =~ ^(HEAD|refs/|@) ]]; then
-      echo "Invalid $type name: '$input' (reserved git reference)" >&2
-      return 1
-    fi
+  # Block leading dots (hidden files/directories)
+  if [[ "$input" == .* ]]; then
+    echo "Invalid $type name: '$input' (leading dot not allowed)" >&2
+    return 1
+  fi
+
+  # Block trailing dots
+  if [[ "$input" == *. ]]; then
+    echo "Invalid $type name: '$input' (trailing dot not allowed)" >&2
+    return 1
   fi
 
   # Allow alphanumeric, dash, underscore, forward slash, dot
@@ -260,6 +364,74 @@ validate_name() {
   # Block empty segments in paths
   if [[ "$input" =~ // || "$input" =~ /$ ]]; then
     echo "Invalid $type name: '$input' (malformed path)" >&2
+    return 1
+  fi
+
+  # Branch-only: reserved git references and ref-format rules. The cheap
+  # charset/traversal pre-checks above run first; git owns the authoritative
+  # decision (trailing .lock, etc.), and we layer the stricter whole-segment
+  # HEAD/refs/@ rule on top.
+  if [[ "$type" == "branch" ]]; then
+    if is_reserved_ref_segment "$input"; then
+      echo "Invalid $type name: '$input' (reserved git reference)" >&2
+      return 1
+    fi
+    if ! is_valid_ref_format "$input"; then
+      echo "Invalid $type name: '$input' (invalid git ref format)" >&2
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
+# Validate git ref (mirrors validate_git_ref() from lib/02-validation.sh)
+# Returns 0 if valid, 1 if invalid with error message to stderr
+validate_git_ref() {
+  local ref="$1"
+  local type="${2:-git ref}"
+
+  # Empty is sometimes okay (will use default)
+  [[ -z "$ref" ]] && return 0
+
+  # Block command injection characters
+  if [[ "$ref" == *";"* ]] || [[ "$ref" == *"|"* ]] || [[ "$ref" == *"&"* ]] || \
+     [[ "$ref" == *'$'* ]] || [[ "$ref" == *'`'* ]] || [[ "$ref" == *'\'* ]]; then
+    echo "Invalid $type: '$ref' (contains forbidden characters)" >&2
+    return 1
+  fi
+
+  # Validate format (alphanumeric, forward slash, dash, dot, underscore)
+  if [[ ! "$ref" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
+    echo "Invalid $type format: '$ref'" >&2
+    return 1
+  fi
+
+  # Block suspicious patterns (path traversal, flag injection, trailing slash)
+  if [[ "$ref" == *".."* ]] || [[ "$ref" == -* ]] || [[ "$ref" == */ ]]; then
+    echo "Invalid $type: '$ref' (suspicious pattern)" >&2
+    return 1
+  fi
+
+  # Parity with validate_name: hidden segments and leading/trailing dots
+  if [[ "$ref" == *"/."* || "$ref" == .* || "$ref" == *. ]]; then
+    echo "Invalid $type: '$ref' (suspicious pattern)" >&2
+    return 1
+  fi
+
+  # Parity with validate_name: empty path segments
+  if [[ "$ref" == *"//"* ]]; then
+    echo "Invalid $type: '$ref' (malformed path)" >&2
+    return 1
+  fi
+
+  # Parity with validate_name: reserved git references and ref-format rules.
+  if is_reserved_ref_segment "$ref"; then
+    echo "Invalid $type: '$ref' (reserved git reference)" >&2
+    return 1
+  fi
+  if ! is_valid_ref_format "$ref"; then
+    echo "Invalid $type: '$ref' (invalid git ref format)" >&2
     return 1
   fi
 
@@ -313,6 +485,7 @@ parse_config_file() {
       DEFAULT_EDITOR) export DEFAULT_EDITOR="$value" ;;
       GROVE_URL_SUBDOMAIN) export GROVE_URL_SUBDOMAIN="$value" ;;
       DB_HOST) export DB_HOST="$value" ;;
+      DB_PORT) export DB_PORT="$value" ;;
       DB_USER) export DB_USER="$value" ;;
       DB_PASSWORD) export DB_PASSWORD="$value" ;;
       DB_CREATE) export DB_CREATE="$value" ;;

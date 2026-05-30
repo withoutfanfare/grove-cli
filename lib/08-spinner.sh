@@ -1,8 +1,9 @@
 #!/usr/bin/env zsh
 # 08-spinner.sh - Progress indicators for long operations
 
-# Spinner characters (Braille pattern for smooth animation)
-readonly SPINNER_CHARS='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+# Spinner frames (Braille pattern for smooth animation). An explicit array avoids
+# relying on the MULTIBYTE option for correct per-character substring indexing.
+typeset -ga SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 readonly SPINNER_DELAY=0.08
 
 # Spinner state
@@ -33,13 +34,18 @@ spinner_start() {
   # Kill any existing spinner
   spinner_stop 2>/dev/null || true
 
+  # Capture the parent PID so the background spinner can self-terminate if the
+  # parent dies (e.g. is killed) before spinner_stop runs — disown alone would
+  # otherwise leave it spinning forever.
+  local parent_pid=$$
   (
-    local i=0
-    local chars_len=${#SPINNER_CHARS}
+    local frame_count=${#SPINNER_FRAMES[@]}
+    local i=1
     while true; do
-      local char="${SPINNER_CHARS:$i:1}"
-      printf "\r${C_CYAN}%s${C_RESET} %s" "$char" "$msg" >&2
-      i=$(( (i + 1) % chars_len ))
+      # Backstop: stop if the parent process has gone away.
+      kill -0 "$parent_pid" 2>/dev/null || break
+      printf "\r${C_CYAN}%s${C_RESET} %s" "${SPINNER_FRAMES[$i]}" "$msg" >&2
+      i=$(( i % frame_count + 1 ))
       sleep "$SPINNER_DELAY"
     done
   ) &

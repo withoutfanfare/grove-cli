@@ -223,3 +223,203 @@ EOF
   '
   [ "$status" -eq 0 ]
 }
+
+# --- Malformed Config Handling ---
+
+@test "svc_load_config skips a line with the wrong field count" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+goodapp|goodapp|horizon|goodapp-horizon|goodapp.test
+badline|missing-fields
+EOF
+
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    (( ${#SVC_APPS} == 1 ))                     || exit 1
+    [[ "${SVC_APPS[goodapp]}" == "horizon" ]]   || exit 2
+    (( ${+SVC_APPS[badline]} ))                 && exit 3
+    exit 0
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "svc_load_config skips a line with an empty app name" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+goodapp|goodapp|horizon|goodapp-horizon|goodapp.test
+|emptyname|horizon|x-horizon|x.test
+EOF
+
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    (( ${#SVC_APPS} == 1 ))                   || exit 1
+    [[ "${SVC_APPS[goodapp]}" == "horizon" ]] || exit 2
+    exit 0
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "svc_load_config warns to stderr when skipping a malformed line" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+badline|missing-fields
+EOF
+
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/01-core.sh" 2>/dev/null || true
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>&1 1>/dev/null
+  '
+  [[ "$output" == *"Skipping malformed registry line"* ]]
+}
+
+@test "svc_load_config trim preserves internal spaces (leading/trailing only)" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+spaced | sys name | horizon | proc name | dom.test
+EOF
+
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    [[ "${SVC_SYSTEM_NAMES[spaced]}" == "sys name" ]]          || exit 1
+    [[ "${SVC_SUPERVISOR_PROCESSES[spaced]}" == "proc name" ]] || exit 2
+    exit 0
+  '
+  [ "$status" -eq 0 ]
+}
+
+# --- JSON Output Contract ---
+
+@test "services apps --json emits valid JSON" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp-repo|horizon|myapp-horizon|myapp.test
+otherapp|otherapp|horizon:reverb|otherapp:*|otherapp.test
+EOF
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    PRETTY_JSON=false
+    cmd_services_apps_json
+  '
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "import json,sys; json.load(sys.stdin)"
+}
+
+@test "services apps --json honours --pretty (multi-line output)" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp-repo|horizon|myapp-horizon|myapp.test
+EOF
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    PRETTY_JSON=true
+    cmd_services_apps_json
+  '
+  [ "$status" -eq 0 ]
+  # Pretty output is still valid JSON...
+  echo "$output" | python3 -c "import json,sys; json.load(sys.stdin)"
+  # ...and is multi-line (one key per line) rather than the single-object compact form.
+  line_count="$(printf '%s\n' "$output" | wc -l | tr -d ' ')"
+  [ "$line_count" -gt 1 ]
+  [[ "$output" == *$'\n'*'"name"'* ]]
+}
+
+# --- Field Validation (registry integrity) ---
+
+@test "services add rejects a system name containing a pipe" {
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_add goodname --system-name="bad|name"
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Invalid system name"* ]]
+  # Nothing should have been persisted.
+  [ ! -f "$GROVE_SERVICES_DIR/apps.conf" ] || ! grep -q "goodname" "$GROVE_SERVICES_DIR/apps.conf"
+}
+
+@test "services add rejects a domain containing a pipe" {
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_add goodname --domain="bad|domain.test"
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Invalid domain"* ]]
+}
+
+@test "services add rejects a domain with a newline" {
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_add goodname --domain="line1
+line2.test"
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Invalid domain"* ]]
+}
+
+@test "services add rejects a domain with disallowed characters" {
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_add goodname --domain="bad domain!"
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Invalid domain"* ]]
+}
+
+@test "services add persists a valid registration" {
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_add goodname --system-name=good-sys --domain=good.test
+  '
+  [ "$status" -eq 0 ]
+  grep -q "^goodname|good-sys|horizon|good-sys-horizon|good.test$" "$GROVE_SERVICES_DIR/apps.conf"
+}
+
+# --- Registry Removal (literal prefix match) ---
+
+@test "services remove uses a literal prefix and does not over-match" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myXapp|myXapp|horizon|myXapp-horizon|myXapp.test
+my.app|my.app|horizon|my.app-horizon|my.app.test
+EOF
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_remove "my.app" >/dev/null 2>&1
+  '
+  [ "$status" -eq 0 ]
+  # The dot in my.app must not be treated as a regex wildcard matching myXapp.
+  # Assert with fixed-string matches so the test itself can't over-match either.
+  grep -qF "myXapp|myXapp|" "$GROVE_SERVICES_DIR/apps.conf"
+  ! grep -qF "my.app|my.app|" "$GROVE_SERVICES_DIR/apps.conf"
+}

@@ -136,6 +136,10 @@ run_tests() {
   local test_target="${1:-}"
   local test_files=()
 
+  # Make glob handling explicit: with nullglob, a *.bats pattern that matches
+  # nothing expands to an empty list rather than the literal pattern string.
+  shopt -s nullglob
+
   if [[ -z "$test_target" ]]; then
     # Run all tests (lint + unit + integration)
     local lint_rc=0
@@ -196,8 +200,11 @@ run_tests() {
   fi
 
   echo ""
-  bats --tap "${existing_files[@]}"
-  local exit_code=$?
+  # Capture the real bats exit status. Guarding with `||` keeps `set -e` from
+  # aborting before the summary, and assigning in two steps avoids `local`
+  # resetting $? to its own (always-zero) return code.
+  local exit_code=0
+  bats --tap "${existing_files[@]}" || exit_code=$?
 
   echo ""
   if [[ $exit_code -eq 0 && $LINT_FAILED -eq 0 ]]; then

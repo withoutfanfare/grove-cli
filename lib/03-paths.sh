@@ -1,9 +1,26 @@
 #!/usr/bin/env zsh
 # 03-paths.sh - Path resolution, worktree detection, URL generation
 
+# slugify_string — Shared slug transform (sets REPLY)
+#
+# Lowercase, replace every run of non-[a-z0-9] with a single dash, then trim
+# leading/trailing dashes. This is the single source of truth for both path
+# generation (slugify_branch) and validation suggestions, so the two notions
+# of a slug cannot diverge.
+slugify_string() {
+  local s="${1:l}"          # Lowercase
+  s="${s//[^a-z0-9]/-}"     # Every non-[a-z0-9] char becomes a dash
+  while [[ "$s" == *"--"* ]]; do
+    s="${s//--/-}"          # Collapse runs of dashes
+  done
+  s="${s#-}"                # Trim leading dash
+  s="${s%-}"                # Trim trailing dash
+  REPLY="$s"
+}
+
 # slugify_branch — Convert branch name to filesystem-safe slug (sets REPLY)
 slugify_branch() {
-  REPLY="${1//\//-}"
+  slugify_string "$1"
 }
 
 # site_name_for — Generate SSL-safe site name (≤59 chars) for a worktree domain
@@ -18,16 +35,18 @@ site_name_for() {
   if [[ "$branch" == "staging" || "$branch" == "main" || "$branch" == "master" ]]; then
     site_name="$repo"
   else
-    # Extract just the feature name (strips prefixes like feature/, bugfix/, etc.)
-    local feature_name
-    # Inline extract_feature_name: extract last segment after /
-    if [[ "$branch" == */* ]]; then
-      feature_name="${branch##*/}"
-    else
-      feature_name="$branch"
-    fi
-    slugify_branch "$feature_name"
+    # Use the FULL slugified branch so distinct branches that share a final
+    # segment (e.g. alice/dashboard and bob/dashboard) get distinct site names
+    # and never collide on directory, URL, or database.
+    slugify_branch "$branch"
     site_name="$REPLY"
+  fi
+
+  # Guard against an empty or all-separator slug producing https://.test or the
+  # worktrees root. Fall back to a deterministic hash of the original branch.
+  if [[ -z "$site_name" ]]; then
+    local fallback_hash; fallback_hash="$(print -r -- "$branch" | { md5sum 2>/dev/null || md5 2>/dev/null; } | cut -c1-8)"
+    site_name="wt-${fallback_hash}"
   fi
 
   # If within limit, return as-is

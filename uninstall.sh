@@ -25,6 +25,33 @@ detect_completions_dir() {
 
 COMPLETIONS_DIR="${GROVE_COMPLETIONS_DIR:-$(detect_completions_dir)}"
 
+# Remove grove's own 'wt' symlink from a bin directory, if present.
+# migrate-from-wt.sh creates 'wt' as a symlink pointing at grove's install
+# path. Only remove it when it is a symlink whose target resolves into the
+# grove install - never a regular file or an unrelated 'wt' on PATH.
+remove_wt_symlink() {
+  local dir="$1"
+  local wt_path="$dir/wt"
+
+  # Only ever touch a symlink, never a regular file
+  [[ -L "$wt_path" ]] || return 0
+
+  # Confirm it resolves to grove's binary (matches migrate-from-wt.sh detection)
+  local link_target resolved_target
+  link_target="$(readlink "$wt_path" 2>/dev/null || true)"
+  resolved_target="$(readlink -f "$wt_path" 2>/dev/null || true)"
+  if [[ "$link_target" != *"grove"* && "$resolved_target" != *"grove"* ]]; then
+    return 0
+  fi
+
+  if [[ -w "$dir" ]]; then
+    rm -f "$wt_path"
+  else
+    sudo rm -f "$wt_path"
+  fi
+  echo -e "  ${GREEN}✓${NC} Removed $wt_path"
+}
+
 echo ""
 echo -e "${BLUE}=======================================${NC}"
 echo -e "${BLUE}  Uninstalling ${GREEN}grove${NC}"
@@ -42,6 +69,9 @@ if [[ -e "$INSTALL_DIR/grove" || -L "$INSTALL_DIR/grove" ]]; then
 else
   echo -e "  ${DIM}!${NC} $INSTALL_DIR/grove not found"
 fi
+
+# Remove grove's 'wt' compatibility symlink (created by migrate-from-wt.sh)
+remove_wt_symlink "$INSTALL_DIR"
 
 # Remove completions (file or symlink)
 if [[ -e "$COMPLETIONS_DIR/_grove" || -L "$COMPLETIONS_DIR/_grove" ]]; then
@@ -61,6 +91,7 @@ for alt_dir in "$HOME/bin" "$HOME/.local/bin"; do
     rm -f "$alt_dir/grove"
     echo -e "  ${GREEN}✓${NC} Removed $alt_dir/grove"
   fi
+  remove_wt_symlink "$alt_dir"
 done
 
 for alt_comp in "$HOME/.zsh/completions/_grove" "/opt/homebrew/share/zsh/site-functions/_grove" "/usr/local/share/zsh/site-functions/_grove"; do

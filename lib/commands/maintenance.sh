@@ -7,7 +7,7 @@
 # (mysql, herd, fzf, editor), config files, and hook directories.
 #
 # Returns:
-#   0 always (reports issues via output)
+#   0 if all checks pass, 1 if any issues are found (so CI can gate on it)
 cmd_doctor() {
   print -r -- ""
   print -r -- "${C_BOLD}grove doctor${C_RESET}"
@@ -65,12 +65,17 @@ cmd_doctor() {
     mysql_version="${mysql_version%%$'\n'*}"
     ok "mysql: $mysql_version"
 
-    # Test connection (use MYSQL_PWD env var for safer password handling)
+    # Test connection (use MYSQL_PWD env var for safer password handling).
+    # Honour a non-default DB_PORT so the check targets the configured server
+    # rather than always probing 3306.
     local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+    if [[ -n "${DB_PORT:-}" && "$DB_PORT" != "3306" ]]; then
+      mysql_cmd+=(-P "$DB_PORT")
+    fi
     if MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1" >/dev/null 2>&1; then
       ok "  MySQL connection: OK"
     else
-      warn "  MySQL connection: FAILED (check DB_HOST, DB_USER, DB_PASSWORD)"
+      warn "  MySQL connection: FAILED (check DB_HOST, DB_PORT, DB_USER, DB_PASSWORD)"
     fi
   else
     dim "  mysql: not found (database features disabled)"
@@ -164,6 +169,9 @@ cmd_doctor() {
   print -r -- ""
   if (( issues > 0 )); then
     warn "$issues issue(s) found"
+    print -r -- ""
+    # Exit non-zero so CI can gate on a healthy installation.
+    return 1
   else
     ok "All checks passed!"
   fi
@@ -223,10 +231,14 @@ cmd_cleanup_herd() {
     for site_link in "$sites_dir"/*(N@); do
       [[ -L "$site_link" ]] || continue
       local site_name="${site_link:t}"
-      local target; target="$(readlink "$site_link" 2>/dev/null)"
+      # readlink may return a RELATIVE target, which would then be tested against
+      # grove's cwd and wrongly judged missing. Canonicalise with :A (full symlink
+      # resolution) so the existence test runs against the real absolute path.
+      local raw_target; raw_target="$(readlink "$site_link" 2>/dev/null)"
+      local target="${site_link:A}"
 
       # Only check sites that point to -worktrees directories
-      if [[ "$target" == *"-worktrees/"* && ! -d "$target" ]]; then
+      if [[ "$raw_target" == *"-worktrees/"* && ! -d "$target" ]]; then
         orphaned+=("${site_name}.test")
       fi
     done
@@ -253,14 +265,20 @@ cmd_cleanup_herd() {
   fi
 
   print -r -- ""
+  local site_ok
   for site_name in "${orphaned[@]}"; do
     local folder_name="${site_name%.test}"
     info "Cleaning ${C_CYAN}$site_name${C_RESET}"
+    site_ok=true
 
-    # Remove nginx config
+    # Remove nginx config. A failed rm (e.g. permissions) must NOT be counted as
+    # a successful clean, so track the outcome rather than assuming success.
     local nginx_config="$nginx_dir/$site_name"
     if [[ -f "$nginx_config" ]]; then
-      /bin/rm -f "$nginx_config" 2>/dev/null
+      if ! /bin/rm -f "$nginx_config" 2>/dev/null; then
+        warn "  Failed to remove nginx config: $nginx_config"
+        site_ok=false
+      fi
     fi
 
     # Remove certificate files
@@ -277,7 +295,7 @@ cmd_cleanup_herd() {
       /bin/rm -f "$site_link" 2>/dev/null
     fi
 
-    cleaned=$((cleaned + 1))
+    [[ "$site_ok" == true ]] && cleaned=$((cleaned + 1))
   done
 
   # Restart nginx to apply changes
@@ -436,10 +454,10 @@ _repair_repo() {
 
   # 2. Clean stale index locks
   info "Checking for stale index locks..."
-  # check_index_locks returns the lock count; guard with || so a non-zero count does not
-  # abort cmd_repair under set -e.
-  local locks_cleaned=0
-  check_index_locks "$git_dir" "--auto-clean" || locks_cleaned=$?
+  # check_index_locks prints the lock count on STDOUT (exit status is always 0 on
+  # success); capture it rather than relying on the old exit-status-as-count.
+  local locks_cleaned
+  locks_cleaned="$(check_index_locks "$git_dir" "--auto-clean")"
   if (( locks_cleaned > 0 )); then
     fixed=$((fixed + 1))
   else
@@ -630,8 +648,10 @@ cmd_upgrade() {
     error_exit "IO_ERROR" "cannot find 'grove' in PATH" 5
   fi
 
-  # Resolve symlink to find repo
-  local real_path; real_path="$(readlink "$wt_path" 2>/dev/null || echo "$wt_path")"
+  # Resolve symlink to find repo. Use :A (full resolution) rather than a
+  # single-level readlink so a chain of symlinks (or a relative link) still
+  # lands on the real script directory.
+  local real_path="${wt_path:A}"
   local repo_dir="${real_path:h}"
 
   # Check if it's a git repo
@@ -649,6 +669,31 @@ cmd_upgrade() {
   local current_version="$VERSION"
   info "Current version: ${C_YELLOW}v$current_version${C_RESET}"
 
+  # Determine the upstream branch ONCE (main, falling back to master) and reuse
+  # it for the behind-check, the log preview and the pull. Doing this once keeps
+  # all three consistent and avoids comparing HEAD against the wrong ref.
+  local upstream_branch
+  if git -C "$repo_dir" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+    upstream_branch="main"
+  elif git -C "$repo_dir" rev-parse --verify --quiet origin/master >/dev/null 2>&1; then
+    upstream_branch="master"
+  else
+    error_exit "IO_ERROR" "cannot find origin/main or origin/master to upgrade from" 5
+  fi
+
+  # Refuse to rebase a developer's feature branch onto the upstream default. With
+  # the symlink dev install, a contributor working on a feature branch would
+  # otherwise have it silently rebased onto $upstream_branch and could lose work.
+  local current_branch; current_branch="$(git -C "$repo_dir" symbolic-ref --short -q HEAD 2>/dev/null)"
+  if [[ "$current_branch" != "$upstream_branch" ]]; then
+    error_exit "IO_ERROR" "grove repo is on '${current_branch:-a detached HEAD}', not the default branch '$upstream_branch'; switch to '$upstream_branch' before upgrading" 5
+  fi
+
+  # Refuse to rebase over uncommitted changes — a rebase would clobber them.
+  if [[ -n "$(git -C "$repo_dir" status --porcelain 2>/dev/null)" ]]; then
+    error_exit "IO_ERROR" "grove repo has uncommitted changes; commit or stash them before upgrading" 5
+  fi
+
   # Fetch latest
   info "Fetching updates..."
   if ! git -C "$repo_dir" fetch origin --quiet 2>/dev/null; then
@@ -657,7 +702,7 @@ cmd_upgrade() {
 
   # Check if we're behind
   local local_head; local_head="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null)"
-  local remote_head; remote_head="$(git -C "$repo_dir" rev-parse origin/main 2>/dev/null || git -C "$repo_dir" rev-parse origin/master 2>/dev/null)"
+  local remote_head; remote_head="$(git -C "$repo_dir" rev-parse "origin/$upstream_branch" 2>/dev/null)"
 
   if [[ "$local_head" == "$remote_head" ]]; then
     ok "Already up to date!"
@@ -666,13 +711,13 @@ cmd_upgrade() {
   fi
 
   # Show what's new
-  local commits_behind; commits_behind="$(git -C "$repo_dir" rev-list --count HEAD..origin/main 2>/dev/null || git -C "$repo_dir" rev-list --count HEAD..origin/master 2>/dev/null || echo 0)"
+  local commits_behind; commits_behind="$(git -C "$repo_dir" rev-list --count "HEAD..origin/$upstream_branch" 2>/dev/null || echo 0)"
   info "Updates available: ${C_GREEN}$commits_behind${C_RESET} new commit(s)"
   print -r -- ""
 
   # Show recent commits
   dim "Recent changes:"
-  git -C "$repo_dir" log --oneline HEAD..origin/main 2>/dev/null | head -5 | while read -r line; do
+  git -C "$repo_dir" log --oneline "HEAD..origin/$upstream_branch" 2>/dev/null | head -5 | while read -r line; do
     print -r -- "  ${C_DIM}•${C_RESET} $line"
   done
   print -r -- ""
@@ -685,10 +730,13 @@ cmd_upgrade() {
     [[ "$response" =~ ^[Yy]$ ]] || { dim "Aborted"; return 0; }
   fi
 
-  # Pull updates
+  # Pull updates. Surface git's stderr so a genuine conflict/error is visible
+  # rather than swallowed before we tell the user to resolve it manually.
   info "Pulling updates..."
-  if ! git -C "$repo_dir" pull --rebase origin main 2>/dev/null && ! git -C "$repo_dir" pull --rebase origin master 2>/dev/null; then
+  local pull_err
+  if ! pull_err="$(git -C "$repo_dir" pull --rebase origin "$upstream_branch" 2>&1 >/dev/null)"; then
     git -C "$repo_dir" rebase --abort 2>/dev/null
+    [[ -n "$pull_err" ]] && print -r -- "$pull_err" >&2
     error_exit "IO_ERROR" "failed to pull updates, you may need to resolve conflicts manually" 5
   fi
 
@@ -734,9 +782,10 @@ cmd_version_check() {
   local current_version="$VERSION"
   info "Installed: ${C_YELLOW}v$current_version${C_RESET}"
 
-  # Find repo directory
+  # Find repo directory. Use :A (full resolution) so a chain of symlinks or a
+  # relative link still resolves to the real script directory.
   local wt_path; wt_path="$(command -v grove 2>/dev/null)"
-  local real_path; real_path="$(readlink "$wt_path" 2>/dev/null || echo "$wt_path")"
+  local real_path="${wt_path:A}"
   local repo_dir="${real_path:h}"
 
   if [[ ! -d "$repo_dir/.git" && ! -f "$repo_dir/.git" ]]; then

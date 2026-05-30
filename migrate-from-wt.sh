@@ -107,86 +107,120 @@ rename_item() {
   fi
 }
 
-# Replace WT_ prefixed variable names with GROVE_ in a file
-# This handles config variable names only, not arbitrary content
+# The exact WT_ config variables grove migrates. Anchored at assignment and
+# reference boundaries so unrelated identifiers (e.g. WT_EDITOR_THEME) are
+# never touched. Prefix entries (trailing underscore) match a whole prefix.
+GROVE_MIGRATED_VARS=(
+  "WT_SKIP_"  # prefix: WT_SKIP_NPM, WT_SKIP_DB, ...
+  "WT_HOOKS_DIR"
+  "WT_TEMPLATES_DIR"
+  "WT_CONFIG_DIR"
+  "WT_CONFIG"
+  "WT_DB_HOST"
+  "WT_DB_USER"
+  "WT_DB_PASSWORD"
+  "WT_DB_CREATE"
+  "WT_DB_BACKUP_DIR"
+  "WT_DB_BACKUP"
+  "WT_BASE_DEFAULT"
+  "WT_EDITOR"
+  "WT_URL_SUBDOMAIN"
+  "WT_MAX_PARALLEL"
+  "WT_PROTECTED_BRANCHES"
+  "WT_BRANCH_PATTERN"
+  "WT_BRANCH_EXAMPLES"
+  "WT_REPO_GROUPS"
+  "WT_SHARED_DEPS_DIR"
+  "WT_FETCH_CACHE_TTL"
+)
+
+# Build the -e expressions for sed, anchored to word boundaries so only real
+# assignments (WT_FOO=) and references (export WT_FOO, $WT_FOO, ${WT_FOO}) are
+# rewritten. macOS/BSD sed uses [[:<:]]/[[:>:]]; GNU sed uses \</\>.
+# Prefix entries (trailing underscore) anchor on the left only.
+_build_wt_sed_args() {
+  local open close var grove
+  if [[ "$(uname)" == "Darwin" ]]; then
+    open='[[:<:]]'; close='[[:>:]]'
+  else
+    open='\<'; close='\>'
+  fi
+
+  WT_SED_ARGS=()
+  for var in "${GROVE_MIGRATED_VARS[@]}"; do
+    grove="GROVE_${var#WT_}"
+    if [[ "$var" == *_ ]]; then
+      # Prefix replacement: left boundary only (more word chars follow).
+      WT_SED_ARGS+=(-e "s/${open}${var}/${grove}/g")
+    else
+      WT_SED_ARGS+=(-e "s/${open}${var}${close}/${grove}/g")
+    fi
+  done
+}
+
+# Returns 0 if the file contains at least one migratable WT_ assignment or
+# reference (boundary-anchored), 1 otherwise. Distinct from a loose 'WT_'
+# substring match, which also fires on comments and unrelated identifiers.
+file_has_migratable_wt_refs() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  _build_wt_sed_args
+  ! diff -q "$file" <(sed "${WT_SED_ARGS[@]}" "$file" 2>/dev/null) >/dev/null 2>&1
+}
+
+# Replace WT_ prefixed variable names with GROVE_ in a file. Only real
+# assignments/references are rewritten (see _build_wt_sed_args). Takes exactly
+# one backup, and only when a change is actually applied. Pass "skip_backup"
+# as the second argument when the caller has already backed up this file (e.g.
+# the rename steps), to avoid a redundant second backup of identical content.
 replace_wt_vars_in_file() {
   local file="$1"
+  local skip_backup="${2:-}"
 
   if [[ ! -f "$file" ]]; then
     return 0
   fi
 
-  # Check if file contains any WT_ references
-  if ! grep -q 'WT_' "$file" 2>/dev/null; then
-    dim "No WT_ references found in: $file"
+  _build_wt_sed_args
+
+  # Render the rewrite to a temp file and compare. This avoids backing up or
+  # counting files whose only WT_ text is in comments or unrelated names.
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/grove-migrate.XXXXXX")" || {
+    error "Failed to create temp file for: $file"
+    return 1
+  }
+
+  sed "${WT_SED_ARGS[@]}" "$file" > "$tmp" 2>/dev/null
+
+  if diff -q "$file" "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    dim "No migratable WT_ assignments in: $file"
     return 0
   fi
 
   if [[ "$DRY_RUN" == true ]]; then
-    local count
-    count="$(grep -c 'WT_' "$file" 2>/dev/null || echo 0)"
-    dry "Would update $count WT_ reference(s) in: $file"
+    rm -f "$tmp"
+    dry "Would update WT_ variable name(s) in: $file"
     CHANGES_MADE=$((CHANGES_MADE + 1))
     return 0
   fi
 
-  # Back up before modifying
-  backup_item "$file" || return 1
-
-  # Replace WT_ variable prefixes with GROVE_
-  # Handles: WT_SKIP_*, WT_HOOKS_DIR, WT_TEMPLATES_DIR, WT_CONFIG, WT_DB_*, etc.
-  if [[ "$(uname)" == "Darwin" ]]; then
-    sed -i '' \
-      -e 's/WT_SKIP_/GROVE_SKIP_/g' \
-      -e 's/WT_HOOKS_DIR/GROVE_HOOKS_DIR/g' \
-      -e 's/WT_TEMPLATES_DIR/GROVE_TEMPLATES_DIR/g' \
-      -e 's/WT_CONFIG_DIR/GROVE_CONFIG_DIR/g' \
-      -e 's/WT_CONFIG/GROVE_CONFIG/g' \
-      -e 's/WT_DB_HOST/GROVE_DB_HOST/g' \
-      -e 's/WT_DB_USER/GROVE_DB_USER/g' \
-      -e 's/WT_DB_PASSWORD/GROVE_DB_PASSWORD/g' \
-      -e 's/WT_DB_CREATE/GROVE_DB_CREATE/g' \
-      -e 's/WT_DB_BACKUP_DIR/GROVE_DB_BACKUP_DIR/g' \
-      -e 's/WT_DB_BACKUP/GROVE_DB_BACKUP/g' \
-      -e 's/WT_BASE_DEFAULT/GROVE_BASE_DEFAULT/g' \
-      -e 's/WT_EDITOR/GROVE_EDITOR/g' \
-      -e 's/WT_URL_SUBDOMAIN/GROVE_URL_SUBDOMAIN/g' \
-      -e 's/WT_MAX_PARALLEL/GROVE_MAX_PARALLEL/g' \
-      -e 's/WT_PROTECTED_BRANCHES/GROVE_PROTECTED_BRANCHES/g' \
-      -e 's/WT_BRANCH_PATTERN/GROVE_BRANCH_PATTERN/g' \
-      -e 's/WT_BRANCH_EXAMPLES/GROVE_BRANCH_EXAMPLES/g' \
-      -e 's/WT_REPO_GROUPS/GROVE_REPO_GROUPS/g' \
-      -e 's/WT_SHARED_DEPS_DIR/GROVE_SHARED_DEPS_DIR/g' \
-      -e 's/WT_FETCH_CACHE_TTL/GROVE_FETCH_CACHE_TTL/g' \
-      "$file"
-  else
-    sed -i \
-      -e 's/WT_SKIP_/GROVE_SKIP_/g' \
-      -e 's/WT_HOOKS_DIR/GROVE_HOOKS_DIR/g' \
-      -e 's/WT_TEMPLATES_DIR/GROVE_TEMPLATES_DIR/g' \
-      -e 's/WT_CONFIG_DIR/GROVE_CONFIG_DIR/g' \
-      -e 's/WT_CONFIG/GROVE_CONFIG/g' \
-      -e 's/WT_DB_HOST/GROVE_DB_HOST/g' \
-      -e 's/WT_DB_USER/GROVE_DB_USER/g' \
-      -e 's/WT_DB_PASSWORD/GROVE_DB_PASSWORD/g' \
-      -e 's/WT_DB_CREATE/GROVE_DB_CREATE/g' \
-      -e 's/WT_DB_BACKUP_DIR/GROVE_DB_BACKUP_DIR/g' \
-      -e 's/WT_DB_BACKUP/GROVE_DB_BACKUP/g' \
-      -e 's/WT_BASE_DEFAULT/GROVE_BASE_DEFAULT/g' \
-      -e 's/WT_EDITOR/GROVE_EDITOR/g' \
-      -e 's/WT_URL_SUBDOMAIN/GROVE_URL_SUBDOMAIN/g' \
-      -e 's/WT_MAX_PARALLEL/GROVE_MAX_PARALLEL/g' \
-      -e 's/WT_PROTECTED_BRANCHES/GROVE_PROTECTED_BRANCHES/g' \
-      -e 's/WT_BRANCH_PATTERN/GROVE_BRANCH_PATTERN/g' \
-      -e 's/WT_BRANCH_EXAMPLES/GROVE_BRANCH_EXAMPLES/g' \
-      -e 's/WT_REPO_GROUPS/GROVE_REPO_GROUPS/g' \
-      -e 's/WT_SHARED_DEPS_DIR/GROVE_SHARED_DEPS_DIR/g' \
-      -e 's/WT_FETCH_CACHE_TTL/GROVE_FETCH_CACHE_TTL/g' \
-      "$file"
+  # Back up exactly once (unless the caller already did), then apply the
+  # already-computed rewrite.
+  if [[ "$skip_backup" != "skip_backup" ]]; then
+    backup_item "$file" || { rm -f "$tmp"; return 1; }
   fi
 
-  ok "Updated WT_ -> GROVE_ variable names in: ${C_DIM}$file${C_RESET}"
-  CHANGES_MADE=$((CHANGES_MADE + 1))
+  if cat "$tmp" > "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    ok "Updated WT_ -> GROVE_ variable names in: ${C_DIM}$file${C_RESET}"
+    CHANGES_MADE=$((CHANGES_MADE + 1))
+  else
+    rm -f "$tmp"
+    error "Failed to write updated content to: $file"
+    return 1
+  fi
 }
 
 # ============================================================================
@@ -213,12 +247,12 @@ migrate_wtrc() {
     return 0
   fi
 
-  # Back up and rename
+  # Back up and rename (single backup of the original ~/.wtrc)
   backup_item "$HOME/.wtrc" || return 1
   rename_item "$HOME/.wtrc" "$HOME/.groverc" || return 1
 
-  # Update variable names inside the new file
-  replace_wt_vars_in_file "$HOME/.groverc"
+  # Update variable names inside the new file (already backed up above)
+  replace_wt_vars_in_file "$HOME/.groverc" skip_backup
 }
 
 # Step 2: Migrate ~/.wt/ -> ~/.grove/
@@ -292,7 +326,7 @@ migrate_repo_configs() {
     else
       backup_item "$herd_root/.wtconfig" || true
       rename_item "$herd_root/.wtconfig" "$herd_root/.groveconfig" || true
-      replace_wt_vars_in_file "$herd_root/.groveconfig"
+      replace_wt_vars_in_file "$herd_root/.groveconfig" skip_backup
     fi
   fi
 
@@ -312,7 +346,7 @@ migrate_repo_configs() {
       info "Migrating .wtconfig for repository: ${C_BOLD}$repo_name${C_RESET}"
       backup_item "$git_dir/.wtconfig" || continue
       rename_item "$git_dir/.wtconfig" "$git_dir/.groveconfig" || continue
-      replace_wt_vars_in_file "$git_dir/.groveconfig"
+      replace_wt_vars_in_file "$git_dir/.groveconfig" skip_backup
     fi
   done
 }
@@ -424,72 +458,66 @@ check_hook_scripts() {
   fi
 }
 
+# Candidate shell startup files that grove may edit in place. Emits one path
+# per line (existing regular files only, including ~/.zsh/functions/*.zsh).
+shell_config_candidates() {
+  local f
+  for f in \
+    "$HOME/.zshrc" \
+    "$HOME/.zprofile" \
+    "$HOME/.zshenv" \
+    "$HOME/.zsh_exports" \
+    "$HOME/.zsh_aliases" \
+    "$HOME/.bashrc" \
+    "$HOME/.bash_profile" \
+    "$HOME/.bash_exports" \
+    "$HOME/.profile"; do
+    [[ -f "$f" ]] && echo "$f"
+  done
+
+  if [[ -d "$HOME/.zsh/functions" ]]; then
+    find "$HOME/.zsh/functions" -type f -name "*.zsh" 2>/dev/null
+  fi
+}
+
+# Subset of shell_config_candidates that contain at least one migratable WT_
+# assignment/reference (boundary-anchored, not a loose substring). These are
+# the files that will actually be edited in place.
+migratable_shell_files() {
+  local f
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    file_has_migratable_wt_refs "$f" && echo "$f"
+  done < <(shell_config_candidates)
+}
+
 # Step 7: Check and update shell config files for WT_ references
 migrate_shell_configs() {
   info "Checking shell configuration files for WT_ references..."
 
-  local shell_files=(
-    "$HOME/.zshrc"
-    "$HOME/.zprofile"
-    "$HOME/.zshenv"
-    "$HOME/.zsh_exports"
-    "$HOME/.zsh_aliases"
-    "$HOME/.bashrc"
-    "$HOME/.bash_profile"
-    "$HOME/.bash_exports"
-    "$HOME/.profile"
-  )
-
   local found_refs=false
+  local shell_file
 
-  for shell_file in "${shell_files[@]}"; do
-    [[ -f "$shell_file" ]] || continue
+  while IFS= read -r shell_file; do
+    [[ -n "$shell_file" ]] || continue
+    found_refs=true
 
-    if grep -q 'WT_' "$shell_file" 2>/dev/null; then
-      found_refs=true
-      local ref_count
-      ref_count="$(grep -c 'WT_' "$shell_file" 2>/dev/null || echo 0)"
-
-      if [[ "$DRY_RUN" == true ]]; then
-        dry "Would update $ref_count WT_ reference(s) in: $shell_file"
-        grep -n 'WT_' "$shell_file" 2>/dev/null | while IFS= read -r match; do
-          dim "  $match"
-        done
-        CHANGES_MADE=$((CHANGES_MADE + 1))
-      else
-        info "Found $ref_count WT_ reference(s) in: ${C_BOLD}${shell_file##*/}${C_RESET}"
-        grep -n 'WT_' "$shell_file" 2>/dev/null | while IFS= read -r match; do
-          dim "  $match"
-        done
-
-        replace_wt_vars_in_file "$shell_file"
-      fi
+    if [[ "$DRY_RUN" == true ]]; then
+      dry "Would update WT_ assignment(s) in: $shell_file"
+    else
+      info "Updating WT_ assignment(s) in: ${C_BOLD}${shell_file##*/}${C_RESET}"
     fi
-  done
 
-  # Also check ~/.zsh/functions/ directory if it exists
-  if [[ -d "$HOME/.zsh/functions" ]]; then
-    while IFS= read -r func_file; do
-      [[ -f "$func_file" ]] || continue
+    # Advisory: show the matching lines (loose match, display only).
+    grep -n 'WT_' "$shell_file" 2>/dev/null | while IFS= read -r match; do
+      dim "  $match"
+    done
 
-      if grep -q 'WT_' "$func_file" 2>/dev/null; then
-        found_refs=true
-        local ref_count
-        ref_count="$(grep -c 'WT_' "$func_file" 2>/dev/null || echo 0)"
-
-        if [[ "$DRY_RUN" == true ]]; then
-          dry "Would update $ref_count WT_ reference(s) in: $func_file"
-          CHANGES_MADE=$((CHANGES_MADE + 1))
-        else
-          info "Found $ref_count WT_ reference(s) in: ${C_BOLD}${func_file}${C_RESET}"
-          replace_wt_vars_in_file "$func_file"
-        fi
-      fi
-    done < <(find "$HOME/.zsh/functions" -type f -name "*.zsh" 2>/dev/null)
-  fi
+    replace_wt_vars_in_file "$shell_file"
+  done < <(migratable_shell_files)
 
   if [[ "$found_refs" == false ]]; then
-    ok "No WT_ references found in shell configuration files"
+    ok "No migratable WT_ references found in shell configuration files"
   fi
 }
 
@@ -512,33 +540,34 @@ create_symlink() {
     return 0
   fi
 
-  local wt_path
-  wt_path="$(command -v wt 2>/dev/null || true)"
-
-  # Check if wt already points to grove (or is the same binary)
-  if [[ -n "$wt_path" ]] && [[ -L "$wt_path" ]]; then
-    local link_target
-    link_target="$(readlink "$wt_path" 2>/dev/null || true)"
-    if [[ "$link_target" == *"grove"* ]]; then
-      skip "wt is already symlinked to grove: $wt_path -> $link_target"
-      return 0
-    fi
-  fi
-
-  # If wt exists and is not a symlink to grove, don't overwrite it
-  if [[ -n "$wt_path" ]] && [[ ! -L "$wt_path" || "$(readlink "$wt_path" 2>/dev/null)" != *"grove"* ]]; then
-    warn "Existing wt command found at: $wt_path"
-    warn "Not overwriting. Remove it manually first if you want the symlink."
-    return 0
-  fi
-
   # Determine symlink location (same directory as grove)
   local grove_dir
   grove_dir="$(dirname "$grove_path")"
   local symlink_path="$grove_dir/wt"
 
-  if [[ -e "$symlink_path" ]]; then
-    skip "File already exists at $symlink_path"
+  local wt_path
+  wt_path="$(command -v wt 2>/dev/null || true)"
+
+  # If a wt command already exists, decide precisely whether it is our symlink.
+  # A symlink is "ours" only if it resolves to exactly the grove binary we
+  # found -- a fuzzy *grove* substring match would misfire on unrelated paths.
+  if [[ -n "$wt_path" ]]; then
+    if [[ -L "$wt_path" ]] && [[ "$wt_path" -ef "$grove_path" ]]; then
+      skip "wt is already symlinked to grove: $wt_path -> $grove_path"
+      return 0
+    fi
+    warn "Existing wt command found at: $wt_path"
+    warn "Not overwriting. Remove it manually first if you want the symlink."
+    return 0
+  fi
+
+  # No wt on PATH, but a file/symlink may still sit at the target location.
+  if [[ -e "$symlink_path" || -L "$symlink_path" ]]; then
+    if [[ -L "$symlink_path" ]] && [[ "$symlink_path" -ef "$grove_path" ]]; then
+      skip "wt is already symlinked to grove: $symlink_path -> $grove_path"
+    else
+      skip "File already exists at $symlink_path"
+    fi
     return 0
   fi
 
@@ -622,8 +651,16 @@ main() {
     done
   fi
 
+  # Shell startup files that will be edited in place (boundary-anchored match).
+  local shell_targets=()
+  local sf
+  while IFS= read -r sf; do
+    [[ -n "$sf" ]] && shell_targets+=("$sf")
+  done < <(migratable_shell_files)
+
   # If nothing to migrate, report and exit
-  if [[ "$has_wtrc" == false ]] && [[ "$has_wt_dir" == false ]] && [[ "$has_wtconfig" == false ]]; then
+  if [[ "$has_wtrc" == false ]] && [[ "$has_wt_dir" == false ]] && \
+     [[ "$has_wtconfig" == false ]] && [[ "${#shell_targets[@]}" -eq 0 ]]; then
     # Check if already migrated
     if [[ -f "$HOME/.groverc" ]] || [[ -d "$HOME/.grove" ]]; then
       ok "Already using grove configuration. Nothing to migrate."
@@ -643,14 +680,26 @@ main() {
   [[ "$has_wtrc" == true ]]     && echo "  ${C_YELLOW}*${C_RESET} ~/.wtrc (global config)"
   [[ "$has_wt_dir" == true ]]   && echo "  ${C_YELLOW}*${C_RESET} ~/.wt/ (config directory with hooks, templates, etc.)"
   [[ "$has_wtconfig" == true ]] && echo "  ${C_YELLOW}*${C_RESET} Per-repo .wtconfig files"
+  [[ "${#shell_targets[@]}" -gt 0 ]] && echo "  ${C_YELLOW}*${C_RESET} Shell startup files with WT_ assignments (will be edited in place)"
   echo ""
 
   # Confirmation prompt
   if [[ "$FORCE" != true ]] && [[ "$DRY_RUN" != true ]]; then
     echo "${C_YELLOW}This will rename files and update variable names.${C_RESET}"
     echo "${C_DIM}All original files will be backed up with timestamps.${C_RESET}"
+
+    # Startup files are edited in place -- list every one and warn explicitly.
+    if [[ "${#shell_targets[@]}" -gt 0 ]]; then
+      echo ""
+      echo "${C_YELLOW}${C_BOLD}The following shell startup files will be EDITED in place:${C_RESET}"
+      for sf in "${shell_targets[@]}"; do
+        echo "  ${C_YELLOW}->${C_RESET} $sf"
+      done
+      echo "${C_DIM}Each is backed up first; only exact grove WT_* variables are changed.${C_RESET}"
+    fi
+
     echo ""
-    read -rp "Proceed with migration? [y/N] " response
+    read -rp "Proceed with migration (including editing the startup files listed above)? [y/N] " response
     if [[ ! "$response" =~ ^[Yy]$ ]]; then
       echo ""
       echo "Migration cancelled."
