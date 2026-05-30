@@ -54,16 +54,23 @@ _read_config_pairs() {
     value="${value#\'}"
     value="${value%\'}"
     # Only strip inline comments if value was not quoted
-    # (quoted values like "my#password" should keep the #)
-    if [[ "$was_quoted" == false ]]; then
-      value="${value%%#*}"
+    # (quoted values like "my#password" should keep the #).
+    # Strip a trailing " #..." comment (whitespace then #) only — never a bare
+    # mid-value '#', so unquoted secrets like DB_PASSWORD=pass#word survive intact.
+    if [[ "$was_quoted" == false && "$value" == *[[:space:]]#* ]]; then
+      value="${value%%[[:space:]]#*}"
     fi
     value="${value%"${value##*[![:space:]]}"}"
 
-    # Expand $HOME and a leading ~ so path values like HERD_ROOT=$HOME/Herd or ~/Herd work
-    # (the parser does not source the file, so the shell never expands these itself).
-    value="${value//\$HOME/$HOME}"
-    [[ "$value" == "~" || "$value" == "~/"* ]] && value="${HOME}${value#\~}"
+    # Expand $HOME and a leading ~ for path-typed keys only, so path values like
+    # HERD_ROOT=$HOME/Herd or ~/Herd work (the parser does not source the file, so
+    # the shell never expands these itself). Non-path values are left verbatim.
+    case "$key" in
+      HERD_ROOT|HERD_CONFIG|DEFAULT_EDITOR|DB_BACKUP_DIR|GROVE_HOOKS_DIR|GROVE_TEMPLATES_DIR|GROVE_SHARED_DEPS_DIR)
+        value="${value//\$HOME/$HOME}"
+        [[ "$value" == "~" || "$value" == "~/"* ]] && value="${HOME}${value#\~}"
+        ;;
+    esac
 
     # Pass to handler
     "$handler" "$key" "$value"
@@ -83,6 +90,7 @@ load_config() {
       GROVE_URL_SUBDOMAIN) GROVE_URL_SUBDOMAIN="$value" ;;
       GROVE_MAX_PARALLEL) GROVE_MAX_PARALLEL="$value" ;;
       DB_HOST) DB_HOST="$value" ;;
+      DB_PORT) DB_PORT="$value" ;;
       DB_USER) DB_USER="$value" ;;
       DB_PASSWORD) DB_PASSWORD="$value" ;;
       DB_CREATE) DB_CREATE="$value" ;;
@@ -103,12 +111,58 @@ load_config() {
   _read_config_pairs "$config_file" _apply_global_config
   # Also check HERD_ROOT/.groveconfig
   _read_config_pairs "$HERD_ROOT/.groveconfig" _apply_global_config
+
+  # Normalise boolean flags to strict true/false and validate numeric thresholds.
+  # Done here (rather than in 99-main) so the guarantees hold wherever load_config runs.
+  _normalise_db_flag DB_CREATE
+  _normalise_db_flag DB_BACKUP
+  validate_stale_threshold
+
+  # Capture the global baseline for the keys a repo's .groveconfig may override,
+  # so load_repo_config can reset to these before applying per-repo overrides.
+  # Without this, a per-repo GROVE_URL_SUBDOMAIN (etc.) bleeds into the next repo
+  # in any multi-repo loop (e.g. `grove recent`).
+  typeset -g GROVE_GLOBAL_URL_SUBDOMAIN="$GROVE_URL_SUBDOMAIN"
+  typeset -g GROVE_GLOBAL_DEFAULT_BASE="$DEFAULT_BASE"
+  typeset -g GROVE_GLOBAL_PROTECTED_BRANCHES="$PROTECTED_BRANCHES"
+  typeset -g GROVE_GLOBAL_STALE_THRESHOLD="$GROVE_STALE_THRESHOLD"
+}
+
+# _normalise_db_flag — Coerce a named DB_* flag to strict true/false. Accepts the
+# usual truthy/falsey synonyms (true/1/yes/on and false/0/no/off, case-insensitive)
+# silently; any other value normalises to false and earns a warning so typos surface.
+_normalise_db_flag() {
+  local name="$1" current="${(P)1}" normalised
+  normalised="$(to_json_bool "$current")"
+  case "${current:l}" in
+    true|1|yes|on|false|0|no|off) ;;
+    *) warn "Unrecognised $name='$current', using: $normalised." ;;
+  esac
+  typeset -g "$name=$normalised"
+}
+
+# validate_stale_threshold — Ensure GROVE_STALE_THRESHOLD is a non-negative integer
+# before it is consumed in arithmetic (see is_branch_stale in 04-git.sh). Falls back
+# to the default with a warning on invalid input. Mirrors validate_max_parallel.
+validate_stale_threshold() {
+  if [[ ! "$GROVE_STALE_THRESHOLD" =~ ^[0-9]+$ ]]; then
+    warn "Invalid GROVE_STALE_THRESHOLD='$GROVE_STALE_THRESHOLD', using default: 50."
+    GROVE_STALE_THRESHOLD=50
+  fi
 }
 
 # load_repo_config — Load repo-specific config overrides from bare repo directory
 load_repo_config() {
   local git_dir="$1"
   local repo_config="$git_dir/.groveconfig"
+
+  # Reset overridable keys to the global baseline first, so a per-repo override
+  # from a previously-loaded repo can't bleed into this one (multi-repo loops).
+  # Falls back to the current value if load_config never captured a baseline.
+  GROVE_URL_SUBDOMAIN="${GROVE_GLOBAL_URL_SUBDOMAIN-$GROVE_URL_SUBDOMAIN}"
+  DEFAULT_BASE="${GROVE_GLOBAL_DEFAULT_BASE-$DEFAULT_BASE}"
+  PROTECTED_BRANCHES="${GROVE_GLOBAL_PROTECTED_BRANCHES-$PROTECTED_BRANCHES}"
+  GROVE_STALE_THRESHOLD="${GROVE_GLOBAL_STALE_THRESHOLD-$GROVE_STALE_THRESHOLD}"
 
   # Handler for repo-specific config - restricted whitelist (security)
   _apply_repo_config() {
@@ -304,26 +358,23 @@ bytes_to_human() {
   local units=("K" "M" "G" "T")
   local unit_idx=1
   local size="$bytes"
+  local frac=0
 
-  # Input is in KB (from du -sk), so start with K (index 1)
-  # Convert to float-ish by keeping one decimal
+  # Input is in KB (from du -sk), so start with K (index 1).
+  # Keep one decimal of precision from the final division. The loop stops at the
+  # T cap (unit_idx 4) even if size is still >= 1024, so the decimal must be
+  # printed after the loop — otherwise large T-scale sizes lose their fraction.
   while (( size >= 1024 && unit_idx < 4 )); do
-    # Integer division with remainder for decimal
-    local whole=$((size / 1024))
-    local frac=$(( (size % 1024) * 10 / 1024 ))
-    size="$whole"
+    frac=$(( (size % 1024) * 10 / 1024 ))
+    size=$(( size / 1024 ))
     unit_idx=$((unit_idx + 1))
-
-    # If we have a meaningful fraction and we're stopping here
-    if (( size < 1024 )); then
-      if (( frac > 0 )); then
-        print -r -- "${size}.${frac}${units[$unit_idx]}"
-        return
-      fi
-    fi
   done
 
-  print -r -- "${size}${units[$unit_idx]}"
+  if (( frac > 0 )); then
+    print -r -- "${size}.${frac}${units[$unit_idx]}"
+  else
+    print -r -- "${size}${units[$unit_idx]}"
+  fi
 }
 
 # Get directory size in KB (single du call)
@@ -337,6 +388,16 @@ get_dir_size_kb() {
 }
 
 # ===== String Utilities (pure Zsh, zero subprocess spawns) =====
+
+# Map a loosely-typed value to a strict JSON boolean string.
+# true/1/yes/on (case-insensitive) -> "true"; everything else -> "false".
+# Usage: bool="$(to_json_bool "$DB_CREATE")"
+to_json_bool() {
+  case "${1:l}" in
+    true|1|yes|on) print -r -- "true" ;;
+    *)             print -r -- "false" ;;
+  esac
+}
 
 # Trim whitespace from both ends
 # Usage: str="$(trim "  hello  ")" -> "hello"
@@ -426,6 +487,12 @@ count_git_status_types() {
 }
 
 # ===== JSON Parsing (pure Zsh, zero subprocess spawns) =====
+#
+# These json_get_* helpers are naive regex extractors for FLAT JSON only — a single
+# object whose values are strings, numbers or booleans. They do NOT understand nested
+# objects or arrays, escaped quotes inside string values, or duplicate keys. For
+# anything richer, shell out to jq. (json_escape, which underpins JSON *output*, lives
+# in lib/07-templates.sh.)
 
 # Extract a string field from simple JSON
 # Usage: json_get_string '{"key":"value"}' "key" -> "value"

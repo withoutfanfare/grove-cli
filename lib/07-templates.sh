@@ -111,6 +111,12 @@ load_template() {
 
   local template_file="$GROVE_TEMPLATES_DIR/${template_name}.conf"
 
+  # Reset any skip flags from a previous template/operation before applying this
+  # one, so a stale exported GROVE_SKIP_*=true doesn't bleed into hooks here. Each
+  # template starts from the pristine default (absent == false).
+  unset GROVE_SKIP_DB GROVE_SKIP_COMPOSER GROVE_SKIP_NPM \
+        GROVE_SKIP_BUILD GROVE_SKIP_MIGRATE GROVE_SKIP_HERD
+
   # Check if template exists
   if [[ ! -f "$template_file" ]]; then
     local available_templates
@@ -253,9 +259,16 @@ format_json() {
   local result="$json"
   local formatted=""
 
+  local jq_coloured=false
   if [[ "$_GROVE_JSON_FORMATTER" == "jq" ]]; then
-    if formatted="$(print -r -- "$json" | jq . 2>/dev/null)"; then
+    # Use jq's structure-aware colouriser on a TTY rather than regex colouring,
+    # which would corrupt values containing ':' or embedded quotes.
+    local -a _jq_flags=()
+    [[ -t 1 ]] && { _jq_flags=(-C); jq_coloured=true; }
+    if formatted="$(print -r -- "$json" | jq "${_jq_flags[@]}" . 2>/dev/null)"; then
       result="$formatted"
+    else
+      jq_coloured=false
     fi
   elif [[ "$_GROVE_JSON_FORMATTER" == "python3" ]]; then
     if formatted="$(print -r -- "$json" | python3 -m json.tool 2>/dev/null)"; then
@@ -270,8 +283,9 @@ format_json() {
     result="${result//\}, /'},\n  '}"
   fi
 
-  # Apply colours if terminal supports it
-  if [[ -t 1 ]]; then
+  # Apply colours if terminal supports it (skip when jq already colourised,
+  # since the regex-based colouring can corrupt values containing ':' or quotes)
+  if [[ -t 1 && "$jq_coloured" != true ]]; then
     # Colour keys (words before colons)
     result="$(print -r -- "$result" | sed -E "s/\"([^\"]+)\":/\"${C_CYAN}\1${C_RESET}\":/g")"
     # Colour string values

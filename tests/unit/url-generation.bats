@@ -35,19 +35,19 @@ teardown() {
   [ "$result" = "myapp" ]
 }
 
-@test "site_name_for: feature branch returns last segment" {
+@test "site_name_for: feature branch uses full slugified branch" {
   result="$(site_name_for "myapp" "feature/login")"
-  [ "$result" = "login" ]
+  [ "$result" = "feature-login" ]
 }
 
-@test "site_name_for: nested branch returns last segment" {
+@test "site_name_for: nested branch uses full slugified branch" {
   result="$(site_name_for "myapp" "feature/user/auth")"
-  [ "$result" = "auth" ]
+  [ "$result" = "feature-user-auth" ]
 }
 
-@test "site_name_for: deeply nested branch returns last segment" {
+@test "site_name_for: deeply nested branch uses full slugified branch" {
   result="$(site_name_for "myapp" "feature/dh/uat/build-test")"
-  [ "$result" = "build-test" ]
+  [ "$result" = "feature-dh-uat-build-test" ]
 }
 
 @test "site_name_for: simple branch without slash returns branch name" {
@@ -55,14 +55,23 @@ teardown() {
   [ "$result" = "develop" ]
 }
 
-@test "site_name_for: bugfix branch returns last segment" {
+@test "site_name_for: bugfix branch uses full slugified branch" {
   result="$(site_name_for "myapp" "bugfix/fix-login")"
-  [ "$result" = "fix-login" ]
+  [ "$result" = "bugfix-fix-login" ]
 }
 
-@test "site_name_for: release branch with dots" {
+@test "site_name_for: release branch with dots is slugified" {
   result="$(site_name_for "myapp" "release/v1.2.3")"
-  [ "$result" = "v1.2.3" ]
+  [ "$result" = "release-v1-2-3" ]
+}
+
+# Distinct branches that share a final segment must not collide (#25)
+@test "site_name_for: branches sharing a final segment do not collide" {
+  alice="$(site_name_for "myapp" "alice/dashboard")"
+  bob="$(site_name_for "myapp" "bob/dashboard")"
+  [ "$alice" = "alice-dashboard" ]
+  [ "$bob" = "bob-dashboard" ]
+  [ "$alice" != "$bob" ]
 }
 
 # ============================================================================
@@ -74,14 +83,14 @@ teardown() {
   [ "$result" = "$HERD_ROOT/myapp-worktrees/myapp" ]
 }
 
-@test "worktree_path_for: feature branch uses last segment" {
+@test "worktree_path_for: feature branch uses full slugified branch" {
   result="$(worktree_path_for "myapp" "feature/login")"
-  [ "$result" = "$HERD_ROOT/myapp-worktrees/login" ]
+  [ "$result" = "$HERD_ROOT/myapp-worktrees/feature-login" ]
 }
 
-@test "worktree_path_for: nested branch uses last segment" {
+@test "worktree_path_for: nested branch uses full slugified branch" {
   result="$(worktree_path_for "myapp" "feature/user/auth")"
-  [ "$result" = "$HERD_ROOT/myapp-worktrees/auth" ]
+  [ "$result" = "$HERD_ROOT/myapp-worktrees/feature-user-auth" ]
 }
 
 @test "worktree_path_for: repo with dashes" {
@@ -124,14 +133,14 @@ teardown() {
   [ "$result" = "https://myapp.test" ]
 }
 
-@test "url_for: feature branch uses last segment" {
+@test "url_for: feature branch uses full slugified branch" {
   result="$(url_for "myapp" "feature/login")"
-  [ "$result" = "https://login.test" ]
+  [ "$result" = "https://feature-login.test" ]
 }
 
-@test "url_for: nested branch uses last segment" {
+@test "url_for: nested branch uses full slugified branch" {
   result="$(url_for "myapp" "feature/user/auth")"
-  [ "$result" = "https://auth.test" ]
+  [ "$result" = "https://feature-user-auth.test" ]
 }
 
 @test "url_for: uses https" {
@@ -167,7 +176,7 @@ teardown() {
 @test "url_for: subdomain with feature branch" {
   export GROVE_URL_SUBDOMAIN="api"
   result="$(url_for "myapp" "feature/login")"
-  [ "$result" = "https://api.login.test" ]
+  [ "$result" = "https://api.feature-login.test" ]
 }
 
 @test "url_for: empty subdomain produces no prefix" {
@@ -212,9 +221,9 @@ teardown() {
   path="$(worktree_path_for "$repo" "$branch")"
   url="$(url_for "$repo" "$branch")"
 
-  # Both should use "build-test" (last segment of branch)
-  [[ "$path" == *"/build-test" ]]
-  [[ "$url" == *"build-test.test" ]]
+  # Both should use the full slugified branch
+  [[ "$path" == *"/feature-dh-uat-build-test" ]]
+  [[ "$url" == *"feature-dh-uat-build-test.test" ]]
 }
 
 @test "path and url consistent for main branch" {
@@ -243,22 +252,22 @@ teardown() {
   [ "$result" = "https://b.test" ]
 }
 
-@test "worktree_path_for: branch with dots" {
+@test "worktree_path_for: branch with dots is slugified" {
   result="$(worktree_path_for "myapp" "release/v1.2.3")"
-  [ "$result" = "$HERD_ROOT/myapp-worktrees/v1.2.3" ]
+  [ "$result" = "$HERD_ROOT/myapp-worktrees/release-v1-2-3" ]
 }
 
-@test "url_for: branch with dots" {
+@test "url_for: branch with dots is slugified" {
   result="$(url_for "myapp" "release/v1.2.3")"
-  [ "$result" = "https://v1.2.3.test" ]
+  [ "$result" = "https://release-v1-2-3.test" ]
 }
 
-@test "worktree_path_for: branch with slash gets slugified feature name" {
+@test "worktree_path_for: branch with slash gets full slugified branch" {
   result="$(worktree_path_for "myapp" "feature/my-great-feature")"
-  [ "$result" = "$HERD_ROOT/myapp-worktrees/my-great-feature" ]
+  [ "$result" = "$HERD_ROOT/myapp-worktrees/feature-my-great-feature" ]
 }
 
-@test "url_for: bugfix branch" {
+@test "url_for: bugfix branch uses full slugified branch" {
   result="$(url_for "myapp" "bugfix/fix-auth")"
-  [ "$result" = "https://fix-auth.test" ]
+  [ "$result" = "https://bugfix-fix-auth.test" ]
 }

@@ -67,46 +67,47 @@ cmd_info() {
     untracked="${rest##* }"
   fi
 
-  # Disk usage - single du call per path, convert to human-readable in Zsh
-  local total_kb total_size total_bytes
-  total_kb="$(get_dir_size_kb "$wt_path")"
-  total_bytes=$((total_kb * 1024))
-  total_size="$(bytes_to_human "$total_kb")"
+  # Disk usage - single du call per path, convert to human-readable in Zsh.
+  # The du×3 walk and the MySQL probe below are the slow parts of this command.
+  # For --json consumers that only need metadata, GROVE_INFO_FAST=true skips the
+  # heavy work (disk fields report 0, database.exists reports false). The text
+  # view, and JSON without the opt-out, always compute the real values so the
+  # data contract stays accurate by default.
+  local skip_heavy=false
+  [[ "$JSON_OUTPUT" == true && "${GROVE_INFO_FAST:-false}" == true ]] && skip_heavy=true
 
+  local total_kb=0 total_size="0K" total_bytes=0
   local nm_size="" nm_bytes=0
-  if [[ -d "$wt_path/node_modules" ]]; then
-    local nm_kb
-    nm_kb="$(get_dir_size_kb "$wt_path/node_modules")"
-    nm_bytes=$((nm_kb * 1024))
-    nm_size="$(bytes_to_human "$nm_kb")"
-  fi
-
   local vendor_size="" vendor_bytes=0
-  if [[ -d "$wt_path/vendor" ]]; then
-    local vendor_kb
-    vendor_kb="$(get_dir_size_kb "$wt_path/vendor")"
-    vendor_bytes=$((vendor_kb * 1024))
-    vendor_size="$(bytes_to_human "$vendor_kb")"
+  if [[ "$skip_heavy" != true ]]; then
+    total_kb="$(get_dir_size_kb "$wt_path")"
+    total_bytes=$((total_kb * 1024))
+    total_size="$(bytes_to_human "$total_kb")"
+
+    if [[ -d "$wt_path/node_modules" ]]; then
+      local nm_kb
+      nm_kb="$(get_dir_size_kb "$wt_path/node_modules")"
+      nm_bytes=$((nm_kb * 1024))
+      nm_size="$(bytes_to_human "$nm_kb")"
+    fi
+
+    if [[ -d "$wt_path/vendor" ]]; then
+      local vendor_kb
+      vendor_kb="$(get_dir_size_kb "$wt_path/vendor")"
+      vendor_bytes=$((vendor_kb * 1024))
+      vendor_size="$(bytes_to_human "$vendor_kb")"
+    fi
   fi
 
   # Framework detection
   local framework="" framework_version="" php_version=""
   if [[ -f "$wt_path/artisan" ]]; then
     framework="laravel"
-    # Extract Laravel version from composer.lock using pure Zsh regex
-    if [[ -f "$wt_path/composer.lock" ]]; then
-      local lock_line
-      while IFS= read -r lock_line; do
-        if [[ "$lock_line" == *"laravel/framework"* ]]; then
-          # Read next few lines to find version
-          while IFS= read -r lock_line; do
-            if [[ "$lock_line" =~ \"version\":[[:space:]]*\"([^\"]+)\" ]]; then
-              framework_version="${match[1]}"
-              break 2
-            fi
-          done
-        fi
-      done < "$wt_path/composer.lock"
+    # Resolve the laravel/framework version from composer.lock. Match the
+    # package by name with jq so we read ITS version, not whichever "version"
+    # field happens to follow the matched line.
+    if [[ -f "$wt_path/composer.lock" ]] && command -v jq >/dev/null 2>&1; then
+      framework_version="$(jq -r '(.packages[]? | select(.name == "laravel/framework") | .version) // empty' "$wt_path/composer.lock" 2>/dev/null)" || framework_version=""
     fi
     php_version="$(php -r 'echo PHP_VERSION;' 2>/dev/null)" || php_version=""
   fi
@@ -116,9 +117,9 @@ cmd_info() {
     node_deps="$(jq '.dependencies | length' "$wt_path/package.json" 2>/dev/null || echo 0)"
   fi
 
-  # Database check
+  # Database check (synchronous MySQL probe — skipped under GROVE_INFO_FAST)
   local db_exists=false
-  if command -v mysql >/dev/null 2>&1; then
+  if [[ "$skip_heavy" != true ]] && command -v mysql >/dev/null 2>&1; then
     # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
     local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
     if MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1 FROM information_schema.schemata WHERE schema_name='$db_name'" 2>/dev/null | grep -q 1; then
@@ -177,8 +178,13 @@ cmd_info() {
     json+="\"sha_short\": \"$_je_ssha\", "
     json+="\"branch\": \"$_je_branch\", "
     json+="\"tracking\": \"$_je_track\", "
-    json+="\"ahead\": $ahead, "
-    json+="\"behind\": $behind, "
+    # Map the unknown sentinel to JSON null (base unresolved) so the contract
+    # stays valid — mirrors cmd_ls/cmd_status in info.sh.
+    local ahead_json="$ahead" behind_json="$behind"
+    [[ "$ahead_json" == "$GROVE_UNKNOWN" ]] && ahead_json="null"
+    [[ "$behind_json" == "$GROVE_UNKNOWN" ]] && behind_json="null"
+    json+="\"ahead\": $ahead_json, "
+    json+="\"behind\": $behind_json, "
     json+="\"dirty\": $dirty, "
     json+="\"changes\": $changes, "
     json+="\"last_message\": \"$_je_msg\", "
@@ -291,13 +297,17 @@ cmd_info() {
 # cmd_recent — List recently accessed worktrees sorted by access time
 cmd_recent() {
   local limit="${1:-5}"
+  # Validate the limit before it reaches the array slice below: a non-numeric
+  # value (e.g. "abc") would make the slice fail under set -e. Fall back to the
+  # default on anything that is not a non-negative integer.
+  [[ "$limit" == <-> ]] || limit=5
 
   # Find all worktrees and sort by access time
   local worktrees=()
 
   # Declare loop-scoped variables BEFORE the loop to avoid zsh local re-declaration bug
-  local repo_name wt_path wt_branch atime
-  local entry rest repo branch now age age_str
+  local repo_name wt_path wt_branch atime wt_url
+  local entry rest repo branch url now age age_str
 
   local repo_wts wt_entry
   for git_dir in "$HERD_ROOT"/*.git(N); do
@@ -314,7 +324,12 @@ cmd_recent() {
       wt_branch="${wt_entry##*|}"
       [[ -d "$wt_path" ]] || continue
       atime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
-      worktrees+=("$atime|$repo_name|$wt_path|$wt_branch")
+      # Resolve the URL HERE, while this repo's config (GROVE_URL_SUBDOMAIN) is
+      # loaded — resolving it later would apply the last repo's subdomain to
+      # every entry. wt_path/wt_branch contain no '|', so it is the safe field
+      # to widen the record with.
+      wt_url="$(url_for "$repo_name" "$wt_branch")"
+      worktrees+=("$atime|$repo_name|$wt_path|$wt_url|$wt_branch")
     done
   done
 
@@ -344,10 +359,9 @@ cmd_recent() {
       repo="${rest%%|*}"
       rest="${rest#*|}"
       wt_path="${rest%%|*}"
+      rest="${rest#*|}"
+      url="${rest%%|*}"
       branch="${rest##*|}"
-
-      # Get URL
-      local url="$(url_for "$repo" "$branch")"
 
       # Check dirty status
       local dirty=false
@@ -390,6 +404,8 @@ cmd_recent() {
     repo="${rest%%|*}"
     rest="${rest#*|}"
     wt_path="${rest%%|*}"
+    rest="${rest#*|}"
+    url="${rest%%|*}"
     branch="${rest##*|}"
 
     # Format time
@@ -512,6 +528,36 @@ _clean_process_repo() {
   REPLY="${repo_saved}|${repo_cleaned}"
 }
 
+# Default inactivity window (days) before a worktree's dependencies are
+# considered cleanable. Overridable via the GROVE_CLEAN_INACTIVE_DAYS env var.
+CLEAN_INACTIVE_DAYS_DEFAULT=30
+
+# Run _clean_process_repo across every repo under HERD_ROOT, accumulating the
+# saved/cleaned totals. dry_run is honoured as given, so this serves both the
+# preview pass and the real deletion pass.
+#
+# Arguments:
+#   $1 - inactive_days threshold
+#   $2 - dry_run flag (true/false)
+#
+# Output:
+#   Sets REPLY to "saved|cleaned" with cumulative totals
+_clean_process_all_repos() {
+  local inactive_days="$1"
+  local dry_run="$2"
+  local all_saved=0
+  local all_cleaned=0
+  local git_dir repo_name
+  for git_dir in "$HERD_ROOT"/*.git(N); do
+    [[ -d "$git_dir" ]] || continue
+    repo_name="${${git_dir:t}%.git}"
+    _clean_process_repo "$repo_name" "$inactive_days" "$dry_run"
+    all_saved=$((all_saved + ${REPLY%%|*}))
+    all_cleaned=$((all_cleaned + ${REPLY##*|}))
+  done
+  REPLY="${all_saved}|${all_cleaned}"
+}
+
 # cmd_clean — Remove node_modules and vendor directories from inactive worktrees
 cmd_clean() {
   local repo="${1:-}"
@@ -521,27 +567,53 @@ cmd_clean() {
   print -r -- "${C_BOLD}Clean Inactive Worktrees${C_RESET}"
   print -r -- ""
 
-  local inactive_days=30
+  local inactive_days="${GROVE_CLEAN_INACTIVE_DAYS:-$CLEAN_INACTIVE_DAYS_DEFAULT}"
+  # Guard against a non-numeric override reaching the age comparison.
+  [[ "$inactive_days" == <-> ]] || inactive_days=$CLEAN_INACTIVE_DAYS_DEFAULT
   local total_saved=0
   local cleaned=0
 
   # Declare loop-scoped variables
-  local repo_name total_human
+  local total_human
 
   if [[ -n "$repo" ]]; then
     validate_name "$repo" "repository"
     _clean_process_repo "$repo" "$inactive_days" "$dry_run"
     total_saved="${REPLY%%|*}"
     cleaned="${REPLY##*|}"
+  elif [[ "$dry_run" == true ]]; then
+    # Preview across all repos — no deletion, no confirmation needed.
+    _clean_process_all_repos "$inactive_days" "$dry_run"
+    total_saved="${REPLY%%|*}"
+    cleaned="${REPLY##*|}"
   else
-    # Process all repos
-    for git_dir in "$HERD_ROOT"/*.git(N); do
-      [[ -d "$git_dir" ]] || continue
-      repo_name="${${git_dir:t}%.git}"
-      _clean_process_repo "$repo_name" "$inactive_days" "$dry_run"
-      total_saved=$((total_saved + ${REPLY%%|*}))
-      cleaned=$((cleaned + ${REPLY##*|}))
-    done
+    # Bare `grove clean` deletes node_modules/vendor across EVERY repo. That is
+    # destructive and wide-reaching, so first show exactly what would be removed
+    # (a dry-run preview), then require confirmation before deleting anything.
+    # confirm() auto-passes under --force for non-interactive use.
+    _clean_process_all_repos "$inactive_days" "true"
+    local preview_saved="${REPLY%%|*}"
+    local preview_cleaned="${REPLY##*|}"
+
+    if (( preview_cleaned == 0 )); then
+      ok "No inactive worktrees with cleanable dependencies found"
+      print -r -- ""
+      return 0
+    fi
+
+    total_human="$(_format_size_bytes $preview_saved)"
+    print -r -- ""
+    if ! confirm "Delete node_modules/vendor for ${preview_cleaned} inactive worktree(s) across all repos (frees ${total_human})?"; then
+      dim "  Aborted — nothing deleted"
+      print -r -- ""
+      return 0
+    fi
+    print -r -- ""
+
+    # Confirmed — perform the real deletion pass.
+    _clean_process_all_repos "$inactive_days" "$dry_run"
+    total_saved="${REPLY%%|*}"
+    cleaned="${REPLY##*|}"
   fi
 
   if (( cleaned == 0 )); then

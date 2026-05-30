@@ -27,15 +27,15 @@ DEFAULT_BASE=origin/staging
 # Editor to open with 'grove code' (cursor, code, zed, etc.)
 DEFAULT_EDITOR=cursor
 
-# Database connection (for auto-creating databases)
+# Database connection (read by the reference DB helpers)
 DB_HOST=127.0.0.1
 DB_USER=root
 DB_PASSWORD=
-DB_CREATE=true  # Set to 'false' to disable auto-creation
+DB_CREATE=true  # Gate for the reference DB-create helper (run by lifecycle hooks)
 
-# Database backup on removal
-DB_BACKUP=true  # Set to 'false' to disable backups
-DB_BACKUP_DIR="$HOME/Code/Project Support/Worktree/Database/Backup"
+# Database backup gate
+DB_BACKUP=true  # Gate for the reference DB-backup helper (run by lifecycle hooks)
+DB_BACKUP_DIR="$HOME/.grove/backups"
 
 # Protected branches (require -f to remove)
 PROTECTED_BRANCHES="staging main master"
@@ -74,7 +74,7 @@ Each repository can have its own configuration file inside the bare git director
 | `DEFAULT_BASE` | Base branch for new worktrees | `origin/develop` |
 | `GROVE_URL_SUBDOMAIN` | URL subdomain pattern | `api` |
 | `PROTECTED_BRANCHES` | Branches requiring `-f` to remove | `main master` |
-| `DB_CREATE` | Enable/disable database creation for this repo | `true` |
+| `GROVE_STALE_THRESHOLD` | Days before a worktree is considered stale | `50` |
 
 **Example repo config:**
 
@@ -87,8 +87,8 @@ DEFAULT_BASE=origin/develop
 # Optional: custom protected branches for this repo
 # PROTECTED_BRANCHES="main develop"
 
-# Enable database creation for this repo (overrides global DB_CREATE=false)
-# DB_CREATE=true
+# Optional: treat worktrees as stale after this many days
+# GROVE_STALE_THRESHOLD=30
 ```
 
 ## All Configuration Options
@@ -110,9 +110,9 @@ DEFAULT_BASE=origin/develop
 | `DB_HOST` | `127.0.0.1` | MySQL host for database operations |
 | `DB_USER` | `root` | MySQL user for database operations |
 | `DB_PASSWORD` | (empty) | MySQL password |
-| `DB_CREATE` | `true` | Auto-create database on `grove add` |
-| `DB_BACKUP` | `true` | Backup database before `grove rm` |
-| `DB_BACKUP_DIR` | `~/Code/Project Support/Worktree/Database/Backup` | Backup directory |
+| `DB_CREATE` | `true` | Gate for the reference DB-create helper invoked by lifecycle hooks (see `examples/hooks/`) — not automatic on `grove add` |
+| `DB_BACKUP` | `true` | Gate for the reference DB-backup helper invoked by lifecycle hooks (see `examples/hooks/`) — not automatic on `grove rm` |
+| `DB_BACKUP_DIR` | `~/.grove/backups` | Backup directory used by the reference DB-backup helper |
 
 ### Hook Settings
 
@@ -156,6 +156,7 @@ See `examples/hooks/README.md` for detailed hook documentation and examples.
 |----------|---------|-------------|
 | `GROVE_MAX_PARALLEL` | `4` | Maximum concurrent parallel operations |
 | `GROVE_SHARED_DEPS_DIR` | `~/.grove/shared-deps` | Directory for shared dependencies |
+| `GROVE_INFO_FAST` | `false` | When `true`, `grove info --json` skips the heavy disk-size and MySQL probes (metadata only) |
 
 ### Repository Groups
 

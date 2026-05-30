@@ -2,6 +2,88 @@
 
 > Checklist for verifying grove-cli changes against the grove-app Tauri desktop application.
 
+This document has two parts:
+
+1. **[Reusable Verification Checklist](#reusable-verification-checklist)** — run this for *any* release that could affect the JSON data contract. Keep it current.
+2. **[Historical: `feat/release-packaging`](#historical-featrelease-packaging)** — the original retrospective for the merged `feat/release-packaging` PR. Point-in-time record; do not edit for new releases.
+
+---
+
+## Reusable Verification Checklist
+
+### JSON contract verification (`verify-json.sh`)
+
+Every JSON command must parse cleanly. Rather than repeat the same `python3 -c "import json,sys; json.load(sys.stdin)"` idiom for each endpoint, use one parameterised helper:
+
+```bash
+#!/usr/bin/env bash
+# verify-json.sh <command...> -- run a grove JSON command and confirm it parses.
+# Usage: ./verify-json.sh repos
+#        ./verify-json.sh ls myrepo
+verify_json() {
+  local label="$*"
+  printf '%-40s ' "$label:"
+  if ./grove "$@" --json | python3 -c "import json,sys; json.load(sys.stdin)"; then
+    echo "OK"
+  else
+    echo "FAIL"
+    return 1
+  fi
+}
+
+# Full JSON matrix. Replace <repo>/<branch> with real values from your machine.
+REPO="${1:-myrepo}"
+BRANCH="${2:-main}"
+
+verify_json repos
+verify_json recent
+verify_json config
+verify_json services apps
+verify_json ls "$REPO"
+verify_json branches "$REPO"
+verify_json health "$REPO"
+verify_json status "$REPO"
+verify_json log "$REPO" "$BRANCH"
+verify_json changes "$REPO" "$BRANCH"
+verify_json summary "$REPO" "$BRANCH"
+verify_json info "$REPO" "$BRANCH"
+```
+
+Run it with a repo (and optionally a branch) that exists locally:
+
+```bash
+./verify-json.sh myrepo feature/my-branch
+```
+
+This covers the full matrix in [Tauri App Compatibility Matrix](#tauri-app-compatibility-matrix). Wherever this guide shows a single `... | python3 -c "import json,sys; json.load(sys.stdin)"` invocation, it is shorthand for one `verify_json` call.
+
+### Pre-flight (CLI)
+
+```bash
+# 1. Version check
+grove --version
+
+# 2. Full test suite.
+#    IMPORTANT: ./run-tests.sh reports green even when shellcheck is NOT installed
+#    -- the lint stage is SILENTLY SKIPPED. For a complete gate, install shellcheck
+#    first (brew install shellcheck) and confirm the lint stage actually runs.
+command -v shellcheck >/dev/null || echo "WARNING: shellcheck missing -- lint stage will be skipped"
+./run-tests.sh
+
+# 3. JSON contract -- run the full matrix (see verify-json.sh above)
+./verify-json.sh myrepo
+```
+
+### Tauri app smoke tests
+
+Run the [Tauri App Smoke Tests](#tauri-app-smoke-tests) below against the desktop app after updating the CLI.
+
+---
+
+## Historical: `feat/release-packaging`
+
+> The remainder of this document is the original retrospective for the `feat/release-packaging` PR. It is kept for reference and is **not** updated for subsequent releases.
+
 **Branch:** `feat/release-packaging` (merged to main)
 **Date:** 2026-04-13
 
@@ -73,31 +155,33 @@ Returns an empty array `[]` if no apps are registered.
 
 ### Existing JSON Endpoints (UNCHANGED)
 
-All existing JSON endpoints are unmodified. Verify each still works as expected:
+All existing JSON endpoints are unmodified. Verify each still works as expected. The "Verify" column shows the `verify_json` helper from the [reusable checklist](#json-contract-verification-verify-jsonsh); each call appends `--json` and pipes through `json.load`, so there's no need to repeat the Python idiom per row.
 
-| Command | Expected Behaviour | Test |
-|---------|-------------------|------|
-| `grove repos --json` | Array of repo objects | `grove repos --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove ls <repo> --json` | Array of worktree objects | `grove ls <repo> --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove recent --json` | Array of recent worktree objects | `grove recent --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove branches <repo> --json` | Array of branch objects | `grove branches <repo> --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove health <repo> --json` | Health report object | `grove health <repo> --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove status <repo> --json` | Array of status objects | `grove status <repo> --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove log <repo> <branch> --json` | Array of commit objects | `grove log <repo> <branch> --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove changes <repo> <branch> --json` | Array of file change objects | `grove changes <repo> <branch> --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove summary <repo> <branch> --json` | Summary object | `grove summary <repo> <branch> --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove config --json` | Config object | `grove config --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
-| `grove info <repo> <branch> --json` | Worktree detail object | `grove info <repo> <branch> --json \| python3 -c "import json,sys; json.load(sys.stdin)"` |
+| Command | Expected Behaviour | Verify |
+|---------|-------------------|--------|
+| `grove repos --json` | Array of repo objects | `verify_json repos` |
+| `grove ls <repo> --json` | Array of worktree objects | `verify_json ls <repo>` |
+| `grove recent --json` | Array of recent worktree objects | `verify_json recent` |
+| `grove branches <repo> --json` | Array of branch objects | `verify_json branches <repo>` |
+| `grove health <repo> --json` | Health report object | `verify_json health <repo>` |
+| `grove status <repo> --json` | Array of status objects | `verify_json status <repo>` |
+| `grove log <repo> <branch> --json` | Array of commit objects | `verify_json log <repo> <branch>` |
+| `grove changes <repo> <branch> --json` | Array of file change objects | `verify_json changes <repo> <branch>` |
+| `grove summary <repo> <branch> --json` | Summary object | `verify_json summary <repo> <branch>` |
+| `grove config --json` | Config object | `verify_json config` |
+| `grove info <repo> <branch> --json` | Worktree detail object | `verify_json info <repo> <branch>` |
 
 ### New JSON Endpoint
 
-| Command | Schema | Test |
-|---------|--------|------|
-| `grove services apps --json` | Array of `{name, system_name, services, supervisor_process, domain}` | See Section 1 above |
+| Command | Schema | Verify |
+|---------|--------|--------|
+| `grove services apps --json` | Array of `{name, system_name, services, supervisor_process, domain}` | `verify_json services apps` |
 
 ---
 
 ## Verification Checklist
+
+> PR-specific verification run for `feat/release-packaging`. For a release-agnostic version, use the [Reusable Verification Checklist](#reusable-verification-checklist) at the top of this document.
 
 ### Pre-flight (CLI)
 
@@ -107,7 +191,9 @@ Run these from the terminal to confirm grove-cli is working:
 # 1. Version check
 grove --version
 
-# 2. Full test suite
+# 2. Full test suite.
+#    NOTE: ./run-tests.sh passes even when shellcheck is missing (lint is silently
+#    skipped). Install shellcheck (brew install shellcheck) for a complete gate.
 ./run-tests.sh
 
 # 3. Help shows new section
@@ -119,12 +205,15 @@ grove services
 # 5. Idempotent restart (should exit 0 silently)
 grove services restart nonexistent-app; echo "Exit: $?"
 
-# 6. Validate all existing JSON endpoints
+# 6. JSON smoke sample (NOT the full matrix -- repos/recent only).
+#    For the full JSON contract, run ./verify-json.sh from the reusable checklist above.
 for cmd in "repos" "recent"; do
   echo -n "$cmd: "
   grove $cmd --json | python3 -c "import json,sys; json.load(sys.stdin)" && echo "OK" || echo "FAIL"
 done
 ```
+
+> The loop above is a **smoke sample** -- it touches only `repos` and `recent`. The compatibility matrix below lists all 11+ JSON endpoints; verify them with `./verify-json.sh` (see the [reusable checklist](#json-contract-verification-verify-jsonsh)).
 
 ### Tauri App Smoke Tests
 

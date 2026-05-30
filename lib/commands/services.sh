@@ -34,16 +34,33 @@ svc_load_config() {
     return 0  # No config is valid - just means no apps registered
   fi
 
-  local app_name system_name services supervisor_process domain
-  while IFS='|' read -r app_name system_name services supervisor_process domain || [[ -n "$app_name" ]]; do
-    # Skip comments and empty lines
-    [[ -z "$app_name" || "$app_name" == \#* ]] && continue
-    # Trim whitespace
-    app_name="${app_name// /}"
-    system_name="${system_name// /}"
-    services="${services// /}"
-    supervisor_process="${supervisor_process// /}"
-    domain="${domain// /}"
+  local raw app_name system_name services supervisor_process domain
+  local -a fields
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    # Skip comments and empty/whitespace-only lines
+    [[ -z "${raw// /}" || "$raw" == \#* ]] && continue
+
+    # The registry is a 5-field pipe-delimited format. Reject malformed lines
+    # (wrong field count) rather than silently registering a bogus app — a stray
+    # '|' would otherwise shift columns and corrupt `services apps --json`.
+    fields=("${(@s:|:)raw}")
+    if (( ${#fields} != 5 )); then
+      warn "Skipping malformed registry line (expected 5 fields, got ${#fields}): $raw" >&2
+      continue
+    fi
+
+    # Trim leading/trailing whitespace only — internal spaces are preserved.
+    svc_trim "${fields[1]}"; app_name="$REPLY"
+    svc_trim "${fields[2]}"; system_name="$REPLY"
+    svc_trim "${fields[3]}"; services="$REPLY"
+    svc_trim "${fields[4]}"; supervisor_process="$REPLY"
+    svc_trim "${fields[5]}"; domain="$REPLY"
+
+    # An empty app name has no usable key — skip it.
+    if [[ -z "$app_name" ]]; then
+      warn "Skipping malformed registry line (empty app name): $raw" >&2
+      continue
+    fi
 
     SVC_APPS[$app_name]="$services"
     SVC_SYSTEM_NAMES[$app_name]="$system_name"
@@ -56,6 +73,15 @@ svc_load_config() {
 }
 
 # --- Helper Functions ---
+
+# svc_trim — Strip leading/trailing whitespace only (internal spaces preserved).
+# Uses plain globbing so it works regardless of the EXTENDED_GLOB option.
+svc_trim() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"   # strip leading whitespace
+  v="${v%"${v##*[![:space:]]}"}"   # strip trailing whitespace
+  REPLY="$v"
+}
 
 svc_has_apps() {
   (( ${#SVC_APPS} > 0 ))
@@ -99,6 +125,30 @@ svc_get_app_list() {
   printf '%s\n' "${(k)SVC_APPS[@]}" | sort
 }
 
+# svc_validate_field — Reject values that would corrupt the pipe-delimited registry.
+# A '|' or newline in any persisted field shifts/duplicates columns, which then
+# silently corrupts svc_load_config and the `services apps --json` data contract.
+svc_validate_field() {
+  local label="$1" value="$2"
+  if [[ "$value" == *"|"* ]]; then
+    die "Invalid $label: '$value' (must not contain '|')"
+  fi
+  if [[ "$value" == *$'\n'* ]]; then
+    die "Invalid $label: '$value' (must not contain newlines)"
+  fi
+}
+
+# svc_validate_domain — Field check plus a hostname whitelist. A domain is written
+# verbatim into the registry and later used to build URLs, so restrict it to the
+# characters valid in a hostname (alphanumerics, dash, dot).
+svc_validate_domain() {
+  local domain="$1"
+  svc_validate_field "domain" "$domain"
+  if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+    die "Invalid domain: '$domain' (only alphanumeric, dash, and dot allowed)"
+  fi
+}
+
 # --- Commands ---
 
 svc_show_app_status() {
@@ -137,12 +187,20 @@ svc_show_app_status() {
 
   # Horizon status
   if svc_app_uses_horizon "$app" && [[ -L "$symlink" ]]; then
-    local horizon_status
-    horizon_status="$(cd "$symlink" && php artisan horizon:status 2>&1)" || true
-    if print -r -- "$horizon_status" | grep -q "running"; then
-      ok "Horizon: Running"
+    # Don't report Inactive when we simply can't query: php or the app's artisan
+    # binary may be missing. Distinguish "can't check" from a real Inactive state.
+    if ! command -v php &> /dev/null; then
+      warn "Horizon: Unknown (php not installed)"
+    elif [[ ! -f "$symlink/artisan" ]]; then
+      warn "Horizon: Unknown (artisan not found)"
     else
-      warn "Horizon: Inactive"
+      local horizon_status
+      horizon_status="$(cd "$symlink" && php artisan horizon:status 2>&1)" || true
+      if print -r -- "$horizon_status" | grep -q "running"; then
+        ok "Horizon: Running"
+      else
+        warn "Horizon: Inactive"
+      fi
     fi
   fi
 
@@ -374,14 +432,16 @@ cmd_services_apps() {
 }
 
 cmd_services_apps_json() {
+  # Build the array of object strings, then emit via format_json so --pretty
+  # (PRETTY_JSON) is honoured, matching every other JSON command.
+  #
   # json_escape sets $REPLY (it does not print) — declare vars outside the loop and
-  # read $REPLY after each call, matching the pattern used by every other JSON command.
-  local first=true
+  # read $REPLY after each call so we never trigger the zsh `local var; var=$(...)`
+  # debug-output pitfall that would corrupt the JSON contract.
+  local json_items=()
   local app_name system_name services process domain
   local je_name je_system je_services je_process je_domain
-  print -r -- "["
   for app_name in $(svc_get_app_list); do
-    [[ "$first" == true ]] && first=false || print -r -- ","
     system_name="${SVC_SYSTEM_NAMES[$app_name]}"
     services="${SVC_SERVICES[$app_name]}"
     process="${SVC_SUPERVISOR_PROCESSES[$app_name]}"
@@ -391,11 +451,10 @@ cmd_services_apps_json() {
     json_escape "$services";     je_services="$REPLY"
     json_escape "$process";      je_process="$REPLY"
     json_escape "$domain";       je_domain="$REPLY"
-    printf '  {"name":"%s","system_name":"%s","services":"%s","supervisor_process":"%s","domain":"%s"}' \
-      "$je_name" "$je_system" "$je_services" "$je_process" "$je_domain"
+    json_items+=("$(printf '{"name":"%s","system_name":"%s","services":"%s","supervisor_process":"%s","domain":"%s"}' \
+      "$je_name" "$je_system" "$je_services" "$je_process" "$je_domain")")
   done
-  print -r -- ""
-  print -r -- "]"
+  format_json "[${(j:, :)json_items}]"
 }
 
 cmd_services_add() {
@@ -469,6 +528,13 @@ cmd_services_add() {
 CONF
   fi
 
+  # Validate the remaining fields before they are written verbatim into the
+  # pipe-delimited registry — a '|', newline, or non-hostname character would
+  # corrupt svc_load_config and the `services apps --json` data contract.
+  svc_validate_field "system name" "$system_name"
+  svc_validate_field "supervisor process" "$supervisor"
+  svc_validate_domain "$domain"
+
   # Append to config
   print -r -- "${name}|${system_name}|${services}|${supervisor}|${domain}" >> "$GROVE_SERVICES_CONF"
 
@@ -491,9 +557,11 @@ cmd_services_remove() {
 
   svc_validate_app "$name"
 
-  # Remove the line from config (match on app name at start of line)
+  # Remove the line from config (match on app name at start of line). Use awk with
+  # a literal prefix comparison rather than grep — a regex would let a name like
+  # 'my.app' also match 'myXapp', removing the wrong entry.
   local tmp="${GROVE_SERVICES_CONF}.tmp"
-  grep -v "^${name}|" "$GROVE_SERVICES_CONF" > "$tmp"
+  awk -v prefix="${name}|" 'substr($0, 1, length(prefix)) != prefix' "$GROVE_SERVICES_CONF" > "$tmp"
   mv "$tmp" "$GROVE_SERVICES_CONF"
 
   ok "Removed app: $name"
@@ -603,8 +671,10 @@ cmd_services_doctor() {
   # Check supervisor.d directory
   info "Supervisor Configs:"
   if [[ -d "$GROVE_SUPERVISOR_D" ]]; then
-    local config_count
-    config_count="$(ls -1 "$GROVE_SUPERVISOR_D"/*.ini 2>/dev/null | wc -l | tr -d ' ')"
+    # Count via a glob (N: nullglob so an empty dir yields zero matches) rather
+    # than parsing `ls | wc -l`, which mishandles odd filenames and an empty dir.
+    local -a config_files=("$GROVE_SUPERVISOR_D"/*.ini(N))
+    local config_count=${#config_files}
     ok "$config_count configs in $GROVE_SUPERVISOR_D"
   else
     warn "Directory missing: $GROVE_SUPERVISOR_D"

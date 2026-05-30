@@ -492,6 +492,8 @@ Configure the editor in `~/.groverc`:
 DEFAULT_EDITOR=cursor  # or: code, zed, etc.
 ```
 
+`DEFAULT_EDITOR` (config file) and the `GROVE_EDITOR` environment variable are the same setting — `GROVE_EDITOR` simply overrides the default at runtime.
+
 ---
 
 ### grove open
@@ -1911,14 +1913,16 @@ grove prune example-app -f        # ✔
 | `-i`, `--interactive` | Interactive worktree creation wizard |
 | `--dry-run` | Preview worktree creation without executing |
 | `--json` | Output in JSON format |
-| `--pretty` | Colourised, formatted JSON output (requires `jq`) |
+| `--pretty` | Colourised, formatted JSON output (uses `jq`/`python3`, with a plain fallback) |
+| `--no-cache` | Bypass the fetch cache — always fetch fresh from remote |
+| `--refresh` | Clear the fetch cache before running the command |
 | `-t`, `--template=<name>` | Use a template when creating a worktree |
 | `--delete-branch` | Delete branch when removing worktree |
 | `--drop-db` | Drop database after backup (with `rm`) |
 | `--no-backup` | Skip database backup (with `rm`) |
 | `--all-repos` | Apply operation to all repositories |
 | `--check` | Check for updates (with `--version`) |
-| `-v`, `--version` | Show version |
+| `-v`, `--version` | Show version (also available as the `grove version` subcommand) |
 | `-h`, `--help` | Show help |
 
 **Flag usage by command**
@@ -1926,26 +1930,41 @@ grove prune example-app -f        # ✔
 | Command | Supported flags |
 |---------|----------------|
 | `add` | `-i`, `--dry-run`, `--json`, `-t`/`--template`, `-f` |
-| `rm` | `-f`, `--delete-branch`, `--drop-db`, `--no-backup` |
+| `rm` | `-f`, `--delete-branch`, `--drop-db`, `--no-backup`, `--json`, `--pretty` |
 | `ls` | `--json`, `--pretty` |
 | `status` | `--json`, `--pretty` |
 | `summary` | `--json`, `--pretty` |
-| `log` | `--json`, `-n <count>` |
-| `changes` | `--json` |
-| `branches` | `--json` |
-| `recent` | `--json` |
-| `info` | `--json` |
-| `health` | `--json` |
-| `repos` | `--json` |
+| `log` | `--json`, `--pretty`, `-n <count>` |
+| `changes` | `--json`, `--pretty` |
+| `branches` | `--json`, `--pretty` |
+| `recent` | `--json`, `--pretty` |
+| `info` | `--json`, `--pretty` |
+| `health` | `--json`, `--pretty` |
+| `repos` | `--json`, `--pretty` |
 | `config` | `--json` |
-| `services apps` | `--json` |
+| `pull` | `--json`, `--pretty` |
+| `sync` | `--json`, `--pretty` |
+| `pull-all` | `--all-repos`, `--json`, `--pretty` |
+| `services apps` | `--json`, `--pretty` |
 | `prune` | `-f`, `--all-repos` |
-| `pull-all` | `--all-repos` |
 | `build-all` | `--all-repos` |
 | `exec-all` | `--all-repos` |
 | `clean` | `-f` |
 | `--version` | `--check` |
-| All commands | `-q` |
+| All commands | `-q`, `--no-cache`, `--refresh` |
+
+---
+
+## Shell Completion
+
+grove ships with a Zsh completion script (`_grove`) that completes commands, repositories, and branches. The installer links it into your completions directory automatically. To install it manually, place `_grove` on your `fpath` (e.g. `~/.zsh/completions/`) and ensure that directory is loaded before `compinit`:
+
+```bash
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit && compinit
+```
+
+Alternatively, source it directly: `source /path/to/_grove`.
 
 ---
 
@@ -1989,12 +2008,23 @@ See [grove alias](#grove-alias) for creating and managing aliases.
 
 **Numeric shortcuts** (`@1`, `@2`, `@3`)
 
-The `@N` shorthand lets you jump to a recently accessed worktree by number:
+Navigation commands (`grove cd`, `grove code`, `grove open`, `grove switch`) accept `@N` in place of the branch name. It resolves to the Nth most recently modified worktree for that repo (`@1` = most recent):
 
 ```bash
-grove @1    # Navigate to most recently accessed worktree
-grove @2    # Navigate to second most recent
+grove code example-app @1            # Open the most recently modified worktree
+cd "$(grove switch example-app @2)"  # Switch to the second most recent
 ```
+
+**Fuzzy branch matching**
+
+The same navigation commands also accept a fuzzy query in place of the branch name. If no exact worktree matches, grove picks the closest branch:
+
+```bash
+grove code example-app feat-auth     # Matches e.g. feature/auth-improvements
+grove open example-app dash          # Matches e.g. feature/dashboard
+```
+
+`@N` and fuzzy matching apply to the navigation commands only — they are not standalone commands.
 
 ---
 
@@ -2009,13 +2039,15 @@ grove @2    # Navigate to second most recent
 | `GROVE_DB_HOST` | `127.0.0.1` | MySQL host for database operations |
 | `GROVE_DB_USER` | `root` | MySQL user for database operations |
 | `GROVE_DB_PASSWORD` | (empty) | MySQL password for database operations |
-| `GROVE_DB_CREATE` | `true` | Auto-create database on `grove add` |
-| `GROVE_DB_BACKUP` | `true` | Backup database on `grove rm` |
-| `GROVE_DB_BACKUP_DIR` | `~/Code/Project Support/Worktree/Database/Backup` | Backup directory |
+| `GROVE_DB_CREATE` | `true` | Gate for the reference DB-create helper run by lifecycle hooks (not automatic on `grove add`) |
+| `GROVE_DB_BACKUP` | `true` | Gate for the reference DB-backup helper run by lifecycle hooks (not automatic on `grove rm`) |
+| `GROVE_DB_BACKUP_DIR` | `~/.grove/backups` | Backup directory |
 | `GROVE_PROTECTED_BRANCHES` | `staging main master` | Space-separated list of protected branches |
 | `GROVE_HOOKS_DIR` | `~/.grove/hooks` | Directory for hook scripts |
 | `GROVE_URL_SUBDOMAIN` | (empty) | Optional subdomain prefix (e.g., `api` → `api.feature.test`) |
 | `GROVE_MAX_PARALLEL` | `4` | Maximum concurrent parallel operations |
+| `GROVE_FETCH_CACHE_TTL` | `30` | Fetch cache lifetime in seconds (`0` disables caching) |
+| `GROVE_INFO_FAST` | `false` | When `true`, `grove info --json` skips the heavy disk-size and MySQL probes (metadata only) |
 | `BRANCH_PATTERN` | (empty) | Regex pattern for branch name validation |
 
 ---

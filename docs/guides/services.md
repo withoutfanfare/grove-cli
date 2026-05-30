@@ -112,6 +112,12 @@ Returns a JSON array:
 ]
 ```
 
+Add `--pretty` to colour and indent the output, exactly as with every other grove JSON command:
+
+```bash
+grove services apps --json --pretty
+```
+
 ### Removing Apps
 
 ```bash
@@ -136,13 +142,13 @@ grove services status myapp
 
 The status view shows:
 
-- Whether Supervisor is running as a daemon
-- Whether Redis is reachable
+- Whether the Supervisor daemon is running (`Running` / `Not running`)
+- Whether Redis is reachable (`Running` / `Not running`)
 - For each registered app:
   - The active worktree (via the `-current` symlink)
-  - Supervisor process state (RUNNING, STOPPED, etc.)
-  - Horizon status (running or inactive)
-  - Whether the scheduler LaunchAgent is loaded
+  - Supervisor process state — `RUNNING`, `STOPPED`, etc., or `Not configured` when the app's named process isn't known to `supervisorctl`
+  - Horizon status — `Running`, `Inactive`, or `Unknown` when PHP or the app's `artisan` binary is unavailable to query
+  - Whether the scheduler LaunchAgent is loaded (`Loaded` / `Not loaded`)
 
 Running `grove services` with no subcommand is a shortcut to `grove services status` when at least one app is registered.
 
@@ -249,7 +255,7 @@ The command tails the file with `tail -f` and runs until you press Ctrl+C.
 grove services horizon myapp
 ```
 
-Opens `https://<domain>/horizon` in your browser. This only works for apps registered with `services=horizon` or `services=horizon:reverb`. Grove reads the domain from your app registry -- no need to remember the URL.
+Opens the app's Horizon dashboard at `https://<domain>/horizon` in your browser, where `<domain>` is the app's registered domain (so `myapp.test` becomes `https://myapp.test/horizon`). This only works for apps registered with `services=horizon` or `services=horizon:reverb`; for any other app grove exits with "does not use Horizon". Grove reads the domain from your app registry -- no need to remember the URL.
 
 ---
 
@@ -407,7 +413,7 @@ Names are case-sensitive. If the app is listed but spelled differently, either r
 
 ### Supervisor not running
 
-If `grove services status` shows "Supervisor: Not running":
+If the daemon line in `grove services status` shows "Supervisor: Not running":
 
 ```bash
 brew services start supervisor
@@ -419,7 +425,7 @@ Then verify it started:
 brew services list | grep supervisor
 ```
 
-If Supervisor starts but your processes don't appear in `supervisorctl status`, check that your `.ini` files are in `/opt/homebrew/etc/supervisor.d/` and are syntactically valid.
+If the daemon is up but an app reports "Supervisor: Not configured", the daemon is running yet `supervisorctl` doesn't know about that app's named process. Check that your `.ini` files are in `/opt/homebrew/etc/supervisor.d/`, are syntactically valid, and define a process matching the app's `supervisor_process` name.
 
 ### Services not restarting on switch
 

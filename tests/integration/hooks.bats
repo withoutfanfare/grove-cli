@@ -94,6 +94,25 @@ HOOKEOF
   [ "$line3" = "03-third" ]
 }
 
+@test "hooks: .d/ scripts sort numerically (2 before 10)" {
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/10-tenth.sh" \
+    "echo '10-tenth' >> '$HOOK_LOG'"
+
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/2-second.sh" \
+    "echo '2-second' >> '$HOOK_LOG'"
+
+  run_hooks_isolated "post-add"
+  [ "$status" -eq 0 ]
+
+  # Numeric (not lexical) sort: 2 must run before 10
+  local line1 line2
+  line1="$(sed -n '1p' "$HOOK_LOG")"
+  line2="$(sed -n '2p' "$HOOK_LOG")"
+
+  [ "$line1" = "2-second" ]
+  [ "$line2" = "10-tenth" ]
+}
+
 @test "hooks: single hook file executes before .d/ directory hooks" {
   create_hook "$GROVE_HOOKS_DIR/post-add" \
     "echo 'single-hook' >> '$HOOK_LOG'"
@@ -245,9 +264,27 @@ HOOKEOF
     "exit 1"
 
   run_hooks_isolated "post-add"
-  # run_hooks always returns 0 - failure is reported via warn()
+  # post-* hooks are non-fatal - failure is reported via warn() but rc stays 0
   [ "$status" -eq 0 ]
   [[ "$output" == *"WARN:"* ]] || [[ "$output" == *"non-zero"* ]]
+}
+
+@test "hooks: failing pre-rm hook makes run_hooks return non-zero (gating)" {
+  create_hook "$GROVE_HOOKS_DIR/pre-rm.d/01-block.sh" \
+    "exit 1"
+
+  run_hooks_isolated "pre-rm"
+  # pre-* hooks are gating - a non-zero hook exit aborts the operation
+  [ "$status" -ne 0 ]
+}
+
+@test "hooks: failing post-rm hook still returns 0 (non-fatal)" {
+  create_hook "$GROVE_HOOKS_DIR/post-rm.d/01-fail.sh" \
+    "exit 1"
+
+  run_hooks_isolated "post-rm"
+  # post-* hooks must never abort, even on failure
+  [ "$status" -eq 0 ]
 }
 
 @test "hooks: subsequent hooks run after a failed hook" {

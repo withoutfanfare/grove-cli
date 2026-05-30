@@ -122,7 +122,7 @@ grove code example-app feature/user-authentication
 cd "$(grove switch login)"
 
 # Open in browser
-grove open api
+grove open staging
 ```
 
 ### Managing Aliases
@@ -360,26 +360,23 @@ Keep grove up-to-date with the built-in upgrade command.
 grove --version --check
 ```
 
+This fetches from the remote and compares your installed commit against the default branch (`origin/main`, falling back to `origin/master`). It does not modify your installation.
+
 Output:
 ```text
-grove version 4.1.0
-
 Checking for updates...
 
-✔ You are running the latest version
+ℹ Installed: v4.1.0
+✔ You're running the latest version!
 ```
 
 Or if an update is available:
 ```text
-grove version 4.1.0
-
 Checking for updates...
 
-⚠ Update available
-
-Run 'grove upgrade' to update.
-
-Release notes: https://github.com/withoutfanfare/grove-cli/releases
+ℹ Installed: v4.1.0
+⚠ Update available: 3 new commit(s)
+  Run: grove upgrade
 ```
 
 ### Upgrading
@@ -388,22 +385,32 @@ Release notes: https://github.com/withoutfanfare/grove-cli/releases
 grove upgrade
 ```
 
+`grove upgrade` is a guarded self-update over your local clone — it runs `git pull --rebase` on the default branch and rebuilds. There are no downloads or checksum steps. Before pulling it will:
+
+- Refuse to upgrade if the repo is on a feature branch (not `main`/`master`), so your work isn't rebased onto the default branch.
+- Refuse to upgrade if the working tree has uncommitted changes (commit or stash them first).
+
 Output:
 ```text
-→ Checking for updates...
+grove upgrade
 
-⚠ Update available
+ℹ Repository: /Users/you/Projects/grove-cli
+ℹ Current version: v4.1.0
+ℹ Fetching updates...
+ℹ Updates available: 3 new commit(s)
 
-Upgrade now? [Y/n]: y
+Recent changes:
+  • a1b2c3d fix: correct database backup path
+  • e4f5g6h feat: add services doctor check
+  • i7j8k9l docs: update tutorials
 
-→ Downloading...
-→ Verifying checksum...
-→ Installing...
-→ Rebuilding from source...
+Upgrade now? [y/N] y
+ℹ Pulling updates...
+ℹ Rebuilding...
 
-✔ Upgrade complete
+✔ Upgraded: v4.1.0 → v4.2.0
 
-Restart your terminal for changes to take effect.
+Verify with: grove --version
 ```
 
 ### Manual Update
@@ -452,7 +459,7 @@ This section is for developers who want to contribute to grove or understand its
 
 ### Architecture
 
-As of v4.0.0, grove uses a modular architecture. The source code is split into focused modules in `lib/`, then concatenated into a single `grove` file for distribution.
+As of v4.1.0, grove uses a modular architecture. The source code is split into focused modules in `lib/`, then concatenated into a single `grove` file for distribution.
 
 ```text
 lib/
@@ -471,15 +478,16 @@ lib/
 ├── 12-deps.sh         # Dependency sharing (vendor/node_modules)
 ├── 99-main.sh         # Entry point, usage, flag parsing
 └── commands/
-    ├── lifecycle.sh      # add (with cleanup trap), rm, clone, fresh
-    ├── git-ops.sh        # pull, pull-all, sync, prune, log, diff, summary
+    ├── lifecycle.sh      # add (with cleanup trap), rm, move, clone, fresh, restructure
+    ├── git-ops.sh        # pull, pull-all, sync, prune, log, diff, summary, changes
     ├── navigation.sh     # code, open, cd, switch, exec
-    ├── info.sh           # ls, status, repos, health, report, dashboard
+    ├── info.sh           # ls, status, repos, branches, health, report, dashboard
     ├── maintenance.sh    # doctor, cleanup-herd, unlock, repair, upgrade
     ├── bulk-ops.sh       # build-all, exec-all (with dangerous command detection)
     ├── discovery.sh      # info, recent, clean
-    ├── config.sh         # templates, alias, setup, group (with injection prevention)
-    └── laravel.sh        # migrate, tinker
+    ├── config.sh         # config, templates, alias, setup, group (with injection prevention)
+    ├── laravel.sh        # migrate, tinker
+    └── services.sh       # services: status/start/stop/restart/add/remove/apps/horizon/logs/doctor
 ```
 
 ### Building from Source
@@ -817,7 +825,7 @@ grove-cli/
 ├── _grove                         # Zsh tab completion definitions
 ├── build.sh                    # Build script - concatenates lib/ into grove
 │
-├── lib/                        # Source modules (v4.0.0+)
+├── lib/                        # Source modules (v4.1.0+)
 │   ├── 00-header.sh           # Version, global defaults
 │   ├── 01-core.sh             # Config, colours, output helpers
 │   ├── 02-validation.sh       # Input validation, security
@@ -833,12 +841,16 @@ grove-cli/
 │   ├── 12-deps.sh             # Dependency sharing
 │   ├── 99-main.sh             # Entry point, usage, flags
 │   └── commands/
-│       ├── lifecycle.sh       # add, rm, clone, fresh
-│       ├── git-ops.sh         # pull, pull-all, sync, prune
+│       ├── lifecycle.sh       # add, rm, move, clone, fresh, restructure
+│       ├── git-ops.sh         # pull, pull-all, sync, prune, changes
 │       ├── navigation.sh      # code, open, cd, switch, exec
-│       ├── info.sh            # ls, status, repos, health
-│       ├── utility.sh         # doctor, cleanup, repair
-│       └── laravel.sh         # migrate, tinker
+│       ├── info.sh            # ls, status, repos, branches, health
+│       ├── maintenance.sh     # doctor, cleanup-herd, unlock, repair, upgrade
+│       ├── bulk-ops.sh        # build-all, exec-all
+│       ├── discovery.sh       # info, recent, clean
+│       ├── config.sh          # config, templates, alias, setup, group
+│       ├── laravel.sh         # migrate, tinker
+│       └── services.sh        # services (Supervisor, Horizon, Reverb, scheduler)
 │
 ├── tests/                      # BATS test suite
 │   ├── unit/                  # Unit tests
