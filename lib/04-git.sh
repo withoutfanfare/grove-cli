@@ -5,6 +5,15 @@
 typeset -gA _GROVE_GIT_CACHE
 typeset -gA _GROVE_STATUS_CACHE
 
+# Sentinel branch name for detached-HEAD worktrees (see iterate_worktrees).
+# Consumers treat this as the "branch" so detached worktrees stay visible.
+typeset -g GROVE_DETACHED_BRANCH="(detached)"
+
+# Sentinel returned by ahead/behind helpers when the base ref cannot be resolved
+# (not fetched / DEFAULT_BASE misconfigured). Distinguishes "unknown" from a
+# genuine zero. JSON consumers should map "?" to null / "unknown".
+typeset -g GROVE_UNKNOWN="?"
+
 # Fetch cache configuration
 GROVE_FETCH_CACHE_TTL="${GROVE_FETCH_CACHE_TTL:-30}"  # 30 seconds default
 GROVE_FETCH_CACHE_DIR="${TMPDIR:-/tmp}/grove-fetch-cache"
@@ -45,8 +54,10 @@ cached_fetch() {
   local fetch_args=("$@")
 
   # Skip caching if TTL is 0
+  # Fetch stderr is left visible (consistent with force_fetch) so transport/auth
+  # failures surface instead of being silently swallowed.
   if (( GROVE_FETCH_CACHE_TTL <= 0 )); then
-    git --git-dir="$git_dir" fetch "${fetch_args[@]}" 2>/dev/null
+    git --git-dir="$git_dir" fetch "${fetch_args[@]}"
     return
   fi
 
@@ -61,7 +72,7 @@ cached_fetch() {
     return 0
   fi
 
-  if git --git-dir="$git_dir" fetch "${fetch_args[@]}" 2>/dev/null; then
+  if git --git-dir="$git_dir" fetch "${fetch_args[@]}"; then
     touch "$cache_file"
     return 0
   fi
@@ -93,6 +104,10 @@ clear_git_cache() {
 }
 
 # iterate_worktrees — Call a callback(path, branch) for each worktree in a repo
+# Detached-HEAD worktrees have no `branch` porcelain line; they emit a `detached`
+# marker instead. To keep them visible to every consumer (cmd_ls/branches/report),
+# such worktrees are reported with the sentinel branch GROVE_DETACHED_BRANCH
+# ("(detached)"). Callers that need to special-case them can match this sentinel.
 iterate_worktrees() {
   local git_dir="$1" callback="$2"
   local wt_path="" wt_branch="" line=""
@@ -107,6 +122,9 @@ iterate_worktrees() {
         ;;
       "branch "*)
         wt_branch="${line#branch refs/heads/}"
+        ;;
+      "detached")
+        wt_branch="$GROVE_DETACHED_BRANCH"
         ;;
       "")
         if [[ -n "$wt_path" && -n "$wt_branch" && "$wt_path" != *.git ]]; then
@@ -145,9 +163,19 @@ collect_worktree_statuses() {
       wt_dirty="dirty"
     fi
 
-    wt_counts="$(git -C "$wt_path" rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)" || wt_counts="0	0"
-    wt_ahead="${wt_counts%%	*}"
-    wt_behind="${wt_counts##*	}"
+    # Distinguish "no upstream" (never-pushed branch — ahead/behind unknown) from a
+    # genuine 0/0. Without this guard a never-pushed branch would look fully synced.
+    # The unknown sentinel ("?") is cached so JSON consumers can map it to null.
+    if git -C "$wt_path" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+      wt_counts="$(git -C "$wt_path" rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)" || wt_counts="0	0"
+      wt_ahead="${wt_counts%%	*}"
+      wt_behind="${wt_counts##*	}"
+      [[ "$wt_ahead" =~ ^[0-9]+$ ]] || wt_ahead=0
+      [[ "$wt_behind" =~ ^[0-9]+$ ]] || wt_behind=0
+    else
+      wt_ahead="$GROVE_UNKNOWN"
+      wt_behind="$GROVE_UNKNOWN"
+    fi
 
     wt_timestamp="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || wt_timestamp="0"
 
@@ -180,6 +208,12 @@ get_cached_status() {
     behind)    print -r -- "$f_behind" ;;
     timestamp) print -r -- "$f_timestamp" ;;
     all)       print -r -- "$cached" ;;
+    *)
+      # Unknown field requested — signal the caller rather than silently returning
+      # success with no output.
+      warn "get_cached_status: unknown field '$field'"
+      return 1
+      ;;
   esac
 }
 
@@ -234,7 +268,10 @@ ensure_fetch_refspec() {
 
   if [[ "$has_wildcard" == false ]]; then
     dim "  Fixing fetch refspec to include all branches..."
-    git --git-dir="$git_dir" config --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+    if ! git --git-dir="$git_dir" config --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"; then
+      warn "Failed to add fetch refspec to remote.origin.fetch"
+      return 1
+    fi
   fi
 }
 
@@ -249,8 +286,12 @@ remote_branch_exists() {
   # Validate branch name for security
   validate_git_ref "$branch" "branch"
 
-  # Use ls-remote to check directly on remote (most reliable)
-  GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git --git-dir="$git_dir" ls-remote --heads origin "$branch" 2>/dev/null | grep -q "refs/heads/$branch"
+  # Use ls-remote to check directly on remote (most reliable). Use PATH-resolved
+  # git/ssh so this works under Homebrew/Apple-Silicon/nix, not just /usr/bin.
+  # Match the EXACT ref with awk — grep's unanchored regex (`.` matches any char)
+  # gives false positives for branches that are prefixes/regex-supersets of others.
+  git --git-dir="$git_dir" ls-remote --heads origin "$branch" 2>/dev/null \
+    | awk -v b="$branch" '$2 == "refs/heads/" b { found = 1 } END { exit !found }'
 }
 
 # list_repos — Print all repository names found in HERD_ROOT (one per line)
@@ -302,18 +343,29 @@ select_repo_fzf() {
 }
 
 # get_ahead_behind — Print "ahead behind" commit counts relative to a base ref
+# When the base ref cannot be resolved (not fetched / misconfigured), prints the
+# unknown sentinel "$GROVE_UNKNOWN $GROVE_UNKNOWN" (e.g. "? ?") rather than "0 0",
+# so a wildly-stale worktree is not mistaken for level. JSON consumers should map
+# "?" to null/"unknown".
 get_ahead_behind() {
   local wt_path="$1" base="${2:-origin/staging}"
-  local ahead=0 behind=0
+  local ahead behind
 
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
 
-  if git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
-    local counts; counts="$(git -C "$wt_path" rev-list --left-right --count HEAD..."$base" 2>/dev/null)" || counts="0	0"
-    ahead="${counts%%	*}"
-    behind="${counts##*	}"
+  if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
+    print -r -- "$GROVE_UNKNOWN $GROVE_UNKNOWN"
+    return 0
   fi
+
+  local counts; counts="$(git -C "$wt_path" rev-list --left-right --count HEAD..."$base" 2>/dev/null)" || counts="0	0"
+  ahead="${counts%%	*}"
+  behind="${counts##*	}"
+
+  # Coerce to integers; malformed rev-list output falls back to 0
+  [[ "$ahead" =~ ^[0-9]+$ ]] || ahead=0
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
 
   print -r -- "$ahead $behind"
 }
@@ -340,7 +392,14 @@ set_worktree_base() {
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
 
-  git -C "$wt_path" config --local grove.base "$base" 2>/dev/null || true
+  # Surface a write failure rather than silently swallowing it — a missing
+  # grove.base later forces the (possibly wrong) DEFAULT_BASE fallback. The
+  # failure is non-fatal (the fallback still works), so we warn but return 0 to
+  # avoid aborting the caller under `set -e`.
+  if ! git -C "$wt_path" config --local grove.base "$base" 2>/dev/null; then
+    warn "Failed to save base ref '$base' for $wt_path (will fall back to default)"
+  fi
+  return 0
 }
 
 # get_last_commit_age — Return human-readable age of latest commit (e.g. "3d", "2w")
@@ -419,12 +478,20 @@ get_commit_age_days() {
 }
 
 # is_branch_merged — Return 0 if worktree HEAD is an ancestor of the base ref
+# Returns 2 (distinct from "not merged" = 1) when the base ref cannot be resolved,
+# so callers can tell "unknown" from a confident "not merged".
 is_branch_merged() {
   local wt_path="$1" base="${2:-origin/staging}"
   local branch_head base_head
 
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
+
+  # Guard: if the base ref is unresolved (not fetched / misconfigured) we cannot
+  # determine merge status — signal "unknown" rather than a false "not merged".
+  if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
+    return 2
+  fi
 
   branch_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || return 1
 
@@ -443,10 +510,10 @@ get_last_accessed_iso() {
   # Get modification time (epoch seconds) using OS-specific stat format
   case "$GROVE_OS" in
     Darwin)
-      mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || echo "")"
+      mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || print -r -- "")"
       ;;
     *)
-      mtime="$(stat -c '%Y' "$wt_path" 2>/dev/null || echo "")"
+      mtime="$(stat -c '%Y' "$wt_path" 2>/dev/null || print -r -- "")"
       ;;
   esac
 
@@ -470,16 +537,24 @@ get_last_accessed_iso() {
 }
 
 # get_commits_behind — Return number of commits HEAD is behind a base ref
+# When the base ref cannot be resolved, prints the unknown sentinel "$GROVE_UNKNOWN"
+# (e.g. "?") rather than "0", so callers can distinguish "unknown" from "level".
 get_commits_behind() {
   local wt_path="$1" base="${2:-origin/staging}"
-  local behind=0
+  local behind
 
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
 
-  if git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
-    behind="$(git -C "$wt_path" rev-list --count HEAD.."$base" 2>/dev/null)" || behind=0
+  if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
+    print -r -- "$GROVE_UNKNOWN"
+    return 0
   fi
+
+  behind="$(git -C "$wt_path" rev-list --count HEAD.."$base" 2>/dev/null)" || behind=0
+
+  # Coerce to integer before arithmetic/JSON use
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
 
   print -r -- "$behind"
 }
@@ -490,6 +565,13 @@ is_branch_stale() {
   local behind
 
   behind="$(get_commits_behind "$wt_path" "$base")"
+
+  # Unresolvable base ("?") means staleness is unknown — report not-stale rather
+  # than feeding the sentinel into arithmetic.
+  if [[ ! "$behind" =~ ^[0-9]+$ ]]; then
+    print -r -- "false"
+    return 0
+  fi
 
   if (( behind > threshold )); then
     print -r -- "true"
@@ -517,7 +599,9 @@ collect_worktrees() {
   iterate_worktrees "$git_dir" _collect_wt_cb
 }
 
-# check_worktree_mismatches — Warn about worktrees whose dir names don't match branch slugs
+# check_worktree_mismatches — Warn about worktrees whose dir names don't match branch slugs.
+# Exposes the mismatch count via the global GROVE_MISMATCH_COUNT (the exit status
+# is reserved for success/failure, not overloaded as a count).
 check_worktree_mismatches() {
   local git_dir="$1"
   # Derive repo name from git_dir (strip trailing .git and get basename)
@@ -542,7 +626,6 @@ check_worktree_mismatches() {
     fi
   done
 
-  # Cap at 254 to stay within valid exit code range (255 is reserved)
-  (( mismatch_count > 254 )) && mismatch_count=254
-  return $mismatch_count
+  typeset -g GROVE_MISMATCH_COUNT=$mismatch_count
+  return 0
 }

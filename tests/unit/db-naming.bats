@@ -159,9 +159,15 @@ teardown() {
   [ "$result" = "app123__feature_test" ]
 }
 
-@test "db_name_for: dots in branch name" {
+@test "db_name_for: dots in branch name become underscores" {
   result="$(db_name_for "myapp" "release/v1.2.3")"
-  # Dots should be preserved or converted
-  # The actual implementation may vary
-  [ ${#result} -gt 0 ]
+  # Dots are slugified to dashes, then dashes become underscores for MySQL
+  [ "$result" = "myapp__release_v1_2_3" ]
+}
+
+@test "db_name_for: neutralises backticks (identifier breakout defence)" {
+  # Backticks are stripped so the name can never break out of a `quoted`
+  # MySQL identifier even if a caller bypasses upstream validation.
+  result="$(db_name_for 'my`app' 'feat`ure/x')"
+  [ "$result" = "myapp__feature_x" ]
 }

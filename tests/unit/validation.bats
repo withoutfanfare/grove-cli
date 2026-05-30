@@ -157,7 +157,9 @@ teardown() {
 @test "validate_name: rejects @ as branch" {
   run validate_name "@" "branch"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"reserved git reference"* ]]
+  # '@' is not in the allowed charset, so it is rejected by the charset check
+  # (which runs before the reserved-ref check) — matching the real lib order.
+  [[ "$output" == *"only alphanumeric"* ]]
 }
 
 @test "validate_name: rejects @{upstream} as branch" {
@@ -171,6 +173,37 @@ teardown() {
 @test "validate_name: allows HEAD as repo name" {
   run validate_name "HEAD" "repository"
   [ "$status" -eq 0 ]
+}
+
+# Only WHOLE segments named HEAD/refs/@ are reserved — names that merely start
+# with those letters (e.g. HEADER) are valid branches (#23).
+@test "validate_name: allows HEADER branch (not over-blocked)" {
+  run validate_name "HEADER" "branch"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_name: blocks mid-path HEAD segment (feature/HEAD)" {
+  run validate_name "feature/HEAD" "branch"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"reserved git reference"* ]]
+}
+
+@test "validate_name: blocks deep mid-path HEAD (feature/heads/HEAD)" {
+  run validate_name "feature/heads/HEAD" "branch"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"reserved git reference"* ]]
+}
+
+@test "validate_name: blocks trailing .lock (main.lock)" {
+  run validate_name "main.lock" "branch"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"reserved git reference"* ]]
+}
+
+@test "validate_name: blocks .lock in a path segment (feature/x.lock)" {
+  run validate_name "feature/x.lock" "branch"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"reserved git reference"* ]]
 }
 
 # ============================================================================
@@ -341,4 +374,131 @@ teardown() {
   run validate_identifier_common "foo/../bar" "test type"
   [ "$status" -eq 1 ]
   [[ "$output" == *"path traversal not allowed"* ]]
+}
+
+# ============================================================================
+# Real zsh validate_name / validate_git_ref (lib/02-validation.sh)
+#
+# These exercise the ACTUAL zsh implementation — not the bash reimplementation
+# in test-helper — because the reserved-ref and .lock rules delegate to
+# `git check-ref-format` and to whole-segment matching that the bash mirror
+# does not (yet) replicate. Pattern mirrors env-rewrite.bats.
+# ============================================================================
+
+# Run a single validation function from the real lib sources against $@.
+# Stubs error_exit to exit non-zero (matching production, which exits).
+_run_real_validate() {
+  zsh -c '
+    error_exit() { print -r -- "$2" >&2; exit 2; }
+    die() { print -r -- "$1" >&2; exit 1; }
+    source "'"$GROVE_ROOT"'/lib/03-paths.sh"
+    source "'"$GROVE_ROOT"'/lib/02-validation.sh"
+    "$@"
+  ' _ "$@"
+}
+
+# --- validate_name: reserved-ref over/under-blocking fixes (#23) ---
+
+@test "validate_name(real): allows HEADER branch (no longer over-blocked)" {
+  run _run_real_validate validate_name "HEADER" "branch"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_name(real): allows HEADLESS-cms branch" {
+  run _run_real_validate validate_name "HEADLESS-cms" "branch"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_name(real): blocks trailing .lock (main.lock)" {
+  run _run_real_validate validate_name "main.lock" "branch"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_name(real): blocks .lock in a path segment (feature/x.lock)" {
+  run _run_real_validate validate_name "feature/x.lock" "branch"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_name(real): blocks mid-path HEAD segment (feature/HEAD)" {
+  run _run_real_validate validate_name "feature/HEAD" "branch"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"reserved git reference"* ]]
+}
+
+@test "validate_name(real): blocks deep mid-path HEAD (feature/heads/HEAD)" {
+  run _run_real_validate validate_name "feature/heads/HEAD" "branch"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"reserved git reference"* ]]
+}
+
+@test "validate_name(real): still blocks bare HEAD" {
+  run _run_real_validate validate_name "HEAD" "branch"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_name(real): still blocks refs/ prefix" {
+  run _run_real_validate validate_name "refs/heads/main" "branch"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_name(real): still allows legitimate feature branch" {
+  run _run_real_validate validate_name "feature/login" "branch"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_name(real): HEADER allowed as repo name too" {
+  run _run_real_validate validate_name "HEADER" "repository"
+  [ "$status" -eq 0 ]
+}
+
+# --- validate_git_ref: parity with validate_name (#23) ---
+
+@test "validate_git_ref(real): allows HEADER" {
+  run _run_real_validate validate_git_ref "HEADER"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_git_ref(real): allows feature/login" {
+  run _run_real_validate validate_git_ref "feature/login"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_git_ref(real): blocks trailing .lock" {
+  run _run_real_validate validate_git_ref "main.lock"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_git_ref(real): blocks .lock in a segment" {
+  run _run_real_validate validate_git_ref "feature/x.lock"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_git_ref(real): blocks mid-path HEAD segment" {
+  run _run_real_validate validate_git_ref "feature/HEAD"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_git_ref(real): blocks bare HEAD" {
+  run _run_real_validate validate_git_ref "HEAD"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_git_ref(real): blocks leading dot" {
+  run _run_real_validate validate_git_ref ".hidden"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_git_ref(real): blocks trailing dot" {
+  run _run_real_validate validate_git_ref "trailing."
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_git_ref(real): blocks hidden path segment" {
+  run _run_real_validate validate_git_ref "feature/.hidden"
+  [ "$status" -ne 0 ]
+}
+
+@test "validate_git_ref(real): empty ref still allowed (uses default)" {
+  run _run_real_validate validate_git_ref ""
+  [ "$status" -eq 0 ]
 }

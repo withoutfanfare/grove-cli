@@ -96,6 +96,12 @@ grove doctor
 grove repos
 ```
 
+### `grove branches` — list available branches for a repo
+
+```bash
+grove branches myapp
+```
+
 ### `grove clone` — clone as a bare repo (and create a default worktree)
 
 ```bash
@@ -182,6 +188,14 @@ The command:
 - Moves the worktree using `git worktree move`
 - Re-secures the new site with SSL
 - Cleans up old Herd nginx configs
+
+### `grove restructure` — migrate worktrees to the nested layout
+
+Migrates a repo's worktrees from an older flat layout into the nested `<repo>-worktrees/` structure.
+
+```bash
+grove restructure myapp
+```
 
 ### `grove ls` — list worktrees for a repo
 
@@ -273,6 +287,16 @@ grove log
 
 # Explicit
 grove log myapp feature/login
+```
+
+### `grove changes` — list uncommitted file changes (auto-detect)
+
+```bash
+# From inside a worktree
+grove changes
+
+# Explicit
+grove changes myapp feature/login
 ```
 
 ### `grove prune` — clean up stale worktrees / references
@@ -456,6 +480,14 @@ grove alias rm login
 grove alias remove staging
 ```
 
+### `grove config` — show current configuration
+
+```bash
+grove config
+```
+
+Prints the resolved configuration (HERD_ROOT, editor, base branch, database settings, and any active `GROVE_SKIP_*` flags).
+
 ### `grove setup` — first-time configuration wizard
 
 ```bash
@@ -500,6 +532,33 @@ grove build-all @backend
 grove group rm frontend
 ```
 
+### `grove services` — manage app services (Supervisor, Horizon, Reverb, scheduler)
+
+Register apps and control their background services. Run `grove services` with no arguments to see the full subcommand help.
+
+```bash
+# Register an app
+grove services add myapp --services=horizon:reverb
+
+# Inspect and control services
+grove services status
+grove services start all
+grove services restart myapp
+grove services stop myapp
+
+# List registered apps (supports --json)
+grove services apps
+grove services apps --json
+
+# Open Horizon, tail logs, check dependencies
+grove services horizon myapp
+grove services logs myapp horizon
+grove services doctor
+
+# Remove an app from the registry
+grove services remove myapp
+```
+
 ### `grove upgrade` — self-update
 
 ```bash
@@ -536,7 +595,7 @@ grove add myapp feature/api --template=backend
 
 ## Hooks
 
-Hooks are optional scripts under `~/.grove/hooks/` that run during the worktree lifecycle (pre/post add, pre/post rm, post pull, post sync).
+Hooks are optional scripts under `~/.grove/hooks/` that run during the worktree lifecycle (pre/post add, pre/post rm, pre/post move, post switch, post pull, post sync).
 
 ```bash
 # Install the example hooks shipped with this repo (recommended starting point)
@@ -551,6 +610,8 @@ chmod +x ~/.grove/hooks/* ~/.grove/hooks/*/*.sh 2>/dev/null || true
 Common hook points:
 - `pre-add`, `post-add`
 - `pre-rm`, `post-rm`
+- `pre-move`, `post-move`
+- `post-switch`
 - `post-pull`, `post-sync`
 
 The hook environment includes:
@@ -583,7 +644,7 @@ Expected resource structure per repo (all optional):
 └── storage/app/            # Shared uploads (symlinked into worktrees)
 ```
 
-See [examples/hooks/README.md](examples/hooks/README.md#consolidated-laravel-hooks) for full documentation.
+See [examples/hooks/README.md](../../examples/hooks/README.md#consolidated-laravel-hooks) for full documentation.
 
 ---
 
@@ -635,7 +696,7 @@ grove cleanup-herd
 
 ### Running the test suite
 
-The project includes 204 comprehensive tests covering security validation, git operations, and edge cases:
+The project includes 440+ comprehensive tests covering security validation, git operations, and edge cases:
 
 ```bash
 # Run all tests (unit + integration)

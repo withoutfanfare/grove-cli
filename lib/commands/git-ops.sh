@@ -33,7 +33,7 @@ cmd_pull() {
   # Capture pull output and exit code for JSON support
   local pull_output pull_exit_code=0
   [[ "$JSON_OUTPUT" != true ]] && info "Pulling latest changes in ${C_MAGENTA}$branch${C_RESET}..."
-  pull_output="$(GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" pull --rebase 2>&1)" || pull_exit_code=$?
+  pull_output="$(git -C "$wt_path" pull --rebase 2>&1)" || pull_exit_code=$?
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     local already_up_to_date=false conflicts=false commits_pulled=0
@@ -61,7 +61,10 @@ cmd_pull() {
       local db_name; db_name="$(db_name_for "$repo" "$branch")"
       run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
     fi
-    return $pull_exit_code
+    # Normalise the failure exit to grove's curated GIT_ERROR code (4) so JSON and text
+    # modes agree; raw git status (often 1) is meaningless to callers. Keep 0 on success.
+    (( pull_exit_code == 0 )) && return 0
+    return 4
   fi
 
   # Text output mode
@@ -139,13 +142,13 @@ _pull_all_for_repo() {
   # Pull each worktree in parallel
   local total=${#worktrees[@]}
   local count=0 failed=0 up_to_date=0
-  export GIT_SSH_COMMAND="/usr/bin/ssh"
 
   [[ "$JSON_OUTPUT" != true ]] && info "Pulling $total worktree(s) in parallel..."
 
   # Create temp directory for results
-  local tmpdir; tmpdir="$(/usr/bin/mktemp -d)"
-  trap "/bin/rm -rf '$tmpdir'" EXIT
+  local tmpdir; tmpdir="$(mktemp -d)"
+  [[ -n "$tmpdir" && -d "$tmpdir" ]] || { warn "Could not create temp directory for parallel pull"; return 1; }
+  trap "rm -rf '$tmpdir'" EXIT
 
   # Launch parallel pulls
   local pids=()
@@ -157,7 +160,7 @@ _pull_all_for_repo() {
 
     (
       local pull_output pull_exit_code=0
-      pull_output="$(/usr/bin/git -C "$wt_path" pull --rebase 2>&1)" || pull_exit_code=$?
+      pull_output="$(git -C "$wt_path" pull --rebase 2>&1)" || pull_exit_code=$?
 
       local result_status="ok"
       local already_up_to_date=false
@@ -176,9 +179,13 @@ _pull_all_for_repo() {
         commits_pulled="$(git -C "$wt_path" rev-list --count "$from_sha".."$to_sha" 2>/dev/null)" || commits_pulled=0
       fi
 
-      # Write result as JSON line for later parsing
+      # Write the structural fields as a JSON line for later parsing. The message is
+      # written SEPARATELY, already json_escape'd, to "$tmpdir/$idx.msg" and read back
+      # verbatim by the parent — never re-parsed-then-re-embedded (a round-trip drops
+      # the escaping and produces malformed JSON for output with quotes/backslashes/newlines).
       json_escape "$pull_output"
-      print -r -- "{\"status\":\"$result_status\",\"already_up_to_date\":$already_up_to_date,\"commits_pulled\":$commits_pulled,\"message\":\"$REPLY\"}" > "$tmpdir/$idx"
+      print -rn -- "$REPLY" > "$tmpdir/$idx.msg"
+      print -r -- "{\"status\":\"$result_status\",\"already_up_to_date\":$already_up_to_date,\"commits_pulled\":$commits_pulled}" > "$tmpdir/$idx"
     ) &
     pids+=($!)
     idx=$((idx + 1))
@@ -192,36 +199,49 @@ _pull_all_for_repo() {
   # JSON output mode - collect results into JSON array
   if [[ "$JSON_OUTPUT" == true ]]; then
     local worktree_results=()
-    # Declare loop variables outside the loop to avoid zsh re-declaration issues
-    local wt_branch result_data result_status already_up commits msg success
+    # Declare loop variables outside the loop to avoid zsh re-declaration issues.
+    # NB: wt_branch is ALREADY local from the launch loop above — re-`local`-ing a
+    # variable that holds a value makes zsh echo "wt_branch=..." to stdout, which would
+    # corrupt the JSON. Reuse it; only declare the genuinely new locals here.
+    local result_data result_status already_up commits msg success _je_branch
     idx=0
     for wt_entry in "${worktrees[@]}"; do
       wt_branch="${wt_entry##*|}"
-      if [[ -f "$tmpdir/$idx" ]]; then
-        result_data="$(/bin/cat "$tmpdir/$idx")"
-        # Parse JSON using pure Zsh (zero subprocess spawns)
-        result_status="$(json_get_string "$result_data" "status")"
-        already_up="$(json_get_value "$result_data" "already_up_to_date")"
-        commits="$(json_get_value "$result_data" "commits_pulled")"
-        msg="$(json_get_string "$result_data" "message")"
-
-        # Provide defaults for potentially empty values to ensure valid JSON
-        [[ -z "$already_up" ]] && already_up="false"
-        [[ -z "$commits" ]] && commits="0"
-
-        success=true
-        [[ "$result_status" == "fail" ]] && success=false
-        [[ "$result_status" == "ok" ]] && count=$((count + 1))
-        [[ "$result_status" == "fail" ]] && failed=$((failed + 1))
-        [[ "$already_up" == "true" ]] && up_to_date=$((up_to_date + 1))
-
-        json_escape "$wt_branch"; local _je_branch="$REPLY"
-        worktree_results+=("{\"branch\":\"$_je_branch\",\"success\":$success,\"already_up_to_date\":$already_up,\"commits_pulled\":$commits,\"message\":\"$msg\"}")
+      json_escape "$wt_branch"; _je_branch="$REPLY"
+      if [[ ! -f "$tmpdir/$idx" ]]; then
+        # No result file: the job died before recording its outcome. Emit an explicit
+        # failed entry rather than dropping it, so total == succeeded + failed always holds.
+        failed=$((failed + 1))
+        worktree_results+=("{\"branch\":\"$_je_branch\",\"success\":false,\"already_up_to_date\":false,\"commits_pulled\":0,\"message\":\"no result recorded\"}")
+        idx=$((idx + 1))
+        continue
       fi
+
+      result_data="$(cat "$tmpdir/$idx")"
+      # Parse the structural fields using pure Zsh (zero subprocess spawns)
+      result_status="$(json_get_string "$result_data" "status")"
+      already_up="$(json_get_value "$result_data" "already_up_to_date")"
+      commits="$(json_get_value "$result_data" "commits_pulled")"
+      # Read the already-escaped message verbatim from its own file — never re-parse
+      # and re-embed (that round-trip drops the escaping and corrupts the JSON).
+      msg=""
+      [[ -f "$tmpdir/$idx.msg" ]] && msg="$(cat "$tmpdir/$idx.msg")"
+
+      # Provide defaults for potentially empty values to ensure valid JSON
+      [[ -z "$already_up" ]] && already_up="false"
+      [[ -z "$commits" ]] && commits="0"
+
+      success=true
+      [[ "$result_status" == "fail" ]] && success=false
+      [[ "$result_status" == "ok" ]] && count=$((count + 1))
+      [[ "$result_status" == "fail" ]] && failed=$((failed + 1))
+      [[ "$already_up" == "true" ]] && up_to_date=$((up_to_date + 1))
+
+      worktree_results+=("{\"branch\":\"$_je_branch\",\"success\":$success,\"already_up_to_date\":$already_up,\"commits_pulled\":$commits,\"message\":\"$msg\"}")
       idx=$((idx + 1))
     done
 
-    /bin/rm -rf "$tmpdir"
+    rm -rf "$tmpdir"
     trap - EXIT
 
     json_escape "$repo"; local _je_repo2="$REPLY"
@@ -234,13 +254,15 @@ _pull_all_for_repo() {
   fi
 
   # Text output mode - collect results
-  # Declare loop variables outside the loop to avoid zsh re-declaration output
-  local wt_branch result_data result_status
+  # Declare loop variables outside the loop to avoid zsh re-declaration output.
+  # wt_branch is already local from the launch loop above; re-`local`-ing it (it holds
+  # a value) would echo "wt_branch=..." to stdout, so only declare the new locals.
+  local result_data result_status
   idx=0
   for wt_entry in "${worktrees[@]}"; do
     wt_branch="${wt_entry##*|}"
     if [[ -f "$tmpdir/$idx" ]]; then
-      result_data="$(/bin/cat "$tmpdir/$idx")"
+      result_data="$(cat "$tmpdir/$idx")"
       # Parse JSON using pure Zsh (zero subprocess spawns)
       result_status="$(json_get_string "$result_data" "status")"
       if [[ "$result_status" == "ok" ]]; then
@@ -254,7 +276,7 @@ _pull_all_for_repo() {
     idx=$((idx + 1))
   done
 
-  /bin/rm -rf "$tmpdir"
+  rm -rf "$tmpdir"
   trap - EXIT
 
   print -r -- ""
@@ -311,11 +333,12 @@ cmd_sync() {
   git --git-dir="$git_dir" fetch --all --prune --quiet 2>/dev/null || { [[ "$JSON_OUTPUT" != true ]] && warn "Fetch failed (continuing with local refs)"; }
 
   # Check for uncommitted changes
-  if [[ -n "$(/usr/bin/git -C "$wt_path" status --porcelain 2>/dev/null)" ]]; then
+  if [[ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]]; then
     if [[ "$JSON_OUTPUT" == true ]]; then
       json_escape "$base"; local _je_base="$REPLY"
       format_json "{\"success\": false, \"base\": \"$_je_base\", \"conflicts\": false, \"dirty\": true, \"commits_rebased\": 0, \"message\": \"worktree has uncommitted changes, commit or stash them first\"}"
-      return 1
+      # Match text mode's curated GIT_ERROR exit (4) rather than a bare 1.
+      return 4
     fi
     error_exit "GIT_ERROR" "worktree has uncommitted changes, commit or stash them first" 4
   fi
@@ -323,7 +346,7 @@ cmd_sync() {
   # JSON output mode
   if [[ "$JSON_OUTPUT" == true ]]; then
     local sync_output sync_exit_code=0
-    sync_output="$(GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase "$base" 2>&1)" || sync_exit_code=$?
+    sync_output="$(git -C "$wt_path" rebase "$base" 2>&1)" || sync_exit_code=$?
 
     local conflicts=false commits_rebased=0
 
@@ -333,7 +356,7 @@ cmd_sync() {
 
     # On any rebase failure, abort to restore the pre-sync state (don't leave the worktree mid-rebase)
     if (( sync_exit_code != 0 )); then
-      GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase --abort 2>/dev/null || true
+      git -C "$wt_path" rebase --abort 2>/dev/null || true
     fi
 
     # Extract commit count from rebase output (e.g., "Rebasing (3/5)" or count applied commits)
@@ -353,14 +376,17 @@ cmd_sync() {
       local db_name; db_name="$(db_name_for "$repo" "$branch")"
       run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
     fi
-    return $sync_exit_code
+    # Normalise the failure exit to grove's curated GIT_ERROR code (4) so JSON and text
+    # modes agree; raw git status (often 1) is meaningless to callers. Keep 0 on success.
+    (( sync_exit_code == 0 )) && return 0
+    return 4
   fi
 
   # Text output mode
   info "Rebasing ${C_MAGENTA}$branch${C_RESET} onto ${C_DIM}$base${C_RESET}..."
-  if ! GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase "$base"; then
+  if ! git -C "$wt_path" rebase "$base"; then
     # Abort to restore the pre-sync state rather than leaving the worktree mid-rebase
-    GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" rebase --abort 2>/dev/null || true
+    git -C "$wt_path" rebase --abort 2>/dev/null || true
     error_exit "GIT_ERROR" "rebase onto '$base' hit conflicts - aborted and restored; resolve and retry manually" 4
   fi
   ok "Sync complete"
@@ -382,14 +408,17 @@ cmd_prune() {
     info "Pruning all repositories in parallel..."
     print -r -- ""
 
-    local total_success=0 total_failed=0
+    # Build operations for the shared parallel runner using the documented
+    # "<label>|<path>|<command>" convention (see lib/09-parallel.sh). The git command
+    # uses an absolute --git-dir, so the path field is only the run directory; HERD_ROOT
+    # is a safe, always-present choice. The runner enforces GROVE_MAX_PARALLEL correctly
+    # and counts a missing result file as a failure (total == succeeded + failed).
     local operations=()
-
-    # Collect all repos for parallel processing
+    local git_dir repo_name
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
-      local repo_name="${${git_dir:t}%.git}"
-      operations+=("$repo_name|_prune_single_repo '$repo_name' '$git_dir'")
+      repo_name="${${git_dir:t}%.git}"
+      operations+=("$repo_name|$HERD_ROOT|git --git-dir=\"$git_dir\" worktree prune -v")
     done
 
     if (( ${#operations[@]} == 0 )); then
@@ -397,58 +426,15 @@ cmd_prune() {
       return 0
     fi
 
-    # Process repos in parallel
-    local tmpdir; tmpdir="$(/usr/bin/mktemp -d)"
-    trap "/bin/rm -rf '$tmpdir'" EXIT
+    # Capture the totals from parallel_run's result handler so we can notify afterwards.
+    local _prune_success=0 _prune_failed=0
+    _prune_all_results() {
+      _prune_success="$1"; _prune_failed="$2"
+      report_results "$1" "$2" "$3"
+    }
+    parallel_run _prune_all_results "${operations[@]}"
 
-    local pids=()
-    local idx=0
-    for op in "${operations[@]}"; do
-      local repo_name="${op%%|*}"
-      local git_dir="$HERD_ROOT/${repo_name}.git"
-
-      (
-        local result="ok"
-        git --git-dir="$git_dir" worktree prune -v >/dev/null 2>&1 || result="fail"
-        print -r -- "$result" > "$tmpdir/$idx"
-      ) &
-      pids+=($!)
-      idx=$((idx + 1))
-
-      # Limit parallel jobs
-      if (( ${#pids[@]} >= GROVE_MAX_PARALLEL )); then
-        wait "${pids[1]}" 2>/dev/null || true
-        shift pids
-      fi
-    done
-
-    # Wait for remaining jobs
-    for pid in "${pids[@]}"; do
-      wait "$pid" 2>/dev/null || true
-    done
-
-    # Collect results
-    idx=0
-    for op in "${operations[@]}"; do
-      local repo_name="${op%%|*}"
-      if [[ -f "$tmpdir/$idx" && "$(/bin/cat "$tmpdir/$idx")" == "ok" ]]; then
-        ok "  $repo_name"
-        total_success=$((total_success + 1))
-      else
-        warn "  $repo_name - failed"
-        total_failed=$((total_failed + 1))
-      fi
-      idx=$((idx + 1))
-    done
-
-    /bin/rm -rf "$tmpdir"
-    trap - EXIT
-
-    print -r -- ""
-    ok "Pruned $total_success repository(ies)"
-    (( total_failed > 0 )) && warn "$total_failed repository(ies) had issues"
-
-    notify "grove prune" "Completed: $total_success success, $total_failed failed"
+    notify "grove prune" "Completed: $_prune_success success, $_prune_failed failed"
     return 0
   fi
 
@@ -460,9 +446,11 @@ cmd_prune() {
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
-  # Prune stale worktrees and capture output
+  # Prune stale worktrees and capture output. Force LC_ALL=C so the verbose output
+  # stays in English — we screen-scrape "Removing" below to count pruned refs, and a
+  # localised git would silently report zero on non-English systems.
   [[ "$JSON_OUTPUT" != true ]] && info "Pruning stale worktrees..."
-  local prune_output; prune_output="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
+  local prune_output; prune_output="$(LC_ALL=C git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
   local stale_refs_pruned=0
   if [[ -n "$prune_output" ]]; then
     stale_refs_pruned="$(print -r -- "$prune_output" | grep -c 'Removing' 2>/dev/null)" || stale_refs_pruned=0

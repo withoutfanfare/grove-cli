@@ -1,13 +1,17 @@
 #!/usr/bin/env zsh
 # bulk-ops.sh - Bulk operations across multiple worktrees
 
-# Check if a command string contains dangerous patterns and prompt for confirmation
+# Check if a command string matches a few well-known destructive patterns and,
+# if so, ask for confirmation before running it across every worktree.
+#
+# This is a courtesy guard, not a security boundary — it only spots a handful of
+# obvious patterns and is easily bypassed. Treat it as a typo-catcher.
 #
 # Arguments:
 #   $1 - command string to check
 #
 # Returns:
-#   0 if safe or user confirmed, exits via die if user aborts
+#   0 if no pattern matched or the user confirmed; exits if the user aborts
 _check_dangerous_command() {
   local cmd_str="$1"
 
@@ -15,9 +19,9 @@ _check_dangerous_command() {
      [[ "$cmd_str" == *"dd "* ]] || [[ "$cmd_str" == *":()"* ]] || \
      [[ "$cmd_str" == *">/dev/"* ]] || [[ "$cmd_str" == *"shutdown"* ]] || \
      [[ "$cmd_str" == *"reboot"* ]] || [[ "$cmd_str" == *"init 0"* ]]; then
-    warn "DANGEROUS COMMAND DETECTED: $cmd_str"
+    warn "This looks like it could be destructive: $cmd_str"
     print -r -- ""
-    if ! confirm "This command could be destructive. Continue?"; then
+    if ! confirm "Run this across every worktree?"; then
       error_exit "INVALID_INPUT" "aborted by user" 2
     fi
     print -r -- ""
@@ -46,6 +50,32 @@ cmd_build_all() {
     return 0
   fi
 
+  # Group mode: @name expands to the repos configured via `grove group`
+  if [[ "$repo" == @* ]]; then
+    local group_name="${repo#@}"
+    local resolved
+    if ! resolved="$(resolve_group "$group_name")"; then
+      error_exit "INVALID_INPUT" "group not found: '@$group_name' (see: grove group list)" 2
+    fi
+
+    info "Building all worktrees across group @$group_name..."
+    print -r -- ""
+
+    local repo_name git_dir
+    for repo_name in ${=resolved}; do
+      validate_name "$repo_name" "repository"
+      git_dir="$(git_dir_for "$repo_name")"
+      ensure_bare_repo "$git_dir"
+      print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
+      _build_all_for_repo "$repo_name" "$git_dir"
+      print -r -- ""
+    done
+
+    ok "Build complete across group @$group_name"
+    notify "grove build-all" "Completed across group @$group_name"
+    return 0
+  fi
+
   [[ -n "$repo" ]] || error_exit "INVALID_INPUT" "Usage: grove build-all <repo>
        Use --all-repos to build across all repositories." 2
 
@@ -68,13 +98,16 @@ _build_all_for_repo() {
 
   (( ${#worktrees[@]} > 0 )) || { dim "  No worktrees found."; return 0; }
 
-  # Build operations list
+  # Build operations list in "label|path|command" form. parallel_run's fixed
+  # wrapper performs the cd into the path (passed as argv, not interpolated), so
+  # we never build a `cd '$path' && ...` string ourselves — see lib/09-parallel.sh.
   local operations=()
+  local wt_path wt_branch
   for wt_entry in "${worktrees[@]}"; do
-    local wt_path="${wt_entry%%|*}"
-    local wt_branch="${wt_entry##*|}"
+    wt_path="${wt_entry%%|*}"
+    wt_branch="${wt_entry##*|}"
     if [[ -f "$wt_path/package.json" ]]; then
-      operations+=("$wt_branch|cd '$wt_path' && npm run build")
+      operations+=("$wt_branch|$wt_path|npm run build")
     fi
   done
 
@@ -117,6 +150,36 @@ cmd_exec_all() {
   shift || true
   local cmd=("$@")
 
+  # Group mode: @name expands to the repos configured via `grove group`
+  if [[ "$repo" == @* ]]; then
+    (( ${#cmd[@]} > 0 )) || error_exit "INVALID_INPUT" "Usage: grove exec-all @<group> <command...>" 2
+
+    local group_name="${repo#@}"
+    local resolved
+    if ! resolved="$(resolve_group "$group_name")"; then
+      error_exit "INVALID_INPUT" "group not found: '@$group_name' (see: grove group list)" 2
+    fi
+
+    local cmd_str="${cmd[*]}"
+    _check_dangerous_command "$cmd_str"
+
+    info "Executing '$cmd_str' across group @$group_name..."
+    print -r -- ""
+
+    local repo_name git_dir
+    for repo_name in ${=resolved}; do
+      validate_name "$repo_name" "repository"
+      git_dir="$(git_dir_for "$repo_name")"
+      ensure_bare_repo "$git_dir"
+      print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
+      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str"
+      print -r -- ""
+    done
+
+    ok "Execution complete across group @$group_name"
+    return 0
+  fi
+
   [[ -n "$repo" && ${#cmd[@]} -gt 0 ]] || error_exit "INVALID_INPUT" "Usage: grove exec-all <repo> <command...>
        Use --all-repos to execute across all repositories." 2
 
@@ -142,12 +205,15 @@ _exec_all_for_repo() {
 
   (( ${#worktrees[@]} > 0 )) || { dim "  No worktrees found."; return 0; }
 
-  # Build operations list
+  # Build operations list in "label|path|command" form. parallel_run's fixed
+  # wrapper cds into the path (passed as argv) and runs the command, so the user
+  # command is passed verbatim as the command field — see lib/09-parallel.sh.
   local operations=()
+  local wt_path wt_branch
   for wt_entry in "${worktrees[@]}"; do
-    local wt_path="${wt_entry%%|*}"
-    local wt_branch="${wt_entry##*|}"
-    operations+=("$wt_branch|cd '$wt_path' && $cmd_str")
+    wt_path="${wt_entry%%|*}"
+    wt_branch="${wt_entry##*|}"
+    operations+=("$wt_branch|$wt_path|$cmd_str")
   done
 
   parallel_run report_results "${operations[@]}"

@@ -3,7 +3,10 @@
 
 # _update_env_app_url — Rewrite ONLY the APP_URL= line in a .env file, preserving every
 # other line. Uses a line-anchored loop (NOT a whole-file glob, which would greedily match
-# across newlines and delete everything after APP_URL=). Writes via a temp file.
+# across newlines and delete everything after APP_URL=). Writes via a temp file, then copies
+# the new contents back into the ORIGINAL file in place — so the .env's original permissions,
+# ownership and any symlink target are preserved (a plain `mv` would replace the file and drop
+# all of that).
 # Args: $1 = path to .env file, $2 = new URL. Returns 0 if APP_URL was found and updated.
 _update_env_app_url() {
   local env_file="$1" new_url="$2"
@@ -22,11 +25,62 @@ _update_env_app_url() {
   done < "$env_file"
 
   if [[ "$found" == true ]]; then
-    mv "$tmp" "$env_file"
-    return 0
+    # Copy contents back into the original file (preserves mode, owner, symlink),
+    # rather than mv'ing the temp over it (which would inherit the temp's perms
+    # and break a symlinked .env).
+    if cat "$tmp" > "$env_file"; then
+      rm -f "$tmp"
+      return 0
+    fi
+    rm -f "$tmp"
+    return 1
   fi
   rm -f "$tmp"
   return 1
+}
+
+# ── Transaction undo helpers ──────────────────────────────────────────────
+# Each is a DEFINED function (required by transaction_register, which rejects
+# anything that isn't a real function and calls it with no eval). They are
+# deliberately tolerant: rollback runs best-effort, so a missing target is fine.
+
+# _undo_worktree_add — Remove a worktree that was created mid-operation.
+# Args: $1 = git_dir, $2 = worktree path.
+_undo_worktree_add() {
+  local git_dir="$1" wt_path="$2"
+  [[ -n "$wt_path" ]] || return 0
+  if [[ -d "$wt_path" ]]; then
+    git --git-dir="$git_dir" worktree remove --force "$wt_path" 2>/dev/null || /bin/rm -rf "$wt_path" 2>/dev/null
+  fi
+  git --git-dir="$git_dir" worktree prune 2>/dev/null || true
+}
+
+# _undo_herd_site — Retire a Herd site that was secured mid-operation.
+# Args: $1 = site name (e.g. the worktree directory basename).
+_undo_herd_site() {
+  local site_name="$1"
+  [[ -n "$site_name" ]] || return 0
+  if command -v herd >/dev/null 2>&1; then
+    herd unsecure "$site_name" >/dev/null 2>&1 || true
+  fi
+  cleanup_herd_site "$site_name" 2>/dev/null || true
+}
+
+# _undo_clone — Remove a bare repo directory created by cmd_clone.
+# Args: $1 = git_dir (bare repo path).
+_undo_clone() {
+  local git_dir="$1"
+  [[ -n "$git_dir" && -d "$git_dir" ]] || return 0
+  /bin/rm -rf "$git_dir" 2>/dev/null || true
+}
+
+# _undo_worktree_move — Move a worktree back to its original path on rollback.
+# Args: $1 = git_dir, $2 = current (new) path, $3 = original path.
+_undo_worktree_move() {
+  local git_dir="$1" current="$2" original="$3"
+  [[ -n "$current" && -n "$original" ]] || return 0
+  [[ -d "$current" ]] || return 0
+  git --git-dir="$git_dir" worktree move --force "$current" "$original" 2>/dev/null || true
 }
 
 # cmd_add — Create a new worktree for a branch, optionally from a base ref
@@ -120,7 +174,8 @@ cmd_add() {
   ensure_fetch_refspec "$git_dir"
 
   info "Fetching latest branches from remote..."
-  git --git-dir="$git_dir" fetch --all --prune --quiet
+  with_retry 3 git --git-dir="$git_dir" fetch --all --prune --quiet || \
+    error_exit "GIT_ERROR" "failed to fetch from remote after 3 attempts" 4
 
   # If base is a remote ref (origin/...), explicitly fetch it to ensure we have the latest
   if [[ "$base" == origin/* ]]; then
@@ -183,25 +238,18 @@ cmd_add() {
     error_exit "HOOK_FAILED" "pre-add hook failed, aborting" 5
   fi
 
-  # Setup cleanup trap for failed operations
-  # If worktree creation fails, clean up partial state
-  local cleanup_needed=true
-  trap '
-    if [[ "$cleanup_needed" == true ]]; then
-      warn "Worktree creation failed - cleaning up partial state..."
-      # Remove worktree if it was created
-      if [[ -d "$wt_path" ]]; then
-        dim "  Removing worktree directory"
-        git --git-dir="$git_dir" worktree remove --force "$wt_path" 2>/dev/null || /bin/rm -rf "$wt_path" 2>/dev/null
-      fi
-      # Clean up any Herd nginx config that might have been created
-      if [[ -n "${app_url:-}" ]]; then
-        local site_name="${wt_path:t}"
-        cleanup_herd_site "$site_name" 2>/dev/null || true
-      fi
-      dim "  Cleanup complete"
-    fi
-  ' EXIT
+  # Begin a transaction: every side effect below registers an undo step so a
+  # mid-operation failure (or Ctrl-C) rolls the worktree back cleanly. The
+  # module-level TRAPEXIT runs the registered steps in reverse if the shell
+  # exits while the transaction is still active (e.g. via error_exit/die).
+  transaction_start
+
+  # Ensure there's room for the new worktree before creating it. The parent of
+  # wt_path is the per-repo worktrees container (created by git as needed); fall
+  # back to its parent if it doesn't exist yet so df has a real path to inspect.
+  local wt_parent_dir="${wt_path:h}"
+  [[ -d "$wt_parent_dir" ]] || wt_parent_dir="${wt_parent_dir:h}"
+  check_disk_space "$wt_parent_dir"
 
   local created_from_base=false
   if [[ "$branch_local" == true ]]; then
@@ -216,6 +264,10 @@ cmd_add() {
     info "Creating NEW branch ${C_MAGENTA}$branch${C_RESET} from ${C_DIM}$base${C_RESET}"
     git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base"
   fi
+  # Worktree now exists on disk — register its removal (and any Herd site set up
+  # by post-add hooks) so a later failure tears down the partial state.
+  transaction_register _undo_herd_site "${wt_path:t}"
+  transaction_register _undo_worktree_add "$git_dir" "$wt_path"
 
   # Ensure config.worktree exists when bare repo uses extensions.worktreeConfig
   ensure_worktree_config "$git_dir" "$wt_path"
@@ -241,9 +293,10 @@ cmd_add() {
     set_worktree_base "$wt_path" "$base"
   fi
 
-  # Success - disable cleanup trap
-  cleanup_needed=false
-  trap - EXIT
+  # Success - commit the transaction so the registered undo steps do NOT run.
+  # Done before post-add hooks: those are non-fatal environment setup, so a hook
+  # failure must not tear down the (now valid) worktree.
+  transaction_commit
 
   # Run post-add hooks
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
@@ -346,10 +399,17 @@ cmd_rm() {
     }
   fi
 
-  # Delete branch if requested
+  # Delete branch if requested. Capture the REAL outcome (not the request flag)
+  # so the JSON contract reports what actually happened — a swallowed failure
+  # would otherwise desync the consuming app's branch list.
+  local branch_deleted=false
   if [[ "$DELETE_BRANCH" == true ]]; then
     info "Deleting branch ${C_MAGENTA}$branch${C_RESET}"
-    git --git-dir="$git_dir" branch -D "$branch" 2>/dev/null || warn "Could not delete branch (may not exist locally)"
+    if git --git-dir="$git_dir" branch -D "$branch" 2>/dev/null; then
+      branch_deleted=true
+    else
+      warn "Could not delete branch (may not exist locally)"
+    fi
   fi
 
   info "Pruning stale worktrees..."
@@ -365,7 +425,12 @@ cmd_rm() {
     json_escape "$repo"; local _je_repo="$REPLY"
     json_escape "$branch"; local _je_branch="$REPLY"
     json_escape "$wt_path"; local _je_path="$REPLY"
-    format_json "{\"success\": true, \"repo\": \"$_je_repo\", \"branch\": \"$_je_branch\", \"path\": \"$_je_path\", \"branch_deleted\": $DELETE_BRANCH, \"db_dropped\": $DROP_DB}"
+    # branch_deleted = the REAL deletion outcome. db_drop_requested = the request
+    # intent only: the DB drop is delegated to hooks (grove can't confirm it ran),
+    # so we report what was asked for, not a result we cannot verify.
+    local _je_branch_deleted; _je_branch_deleted="$(to_json_bool "$branch_deleted")"
+    local _je_db_requested; _je_db_requested="$(to_json_bool "$DROP_DB")"
+    format_json "{\"success\": true, \"repo\": \"$_je_repo\", \"branch\": \"$_je_branch\", \"path\": \"$_je_path\", \"branch_deleted\": $_je_branch_deleted, \"db_drop_requested\": $_je_db_requested}"
   else
     ok "Worktree removed"
     print -r -- ""
@@ -443,6 +508,10 @@ cmd_move() {
     error_exit "HOOK_FAILED" "pre-move hook failed, aborting" 5
   fi
 
+  # Begin a transaction so a failure after the move (securing the new site,
+  # rewriting .env) rolls the worktree back to its original path.
+  transaction_start
+
   # Move the worktree FIRST — before tearing down the old Herd site — so that a move
   # failure leaves the old site intact rather than unsecured with no worktree to serve.
   info "Moving worktree..."
@@ -451,6 +520,12 @@ cmd_move() {
   else
     git --git-dir="$git_dir" worktree move "$wt_path" "$new_wt_path"
   fi
+
+  # Assert the new path actually landed before we tear down the old Herd site.
+  # If it isn't there, the move silently no-op'd — aborting now (rollback runs)
+  # avoids unsecuring a site whose worktree never moved.
+  [[ -d "$new_wt_path" ]] || error_exit "IO_ERROR" "worktree move did not produce '$new_wt_path'" 5
+  transaction_register _undo_worktree_move "$git_dir" "$new_wt_path" "$wt_path"
 
   # Move succeeded — now retire the old Herd site (unsecure + clean nginx/certificates)
   if [[ "$was_secured" == true ]]; then
@@ -468,6 +543,8 @@ cmd_move() {
       warn "Could not secure new site - you may need to run: herd secure $new_site_name"
     else
       ok "Site secured"
+      # Registered after the move undo so rollback unsecures the new site first.
+      transaction_register _undo_herd_site "$new_site_name"
     fi
   fi
 
@@ -481,6 +558,10 @@ cmd_move() {
   if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
     dim "  Updated APP_URL in .env"
   fi
+
+  # Everything reversible has succeeded — commit so the registered undo steps do
+  # NOT run. Done before the non-fatal post-move hooks.
+  transaction_commit
 
   # Run post-move hooks (with new path, URL, and db_name)
   run_hooks "post-move" "$repo" "$branch" "$new_wt_path" "$new_url" "$db_name"
@@ -537,14 +618,26 @@ cmd_clone() {
   fi
 
   # Non-JSON output (original behaviour)
+  # Begin a transaction so a failed fetch rolls back the half-created bare repo.
+  # We commit BEFORE handing off to cmd_add (which runs its own worktree
+  # transaction): once the bare repo + branches exist it is a durable artifact,
+  # and cmd_add's commit would otherwise clear our registered undo step anyway.
+  transaction_start
+
   info "Cloning ${C_CYAN}$url${C_RESET} as bare repo..."
   GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git clone --bare "$url" "$git_dir"
+  transaction_register _undo_clone "$git_dir"
 
   # Configure fetch to get all branches
   /usr/bin/git --git-dir="$git_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
 
   info "Fetching all branches..."
-  GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git --git-dir="$git_dir" fetch --all --prune
+  with_retry 3 env GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git --git-dir="$git_dir" fetch --all --prune || \
+    error_exit "GIT_ERROR" "failed to fetch branches after 3 attempts" 4
+
+  # Bare repo is complete — commit so the clone survives even if a later
+  # worktree creation (cmd_add, with its own transaction) is aborted.
+  transaction_commit
 
   print -r -- ""
   ok "Bare repo created at ${C_CYAN}$git_dir${C_RESET}"
@@ -556,8 +649,13 @@ cmd_clone() {
       info "Creating worktree for ${C_GREEN}$initial_branch${C_RESET}..."
       cmd_add "$repo" "$initial_branch" "origin/$initial_branch"
     else
+      # Prefer the configured DEFAULT_BASE (normalised to origin/<name>), then
+      # fall back to the conventional staging → main → master ladder.
       local base_branch=""
-      if /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
+      local default_base_name="${DEFAULT_BASE#origin/}"
+      if [[ -n "$default_base_name" ]] && /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/$default_base_name" 2>/dev/null; then
+        base_branch="origin/$default_base_name"
+      elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
         base_branch="origin/staging"
       elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/main"; then
         base_branch="origin/main"
@@ -616,6 +714,10 @@ cmd_fresh() {
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   pushd "$wt_path" >/dev/null || error_exit "IO_ERROR" "failed to cd into '$wt_path'" 5
+  # Restore the directory stack on ANY exit from this function (zsh runs a
+  # function-local EXIT trap on return), so we never leave the caller stranded
+  # in the worktree if an early return or unexpected error fires below.
+  trap 'popd >/dev/null 2>&1 || true' EXIT
 
   print -r -- ""
   print -r -- "${C_BOLD}Refreshing ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
@@ -630,7 +732,6 @@ cmd_fresh() {
       read -r response
       if [[ ! "$response" =~ ^[Yy]$ ]]; then
         warn "Skipping migrate:fresh"
-        popd >/dev/null
         return 0
       fi
     fi
@@ -660,12 +761,76 @@ cmd_fresh() {
     fi
   fi
 
-  popd >/dev/null
-
+  # popd handled by the EXIT trap installed above.
   notify "grove fresh" "Completed for $repo / $branch"
   print -r -- ""
   ok "Fresh complete!"
   print -r -- ""
+}
+
+# _restructure_migrate_one — Migrate a SINGLE worktree from the old flat layout
+# (HERD_ROOT/repo--branch) to the nested layout (HERD_ROOT/repo-worktrees/site).
+#
+# Extracted so the main porcelain loop AND the trailing last-entry block share
+# ONE implementation — previously the last entry did only the git move, leaving
+# its Herd SSL and .env APP_URL stale depending on a trailing blank line.
+#
+# Args: $1 = git_dir, $2 = repo, $3 = new_container, $4 = wt_path, $5 = branch
+# Returns: 0 = migrated, 2 = skipped (already migrated / not old layout),
+#          1 = attempted but failed or destination exists (count as neither).
+_restructure_migrate_one() {
+  local git_dir="$1" repo="$2" new_container="$3" wt_path="$4" branch="$5"
+  local folder="${wt_path:t}"
+  local parent="${wt_path:h}"
+  local parent_name="${parent:t}"
+
+  # Skip if already in new structure
+  if [[ "$parent_name" == "${repo}-worktrees" ]]; then
+    dim "  Already migrated: $branch → $folder"
+    return 2
+  fi
+
+  # Only migrate worktrees in the old structure (at HERD_ROOT with repo-- prefix)
+  if [[ "$parent" != "$HERD_ROOT" || "$folder" != "${repo}--"* ]]; then
+    dim "  Skipping: $branch (not in old structure)"
+    return 2
+  fi
+
+  local new_site_name; new_site_name="$(site_name_for "$repo" "$branch")"
+  local new_path="$new_container/$new_site_name"
+
+  if [[ -d "$new_path" ]]; then
+    warn "Cannot migrate $branch: destination already exists at $new_path"
+    return 1
+  fi
+
+  info "Migrating: ${C_MAGENTA}$branch${C_RESET}"
+  dim "  From: $wt_path"
+  dim "  To:   $new_path"
+
+  # Use git worktree move (capture stderr so failures are surfaced, not hidden)
+  local move_err
+  if ! move_err="$(git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>&1)"; then
+    warn "  Failed to migrate: ${move_err:-unknown error}"
+    dim "  Try manually: git --git-dir=\"$git_dir\" worktree move \"$wt_path\" \"$new_path\""
+    return 1
+  fi
+  ok "  Migrated successfully"
+
+  # Update Herd site (unsecure old, secure new) and rewrite APP_URL in .env
+  if command -v herd >/dev/null 2>&1; then
+    herd unsecure "$folder" 2>/dev/null || true
+    herd secure "$new_site_name" 2>/dev/null || true
+    dim "  Updated Herd SSL for $new_site_name"
+
+    # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
+    local new_url="https://${new_site_name}.test"
+    if _update_env_app_url "$new_path/.env" "$new_url"; then
+      dim "  Updated APP_URL in .env"
+    fi
+  fi
+
+  return 0
 }
 
 # cmd_restructure — Migrate worktrees from flat layout to nested directory structure
@@ -697,58 +862,17 @@ cmd_restructure() {
 
   local wt_path="" branch=""
   local -i migrated=0 skipped=0
-  local line="" move_err="" new_site_name=""
+  local line="" migrate_rc=0
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
       if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git ]]; then
-        # Check if this worktree needs migration
-        local folder="${wt_path:t}"
-        local parent="${wt_path:h}"
-        local parent_name="${parent:t}"
-
-        # Skip if already in new structure
-        if [[ "$parent_name" == "${repo}-worktrees" ]]; then
-          dim "  Already migrated: $branch → $folder"
-          skipped+=1
-        # Migrate if in old structure (at HERD_ROOT level with repo-- prefix)
-        elif [[ "$parent" == "$HERD_ROOT" && "$folder" == "${repo}--"* ]]; then
-          new_site_name="$(site_name_for "$repo" "$branch")"
-          local new_path="$new_container/$new_site_name"
-
-          if [[ -d "$new_path" ]]; then
-            warn "Cannot migrate $branch: destination already exists at $new_path"
-          else
-            info "Migrating: ${C_MAGENTA}$branch${C_RESET}"
-            dim "  From: $wt_path"
-            dim "  To:   $new_path"
-
-            # Use git worktree move (capture stderr so failures are surfaced, not hidden)
-            if move_err="$(git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>&1)"; then
-              ok "  Migrated successfully"
-
-              # Update Herd site (unsecure old, secure new)
-              if command -v herd >/dev/null 2>&1; then
-                herd unsecure "$folder" 2>/dev/null || true
-                herd secure "$new_site_name" 2>/dev/null || true
-                dim "  Updated Herd SSL for $new_site_name"
-
-                # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
-                local new_url="https://${new_site_name}.test"
-                if _update_env_app_url "$new_path/.env" "$new_url"; then
-                  dim "  Updated APP_URL in .env"
-                fi
-              fi
-
-              migrated+=1
-            else
-              warn "  Failed to migrate: ${move_err:-unknown error}"
-              dim "  Try manually: git --git-dir=\"$git_dir\" worktree move \"$wt_path\" \"$new_path\""
-            fi
-          fi
-        else
-          dim "  Skipping: $branch (not in old structure)"
-          skipped+=1
-        fi
+        # One shared per-worktree migration path (move + Herd SSL + .env APP_URL).
+        migrate_rc=0
+        _restructure_migrate_one "$git_dir" "$repo" "$new_container" "$wt_path" "$branch" || migrate_rc=$?
+        case "$migrate_rc" in
+          0) migrated+=1 ;;
+          2) skipped+=1 ;;
+        esac
       fi
       wt_path=""
       branch=""
@@ -758,23 +882,15 @@ cmd_restructure() {
     [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
   done <<< "$out"
 
-  # Handle last entry
+  # Handle last entry (no trailing blank line) via the SAME helper, so the final
+  # worktree also gets its Herd SSL refreshed and .env APP_URL rewritten.
   if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git ]]; then
-    local folder="${wt_path:t}"
-    local parent="${wt_path:h}"
-    if [[ "$parent" == "$HERD_ROOT" && "$folder" == "${repo}--"* ]]; then
-      new_site_name="$(site_name_for "$repo" "$branch")"
-      local new_path="$new_container/$new_site_name"
-      if [[ ! -d "$new_path" ]]; then
-        info "Migrating: ${C_MAGENTA}$branch${C_RESET}"
-        if move_err="$(git --git-dir="$git_dir" worktree move "$wt_path" "$new_path" 2>&1)"; then
-          ok "  Migrated successfully"
-          migrated+=1
-        else
-          warn "  Failed to migrate: ${move_err:-unknown error}"
-        fi
-      fi
-    fi
+    migrate_rc=0
+    _restructure_migrate_one "$git_dir" "$repo" "$new_container" "$wt_path" "$branch" || migrate_rc=$?
+    case "$migrate_rc" in
+      0) migrated+=1 ;;
+      2) skipped+=1 ;;
+    esac
   fi
 
   print -r -- ""

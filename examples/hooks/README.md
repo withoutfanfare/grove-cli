@@ -115,6 +115,14 @@ Hooks are discovered and executed in this order:
 │   └── myapp/
 │       └── 01-cleanup-symlinks.sh
 │
+├── pre-move                    # Before worktree move/rename (can abort)
+├── pre-move.d/
+│   └── *.sh
+│
+├── post-move                   # After worktree move/rename
+├── post-move.d/
+│   └── *.sh                    # Re-secure Herd, update .env URL
+│
 ├── post-pull.d/                # After grove pull succeeds
 │   └── *.sh
 │
@@ -157,6 +165,8 @@ myapp/04-symlink-storage.sh   (repo-specific)
 | `post-add` | After worktree creation | No | Setup: .env, database, composer, npm |
 | `pre-rm` | Before worktree removal | Yes (exit 1) | Database backup, validation |
 | `post-rm` | After worktree removal | No | Cleanup: Herd, database drop |
+| `pre-move` | Before worktree move/rename | Yes (exit 1) | Validation before relocating |
+| `post-move` | After worktree move/rename | No | Re-secure Herd, update `.env` URL |
 | `post-pull` | After `grove pull` succeeds | No | Cache clear, migrations |
 | `post-switch` | After `grove switch` succeeds | No | Configure .env, update symlinks |
 | `post-sync` | After `grove sync` succeeds | No | Rebuild after rebase |
@@ -414,22 +424,35 @@ Then use: `cproj login-feature`
 
 ### Non-Laravel Projects
 
-For projects without Laravel/PHP, disable those hooks:
+For projects without Laravel/PHP, skip those hooks using one of the
+mechanisms below.
+
+> **Why not a sibling "skip" hook?** It is tempting to drop a
+> `00-skip-laravel.sh` into the repo's hook directory that does
+> `export GROVE_SKIP_DB=true`. **This cannot work.** Each hook runs in its
+> own subshell, so an `export` never reaches the sibling hooks it is meant
+> to influence. And repo-specific hooks always run **after** all the global
+> Laravel hooks, so they could not pre-empt them even if the export did
+> propagate. Use one of the following instead.
+
+**Per-invocation (one-off):** set the skip flag on the `grove` command line
+itself, so it is present in the environment for every hook in that run:
 
 ```bash
-# Create a repo-specific skip file
-mkdir -p ~/.grove/hooks/post-add.d/frontend-app
-cat > ~/.grove/hooks/post-add.d/frontend-app/00-skip-laravel.sh << 'EOF'
-#!/bin/bash
-# Skip Laravel-specific hooks for this repo
-export GROVE_SKIP_DB=true
-export GROVE_SKIP_COMPOSER=true
-echo "  Skipping Laravel setup for frontend-only repo"
-EOF
-chmod +x ~/.grove/hooks/post-add.d/frontend-app/00-skip-laravel.sh
+GROVE_SKIP_DB=true GROVE_SKIP_COMPOSER=true grove add frontend-app feature/ui
 ```
 
-Or simply don't install the Laravel hooks and only use what you need.
+**Per-repo via `.groveconfig` (where applicable):** for database management,
+disable it permanently for the repo:
+
+```bash
+# In ~/Herd/frontend-app.git/.groveconfig
+DB_CREATE=false    # No database created/managed for this repo
+DB_BACKUP=false    # No database backup on removal
+```
+
+**Don't install them at all:** simply don't install the Laravel hooks for
+this repo and only use what you need.
 
 ## Creating Repo-Specific Hooks
 

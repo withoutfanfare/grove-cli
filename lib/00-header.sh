@@ -18,6 +18,7 @@ GROVE_URL_SUBDOMAIN="${GROVE_URL_SUBDOMAIN:-}"  # Optional subdomain prefix (e.g
 
 # Database defaults
 DB_HOST="${GROVE_DB_HOST:-127.0.0.1}"
+DB_PORT="${GROVE_DB_PORT:-3306}"
 DB_USER="${GROVE_DB_USER:-root}"
 DB_PASSWORD="${GROVE_DB_PASSWORD:-}"
 DB_CREATE="${GROVE_DB_CREATE:-true}"

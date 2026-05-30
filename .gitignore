@@ -26,3 +26,6 @@ nginx.pid
 
 # Separate repositories
 grove-app/
+
+# Local pre-PR review artifacts
+code-review/

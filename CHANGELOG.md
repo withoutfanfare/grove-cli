@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Usable aliases and groups** - Aliases and groups now resolve at the point of use. `grove code/open/cd/switch <alias>` resolves an alias to its repo (a real repository of the same name always wins), and `grove build-all @group` / `grove exec-all @group <cmd>` expand a group to its member repos
+- **`grove report <repo> [--output <file>]` from the CLI** - The markdown status report now renders real multi-line output to stdout, or writes to a file with `--output`
+- **`grove version`** - The bare `version` word now works alongside `-v`/`--version`
+
+### Changed
+- **Pre-hooks are now gating** - A `pre-add`, `pre-rm`, or `pre-move` hook that exits non-zero now aborts the operation, honouring the documented veto. Post-* hooks remain advisory (warn only)
+- **Transactional `add`, `clone`, and `move`** - A failure partway through these operations now rolls back partial state instead of leaving a half-created worktree
+- **Database lifecycle is hook-delegated, not automatic** - `DB_CREATE` and `DB_BACKUP` now gate the reference helpers invoked by lifecycle hooks (see `examples/hooks/`); grove no longer touches databases out of the box on `grove add`
+- **`DB_BACKUP_DIR` default standardised** to `~/.grove/backups` across code, help text, and documentation
+- **`services apps --json` honours `--pretty`** - The command now routes through the shared JSON formatter like every other JSON command
+
+### Fixed
+- **`grove rm --json` reports outcomes, not requests** - The `db_dropped` field is renamed `db_drop_requested` (database drops are hook-delegated, so grove reports only the request), and `branch_deleted` now reflects the real deletion result rather than the request flag
+- **`grove config --json` always emits bare booleans** - Config values such as `DB_CREATE` and `HERD_ENABLED` are normalised to strict `true`/`false`, preventing invalid JSON in downstream consumers
+- **`grove dashboard --json` rejected** - The interactive dashboard no longer emits terminal escape sequences when `--json` is passed
+- **`share-deps` dispatch cleaned up** - The dispatcher no longer advertises subcommands it cannot run
+- **Slugification and validation hardened** - Branch slugs and git-ref validation handle more edge cases consistently across path, host, and database generation
+- **`parallel_run` stdin fix** - Parallel operations no longer deadlock or inherit unexpected stdin in bulk and JSON flows
+
+## [4.1.0] - 2026-01-10
+
+### Added
 - **Defensive Laravel hooks** - New example hooks that prevent silent first-boot failures on fresh worktrees:
   - `post-add.d/04-laravel-scaffold.sh` - Creates missing Laravel runtime directories (`bootstrap/cache`, `storage/framework/{cache/data,sessions,testing,views}`, `storage/logs`) before composer runs. Defensive against repos whose `.gitignore` excludes these directories outright instead of using the Laravel convention of ignoring contents but tracking a `.gitignore` sentinel
   - `post-add.d/01a-inherit-db-from-primary.sh` - When `DB_CREATE=false`, syncs `DB_DATABASE` from the primary worktree's `.env` so new worktrees do not inherit stale `.env.example` defaults
@@ -30,10 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **16 new unit tests** for services module config parsing and validation helpers
 - **`post-switch` hook documented** in help text and README hooks table
 - **`pre-move` and `post-move` hooks documented** in README hooks table
-
-### Changed
-- **Post-switch hook rewritten** - `02-devctl-restart.sh` now uses `grove services restart` instead of hardcoded devctl calls. Idempotent -- exits silently if app not registered
-- **README alias examples** updated from `wt` prefix (`wts`, `wtl`, `wtc`, `wtcd`) to `g` prefix (`gs`, `gl`, `gc`, `gcd`)
+- **`grove changes` command** - List uncommitted file changes for a worktree with coloured status indicators (M=modified, A=added, D=deleted, ?=untracked). Supports `--json` output for integration with external tools
+- **`grove move` command** - Rename a worktree's directory (and its Herd site, SSL, and `APP_URL`) without recreating it
+- **`grove setup` command** - Interactive first-run wizard that creates `~/.groverc`
+- **`grove log` JSON output** - Added `--json` flag to output commit history as structured JSON with sha, message, author, and date fields
+- **`grove log -n` flag** - Control the number of commits shown (e.g., `grove log repo branch -n 10`). Default changed from 20 to 5 for more focused output
+- **Enhanced `grove ls --json` output** - Added new fields for better worktree state visibility:
+  - `lastAccessed` - ISO 8601 timestamp of last filesystem modification
+  - `merged` - Boolean indicating if branch is fully merged into base
+  - `stale` - Boolean indicating if branch is >50 commits behind base
 
 ### Changed
 - **Rebranded from `wt` to `grove`** - The tool has been renamed from `wt` (wt-worktree-manager) to `grove` (grove-cli). All commands, environment variables, config files, and directory paths have been updated:
@@ -43,22 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Environment variables: `WT_*` → `GROVE_*`
   - Git config: `wt.base` → `grove.base`
   - Completion script: `_wt` → `_grove`
-
-## [4.2.0] - 2026-01-10
-
-### Added
-- **`wt changes` command** - List uncommitted file changes for a worktree with coloured status indicators (M=modified, A=added, D=deleted, ?=untracked). Supports `--json` output for integration with external tools
-- **`wt log` JSON output** - Added `--json` flag to output commit history as structured JSON with sha, message, author, and date fields
-- **`wt log -n` flag** - Control the number of commits shown (e.g., `wt log repo branch -n 10`). Default changed from 20 to 5 for more focused output
-- **Enhanced `wt ls --json` output** - Added new fields for better worktree state visibility:
-  - `lastAccessed` - ISO 8601 timestamp of last filesystem modification
-  - `merged` - Boolean indicating if branch is fully merged into base
-  - `stale` - Boolean indicating if branch is >50 commits behind base
-
-### Fixed
-- **Zsh loop variable declarations** - Fixed spurious debug output caused by `local var; var=value` pattern inside loops across multiple modules (`lib/03-paths.sh`, `lib/04-git.sh`, `lib/09-parallel.sh`, `lib/12-deps.sh`, `lib/commands/*.sh`). Variables are now declared before loops or combined into single declarations
-
-## [4.1.0] - 2026-01-10
+- **Post-switch hook rewritten** - `02-devctl-restart.sh` now uses `grove services restart` instead of hardcoded devctl calls. Idempotent -- exits silently if app not registered
+- **README alias examples** updated from `wt` prefix (`wts`, `wtl`, `wtc`, `wtcd`) to `g` prefix (`gs`, `gl`, `gc`, `gcd`)
 
 ### Security
 - **Command Injection Fixes** - Fixed critical command injection vulnerabilities in parallel execution, transaction rollback, and alias targets
@@ -222,7 +235,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`wt fresh-all`** - Removed due to destructive nature (runs `migrate:fresh` on all worktrees). Use `wt exec-all <repo> "php artisan migrate:fresh --seed"` if needed.
 
 ### Fixed
-- **Zsh local variable re-declaration bug** - Fixed spurious debug output appearing in `wt dashboard`, `wt recent`, and other commands with loops. The issue was caused by zsh printing previous values when `local var; var=value` is re-declared inside a loop. Variables are now declared before loops.
+- **Zsh local variable re-declaration bug** - Fixed spurious debug output appearing in `grove dashboard`, `grove recent`, and other commands with loops. The issue was caused by zsh printing previous values when `local var; var=value` is re-declared inside a loop. Variables are now declared before loops or combined into a single declaration across `lib/03-paths.sh`, `lib/04-git.sh`, `lib/09-parallel.sh`, `lib/12-deps.sh`, and `lib/commands/*.sh`.
 - **Variable name conflicts** - Fixed `path` variable colliding with zsh's special `$path` array (lowercase PATH). Renamed to `wt_path` throughout.
 - **Recent command folder reference** - Fixed `wt recent` using wrong variable (`${path:t}` instead of `${wt_path:t}`) for folder name extraction.
 

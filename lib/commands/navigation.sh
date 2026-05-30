@@ -1,6 +1,90 @@
 #!/usr/bin/env zsh
 # navigation.sh - Navigation and editor commands
 
+# worktree_url — Resolve the development URL for a worktree.
+#
+# Reads APP_URL from the worktree's .env, cleaning the value the SAME way
+# lib/01-core.sh cleans config values: strip surrounding matched quotes, and
+# only for unquoted values strip a trailing " #..." comment (whitespace then #)
+# — never a bare mid-value '#'. The .env is untrusted, so the value must match
+# ^https?:// to be used. On a missing, empty, or non-http(s) APP_URL it falls
+# back to url_for (which honours GROVE_URL_SUBDOMAIN).
+#
+# Arguments:
+#   $1 - repo name
+#   $2 - branch name
+#   $3 - worktree path
+#
+# Output:
+#   Prints the resolved URL to stdout
+worktree_url() {
+  local repo="$1" branch="$2" wt_path="$3"
+  local url="" line value was_quoted
+
+  if [[ -f "$wt_path/.env" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ "$line" =~ ^[[:space:]]*APP_URL= ]]; then
+        value="${line#*=}"
+        # Clean the value like lib/01-core.sh _read_config_pairs does.
+        was_quoted=false
+        if [[ "$value" == \"*\" ]] || [[ "$value" == \'*\' ]]; then
+          was_quoted=true
+        fi
+        value="${value#\"}"
+        value="${value%\"}"
+        value="${value#\'}"
+        value="${value%\'}"
+        # Only strip a trailing " #..." comment on unquoted values — never a
+        # bare mid-value '#', so URLs with a fragment survive intact.
+        if [[ "$was_quoted" == false && "$value" == *[[:space:]]#* ]]; then
+          value="${value%%[[:space:]]#*}"
+        fi
+        value="${value%"${value##*[![:space:]]}"}"
+        url="$value"
+        break
+      fi
+    done < "$wt_path/.env"
+  fi
+
+  # The .env value is untrusted: only use a well-formed http(s) URL.
+  if [[ "$url" =~ ^https?:// ]]; then
+    print -r -- "$url"
+  else
+    url_for "$repo" "$branch"
+  fi
+}
+
+# resolve_repo_arg — Resolve a navigation repo argument, honouring aliases.
+#
+# If the argument names a real repository (a bare repo dir exists under
+# HERD_ROOT) it is returned verbatim, preserving existing behaviour. Otherwise
+# it is looked up as an alias via resolve_alias; on a hit the alias target's
+# repo segment is returned. On no match the original argument is returned
+# unchanged so downstream validation/lookup reports the usual error.
+#
+# Arguments:
+#   $1 - repo name or alias
+#
+# Output:
+#   Prints the resolved repo name to stdout
+resolve_repo_arg() {
+  local arg="$1" resolved
+
+  # A real repo always wins — never shadow it with an alias of the same name.
+  if [[ -d "$(git_dir_for "$arg")" ]]; then
+    print -r -- "$arg"
+    return 0
+  fi
+
+  if resolved="$(resolve_alias "$arg")"; then
+    # Alias targets are stored as <repo/branch>; take the repo segment.
+    print -r -- "${resolved%%/*}"
+    return 0
+  fi
+
+  print -r -- "$arg"
+}
+
 # cmd_code — Open a worktree in the configured editor
 cmd_code() {
   local repo="${1:-}"; local branch="${2:-}"
@@ -10,6 +94,9 @@ cmd_code() {
     repo="$DETECTED_REPO"
     branch="$DETECTED_BRANCH"
   fi
+
+  # Resolve an alias to its repo before validation/lookup (real repos pass through)
+  [[ -n "$repo" ]] && repo="$(resolve_repo_arg "$repo")"
 
   # Handle fzf selection if branch not provided
   if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
@@ -61,6 +148,9 @@ cmd_open() {
     branch="$DETECTED_BRANCH"
   fi
 
+  # Resolve an alias to its repo before validation/lookup (real repos pass through)
+  [[ -n "$repo" ]] && repo="$(resolve_repo_arg "$repo")"
+
   # Handle fzf selection if branch not provided
   if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
     validate_name "$repo" "repository"
@@ -85,29 +175,17 @@ cmd_open() {
   local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
-  # Read APP_URL from .env file, fall back to folder-based URL
-  local url=""
-  if [[ -f "$wt_path/.env" ]]; then
-    local line
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      if [[ "$line" =~ ^[[:space:]]*APP_URL= ]]; then
-        url="${line#*=}"
-        url="${url%%#*}"
-        url="${url//[\"\' ]}"
-        break
-      fi
-    done < "$wt_path/.env"
-  fi
+  # Resolve the URL (shared with switch): .env APP_URL when valid, else url_for
+  local url; url="$(worktree_url "$repo" "$branch" "$wt_path")"
 
-  # Fallback to folder-based URL if APP_URL not found
-  if [[ -z "$url" ]]; then
-    local folder="${wt_path:t}"
-    url="https://${folder}.test"
-    dim "  No APP_URL in .env, using: $url"
+  # Prefer macOS `open`, fall back to Linux `xdg-open`.
+  if command -v open >/dev/null 2>&1; then
+    open "$url"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url"
+  else
+    error_exit "IO_ERROR" "no URL opener found (need 'open' on macOS or 'xdg-open' on Linux)" 5
   fi
-
-  command -v open >/dev/null 2>&1 || error_exit "IO_ERROR" "'open' command not found (macOS required)" 5
-  open "$url"
 }
 
 # cmd_cd — Print worktree path for shell cd integration
@@ -119,6 +197,9 @@ cmd_cd() {
     repo="$DETECTED_REPO"
     branch="$DETECTED_BRANCH"
   fi
+
+  # Resolve an alias to its repo before validation/lookup (real repos pass through)
+  [[ -n "$repo" ]] && repo="$(resolve_repo_arg "$repo")"
 
   # Handle fzf selection if branch not provided
   if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
@@ -150,6 +231,9 @@ cmd_switch() {
 
   # Note: No auto-detect for switch - it's meant to switch TO a different worktree
 
+  # Resolve an alias to its repo before validation/lookup (real repos pass through)
+  [[ -n "$repo" ]] && repo="$(resolve_repo_arg "$repo")"
+
   # Handle fzf selection if branch not provided
   if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
     validate_name "$repo" "repository"
@@ -174,22 +258,8 @@ cmd_switch() {
   local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
-  # Read APP_URL from .env file, fall back to folder-based URL
-  local url=""
-  if [[ -f "$wt_path/.env" ]]; then
-    local line
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      if [[ "$line" =~ ^[[:space:]]*APP_URL= ]]; then
-        url="${line#*=}"
-        url="${url%%#*}"
-        url="${url//[\"\' ]}"
-        break
-      fi
-    done < "$wt_path/.env"
-  fi
-  if [[ -z "$url" ]]; then
-    url="$(url_for "$repo" "$branch")"
-  fi
+  # Resolve the URL (shared with open): .env APP_URL when valid, else url_for
+  local url; url="$(worktree_url "$repo" "$branch" "$wt_path")"
 
   # Print path for cd (user can use: cd "$(grove switch ...)")
   print -r -- "$wt_path"
@@ -205,8 +275,11 @@ cmd_switch() {
   fi
 
   # Open in browser (fully detached from subshell)
+  # Prefer macOS `open`, fall back to Linux `xdg-open`.
   if command -v open >/dev/null 2>&1; then
     (nohup open "$url" >/dev/null 2>&1 &)
+  elif command -v xdg-open >/dev/null 2>&1; then
+    (nohup xdg-open "$url" >/dev/null 2>&1 &)
   fi
 }
 

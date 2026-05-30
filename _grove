@@ -201,7 +201,7 @@ _grove() {
           ;;
         alias)
           _arguments \
-            '1:subcommand:(set get list remove)' \
+            '1:subcommand:(list add rm)' \
             '2:alias name:' \
             '3:repository:_grove_repos' \
             '4:branch:{ _grove_branches $line[3] }'
@@ -237,8 +237,7 @@ _grove() {
           ;;
         share-deps)
           _arguments \
-            '1:repository:_grove_repos' \
-            '2:action:(enable disable status)'
+            '1:action:(status enable disable clean)'
           ;;
         services)
           local -a services_cmds

@@ -54,6 +54,7 @@ usage() {
   print -r -- "${C_BOLD}UTILITIES${C_RESET}"
   print -r -- "  ${C_GREEN}config${C_RESET}                              Show current configuration"
   print -r -- "  ${C_GREEN}setup${C_RESET}                               First-time configuration wizard"
+  print -r -- "  ${C_GREEN}templates${C_RESET} ${C_DIM}[name]${C_RESET}                    List or show worktree templates"
   print -r -- "  ${C_GREEN}doctor${C_RESET}                              Check system requirements"
   print -r -- "  ${C_GREEN}health${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Check repository health"
   print -r -- "  ${C_GREEN}dashboard${C_RESET}                            Overview of all repositories and worktrees"
@@ -135,7 +136,7 @@ usage() {
   print -r -- "  ${C_YELLOW}GROVE_DB_PASSWORD${C_RESET}    MySQL password ${C_DIM}(default: empty)${C_RESET}"
   print -r -- "  ${C_YELLOW}GROVE_DB_CREATE${C_RESET}      Auto-create database ${C_DIM}(default: true)${C_RESET}"
   print -r -- "  ${C_YELLOW}GROVE_DB_BACKUP${C_RESET}      Backup database on remove ${C_DIM}(default: true)${C_RESET}"
-  print -r -- "  ${C_YELLOW}GROVE_DB_BACKUP_DIR${C_RESET}  Backup directory ${C_DIM}(default: ~/Code/Project Support/...)${C_RESET}"
+  print -r -- "  ${C_YELLOW}GROVE_DB_BACKUP_DIR${C_RESET}  Backup directory ${C_DIM}(default: ~/.grove/backups)${C_RESET}"
   print -r -- ""
   print -r -- "${C_BOLD}CONFIG FILE${C_RESET}"
   print -r -- "  Create ${C_CYAN}~/.groverc${C_RESET} or ${C_CYAN}\$HERD_ROOT/.groveconfig${C_RESET} with:"
@@ -226,6 +227,24 @@ parse_flags() {
         # Handle -n5 format (no space) - pass through to command
         REMAINING_ARGS+=("$1")
         ;;
+      --output)
+        # Pass through to commands that accept it (e.g. grove report <repo> --output <file>)
+        REMAINING_ARGS+=("$1")
+        if [[ -n "${2:-}" && "$2" != -* ]]; then
+          shift
+          REMAINING_ARGS+=("$1")
+        fi
+        ;;
+      --)
+        # End-of-options sentinel: everything after a literal -- passes
+        # through verbatim (lets exec/exec-all run commands containing dashes).
+        shift
+        while [[ $# -gt 0 ]]; do
+          REMAINING_ARGS+=("$1")
+          shift
+        done
+        break
+        ;;
       -*) setup_colors; die "Unknown flag: $1" ;;
       *) REMAINING_ARGS+=("$1") ;;
     esac
@@ -306,6 +325,7 @@ main() {
     clean)        cmd_clean "$@" ;;
     alias)        cmd_alias "$@" ;;
     upgrade)      cmd_upgrade "$@" ;;
+    version)      print -r -- "grove version $VERSION" ;;
     dashboard)    cmd_dashboard "$@" ;;
     setup)        cmd_setup "$@" ;;
     config)       cmd_config "$@" ;;

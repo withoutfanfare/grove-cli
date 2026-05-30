@@ -15,6 +15,13 @@
 _display_worktree() {
   local idx="$1" wt_path="$2" branch="$3" head="$4" repo="$5"
   local folder="${wt_path:t}"
+  # Detached worktrees arrive with the "(detached)" sentinel as their branch.
+  # Normalise to an empty branch + a HEAD ref so downstream branch logic skips
+  # cleanly and the detached worktree renders via its short SHA (still visible).
+  if [[ "$branch" == "$GROVE_DETACHED_BRANCH" ]]; then
+    branch=""
+    [[ -n "$head" ]] || head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
+  fi
   local url=""
   if [[ -n "$GROVE_URL_SUBDOMAIN" && -n "$branch" ]]; then
     # When a subdomain is configured, always use url_for() for the browser URL
@@ -31,7 +38,14 @@ _display_worktree() {
         break
       fi
     done < "$wt_path/.env"
+    # The .env is untrusted (a committed value could set javascript: or a foreign
+    # host). Only honour an http(s) URL; otherwise fall back to the derived URL.
+    if [[ -n "$url" && "$url" != http://* && "$url" != https://* ]]; then
+      url=""
+    fi
   fi
+  # Fall back to the canonical derived URL when no trusted .env URL was found.
+  [[ -z "$url" && -n "$branch" ]] && url="$(url_for "$repo" "$branch")"
   [[ -z "$url" ]] && url="https://${folder}.test"
 
   # Use cached status if available, fallback to direct git calls
@@ -124,9 +138,14 @@ _display_worktree() {
     json_item+="\"branch\": \"$_je_branch\", "
     json_item+="\"sha\": \"$_je_sha\", "
     json_item+="\"url\": \"$_je_url\", "
+    # Map the unknown sentinel ("?") to JSON null; a bare ? is invalid JSON and
+    # would break the Tauri parser. Integer counts emit as bare numbers.
+    local ahead_json="$ahead" behind_json="$behind"
+    [[ "$ahead_json" == "$GROVE_UNKNOWN" ]] && ahead_json="null"
+    [[ "$behind_json" == "$GROVE_UNKNOWN" ]] && behind_json="null"
     json_item+="\"dirty\": $dirty, "
-    json_item+="\"ahead\": $ahead, "
-    json_item+="\"behind\": $behind, "
+    json_item+="\"ahead\": $ahead_json, "
+    json_item+="\"behind\": $behind_json, "
     json_item+="\"mismatch\": $mismatch, "
     json_item+="\"health_grade\": \"$health_grade\", "
     json_item+="\"health_score\": $health_score, "
@@ -153,7 +172,9 @@ _display_worktree() {
     print -r -- "    ${C_DIM}state${C_RESET}   ${state_color}${state_icon} ${state_text}${C_RESET}"
     format_grade "$health_grade"
     print -r -- "    ${C_DIM}health${C_RESET}  $REPLY ${C_DIM}($health_score/100)${C_RESET}"
-    if (( ahead > 0 || behind > 0 )); then
+    # Show the sync line when either count is non-zero, or unknown ("?") — but
+    # never feed the "?" sentinel into arithmetic.
+    if [[ "$ahead" == "$GROVE_UNKNOWN" || "$behind" == "$GROVE_UNKNOWN" ]] || (( ahead > 0 || behind > 0 )); then
       print -r -- "    ${C_DIM}sync${C_RESET}    ${C_GREEN}↑$ahead${C_RESET} ${C_RED}↓$behind${C_RESET}"
     fi
     print -r -- "    ${C_DIM}url${C_RESET}     ${C_BLUE}$url${C_RESET}"
@@ -182,35 +203,28 @@ cmd_ls() {
   clear_git_cache
   collect_worktree_statuses "$git_dir"
 
-  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
-  [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
+  # Collect worktrees using the shared helper (single source of truth, and
+  # detached-aware: detached worktrees arrive with the "(detached)" sentinel).
+  local ls_worktrees=()
+  collect_worktrees "$git_dir" ls_worktrees
+  if (( ${#ls_worktrees[@]} == 0 )); then
+    [[ "$JSON_OUTPUT" == true ]] && { format_json "[]"; return 0; }
+    dim "No worktrees found."
+    return 0
+  fi
 
   local json_items=()
 
-  local wt_path="" branch="" head="" idx=0 line=""
-  while IFS= read -r line; do
-    if [[ -z "$line" ]]; then
-      # Skip bare repo entry (ends with .git)
-      if [[ -n "$wt_path" && "$wt_path" != *.git ]]; then
-        idx=$((idx + 1))
-        _display_worktree "$idx" "$wt_path" "$branch" "$head" "$repo"
-        [[ -n "$REPLY" ]] && json_items+=("$REPLY")
-      fi
-      wt_path=""; branch=""; head=""
-      continue
-    fi
-
-    [[ "$line" == worktree\ * ]] && wt_path="${line#worktree }"
-    [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
-    [[ "$line" == HEAD\ * ]] && head="${line#HEAD }"
-  done <<< "$out"
-
-  # Handle last entry (no trailing blank line) - skip bare repo
-  if [[ -n "$wt_path" && "$wt_path" != *.git ]]; then
+  local wt_path="" branch="" idx=0 wt_entry
+  for wt_entry in "${ls_worktrees[@]}"; do
+    wt_path="${wt_entry%%|*}"
+    branch="${wt_entry##*|}"
     idx=$((idx + 1))
-    _display_worktree "$idx" "$wt_path" "$branch" "$head" "$repo"
+    # _display_worktree normalises the "(detached)" sentinel itself; head is
+    # resolved there when needed, so we pass an empty head.
+    _display_worktree "$idx" "$wt_path" "$branch" "" "$repo"
     [[ -n "$REPLY" ]] && json_items+=("$REPLY")
-  fi
+  done
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     format_json "[${(j:, :)json_items}]"
@@ -283,8 +297,9 @@ _display_status_row() {
     REPLY2="${p:t}|$b|$expected_slug"
   fi
 
-  # Check if stale (exceeds commits-behind threshold)
-  if (( behind > stale_threshold )); then
+  # Check if stale (exceeds commits-behind threshold). Never feed the unknown
+  # sentinel ("?") into arithmetic; an unknown count can't prove staleness.
+  if [[ "$behind" != "$GROVE_UNKNOWN" ]] && (( behind > stale_threshold )); then
     is_stale=true
     sync_display="${C_RED}↑$ahead ↓$behind${C_RESET}"
   else
@@ -320,10 +335,14 @@ _display_status_row() {
   if [[ "$JSON_OUTPUT" == true ]]; then
     local dirty=false
     [[ -n "$st" ]] && dirty=true
+    # Map the unknown sentinel ("?") to JSON null; a bare ? is invalid JSON.
+    local ahead_json="$ahead" behind_json="$behind"
+    [[ "$ahead_json" == "$GROVE_UNKNOWN" ]] && ahead_json="null"
+    [[ "$behind_json" == "$GROVE_UNKNOWN" ]] && behind_json="null"
     json_escape "$b"; local _je_b="$REPLY"
     json_escape "$p"; local _je_p="$REPLY"
     json_escape "$sha"; local _je_sha="$REPLY"
-    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead, \"behind\": $behind, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}"
+    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}"
   else
     printf "  %-28s ${state_color}%-10s${C_RESET} %-14s %-6s %-7s ${C_DIM}%-10s${C_RESET}\n" \
       "$branch_display" "$state_icon" "$sync_display" "$age_display" "$merged_icon" "$sha"
@@ -486,37 +505,26 @@ cmd_branches() {
   fi
   git --git-dir="$git_dir" fetch --all --prune --quiet 2>/dev/null || true
 
-  # Build associative arrays for O(1) worktree lookups
+  # Build associative arrays for O(1) worktree lookups, using the shared helper
+  # as the single source of truth (detached-aware).
   typeset -A worktree_by_branch    # branch -> path
   typeset -A has_worktree_map      # branch -> 1
 
-  local wt_list
-  wt_list="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || wt_list=""
+  local br_worktrees=()
+  collect_worktrees "$git_dir" br_worktrees
 
-  local current_path="" current_branch=""
-  while IFS= read -r line; do
-    case "$line" in
-      "worktree "*)
-        current_path="${line#worktree }"
-        ;;
-      "branch "*)
-        current_branch="${line#branch refs/heads/}"
-        ;;
-      "")
-        if [[ -n "$current_branch" && -n "$current_path" && "$current_path" != *.git ]]; then
-          has_worktree_map[$current_branch]=1
-          worktree_by_branch[$current_branch]="$current_path"
-        fi
-        current_path=""
-        current_branch=""
-        ;;
-    esac
-  done <<< "$wt_list"
-  # Handle last entry (no trailing blank line)
-  if [[ -n "$current_branch" && -n "$current_path" && "$current_path" != *.git ]]; then
-    has_worktree_map[$current_branch]=1
-    worktree_by_branch[$current_branch]="$current_path"
-  fi
+  local current_path="" current_branch="" wt_entry
+  for wt_entry in "${br_worktrees[@]}"; do
+    current_path="${wt_entry%%|*}"
+    current_branch="${wt_entry##*|}"
+    # Detached worktrees claim no branch — skip the "(detached)" sentinel so it
+    # never shadows a real branch in the listing below.
+    [[ "$current_branch" == "$GROVE_DETACHED_BRANCH" ]] && continue
+    if [[ -n "$current_branch" && -n "$current_path" ]]; then
+      has_worktree_map[$current_branch]=1
+      worktree_by_branch[$current_branch]="$current_path"
+    fi
+  done
 
   # Collect all branches (local + remote)
   local branches=()
@@ -691,67 +699,39 @@ cmd_report() {
     output_file="$3"
   fi
 
-  # Generate markdown report
+  # Generate markdown report.
+  # Build with REAL newlines ($'\n') so `print -r --` (which does NOT interpret
+  # backslash escapes) emits a multi-line report to both stdout and --output.
+  local nl=$'\n'
   local report=""
-  report+="# Worktree Report: $repo\n\n"
-  report+="Generated: $(date '+%Y-%m-%d %H:%M:%S')\n\n"
+  report+="# Worktree Report: $repo$nl$nl"
+  report+="Generated: $(date '+%Y-%m-%d %H:%M:%S')$nl$nl"
 
-  # Get worktree list
-  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
-  [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
+  # Collect worktrees via the shared helper (single source of truth, and
+  # detached-aware). Bare-repo entries are already filtered by the helper.
+  local report_worktrees=()
+  collect_worktrees "$git_dir" report_worktrees
+  if (( ${#report_worktrees[@]} == 0 )); then
+    dim "No worktrees found."
+    return 0
+  fi
 
   # Single pass - collect stats and table rows simultaneously
   local total=0 clean=0 dirty=0
   local table_rows=()
-  local wt_path="" branch="" head=""
+  local wt_path="" branch="" branch_label=""
   # Declare loop variables outside to avoid zsh re-declaration output
-  local status_st status_count status_icon ahead behind upstream last_commit
+  local status_st status_count status_icon ahead behind upstream last_commit wt_entry
 
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == worktree\ * ]]; then
-      wt_path="${line#worktree }"
-    elif [[ "$line" == "branch refs/heads/"* ]]; then
-      branch="${line#branch refs/heads/}"
-    elif [[ "$line" == HEAD\ * ]]; then
-      head="${line#HEAD }"
-    elif [[ -z "$line" && -n "$wt_path" ]]; then
-      [[ "$wt_path" == *.git ]] && { wt_path=""; branch=""; head=""; continue; }
+  for wt_entry in "${report_worktrees[@]}"; do
+    wt_path="${wt_entry%%|*}"
+    branch="${wt_entry##*|}"
 
-      total=$((total + 1))
-
-      status_st="$(git -C "$wt_path" status --porcelain 2>/dev/null)"
-      status_count="$(count_lines "$status_st")"
-      status_icon="clean"
-      if (( status_count > 0 )); then
-        status_icon="$status_count changes"
-        dirty=$((dirty + 1))
-      else
-        clean=$((clean + 1))
-      fi
-
-      ahead=0
-      behind=0
-      upstream="$(git -C "$wt_path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)" || upstream=""
-      if [[ -n "$upstream" ]]; then
-        ahead="$(git -C "$wt_path" rev-list --count '@{upstream}'..HEAD 2>/dev/null)" || ahead=0
-        behind="$(git -C "$wt_path" rev-list --count HEAD..'@{upstream}' 2>/dev/null)" || behind=0
-      fi
-
-      last_commit="$(git -C "$wt_path" log -1 --format='%s' 2>/dev/null)" || last_commit=""
-      # Truncate to 40 chars using pure Zsh
-      if (( ${#last_commit} > 40 )); then
-        last_commit="${last_commit:0:40}..."
-      fi
-
-      table_rows+=("| \`$branch\` | $status_icon | $ahead | $behind | $last_commit |")
-
-      wt_path=""; branch=""; head=""
-    fi
-  done <<< "$out"
-
-  # Handle last entry (no trailing blank line) - skip bare repo
-  if [[ -n "$wt_path" && "$wt_path" != *.git ]]; then
     total=$((total + 1))
+
+    # Render the detached sentinel as a plain label so the worktree stays visible.
+    branch_label="$branch"
+    [[ "$branch" == "$GROVE_DETACHED_BRANCH" ]] && branch_label="(detached)"
 
     status_st="$(git -C "$wt_path" status --porcelain 2>/dev/null)"
     status_count="$(count_lines "$status_st")"
@@ -772,40 +752,41 @@ cmd_report() {
     fi
 
     last_commit="$(git -C "$wt_path" log -1 --format='%s' 2>/dev/null)" || last_commit=""
+    # Truncate to 40 chars using pure Zsh
     if (( ${#last_commit} > 40 )); then
       last_commit="${last_commit:0:40}..."
     fi
 
-    table_rows+=("| \`$branch\` | $status_icon | $ahead | $behind | $last_commit |")
-  fi
+    table_rows+=("| \`$branch_label\` | $status_icon | $ahead | $behind | $last_commit |")
+  done
 
-  report+="## Summary\n\n"
-  report+="| Metric | Count |\n"
-  report+="|--------|-------|\n"
-  report+="| Total worktrees | $total |\n"
-  report+="| Clean | $clean |\n"
-  report+="| With changes | $dirty |\n\n"
+  report+="## Summary$nl$nl"
+  report+="| Metric | Count |$nl"
+  report+="|--------|-------|$nl"
+  report+="| Total worktrees | $total |$nl"
+  report+="| Clean | $clean |$nl"
+  report+="| With changes | $dirty |$nl$nl"
 
-  report+="## Worktrees\n\n"
-  report+="| Branch | Status | Ahead | Behind | Last Commit |\n"
-  report+="|--------|--------|-------|--------|-------------|\n"
+  report+="## Worktrees$nl$nl"
+  report+="| Branch | Status | Ahead | Behind | Last Commit |$nl"
+  report+="|--------|--------|-------|--------|-------------|$nl"
 
   local row
   for row in "${table_rows[@]}"; do
-    report+="$row\n"
+    report+="$row$nl"
   done
 
-  report+="\n## Hooks Available\n\n"
+  report+="$nl## Hooks Available$nl$nl"
   if [[ -d "$GROVE_HOOKS_DIR" ]]; then
     for hook_type in pre-add post-add pre-rm post-rm post-pull post-sync; do
       if [[ -x "$GROVE_HOOKS_DIR/$hook_type" ]] || [[ -d "$GROVE_HOOKS_DIR/${hook_type}.d" ]]; then
-        report+="- \`$hook_type\` (enabled)\n"
+        report+="- \`$hook_type\` (enabled)$nl"
       else
-        report+="- \`$hook_type\` (not configured)\n"
+        report+="- \`$hook_type\` (not configured)$nl"
       fi
     done
   else
-    report+="No hooks directory found at \`$GROVE_HOOKS_DIR\`\n"
+    report+="No hooks directory found at \`$GROVE_HOOKS_DIR\`$nl"
   fi
 
   # Output report
@@ -1226,10 +1207,10 @@ cmd_health() {
 
   # Check for branch/directory mismatches
   print -r -- "${C_BOLD}Branch Consistency${C_RESET}"
-  # check_worktree_mismatches returns the mismatch count; guard with || so a non-zero
-  # count does not abort the command under set -e (which would skip the Summary).
+  # check_worktree_mismatches prints the mismatches and sets GROVE_MISMATCH_COUNT.
   local mismatches=0
-  check_worktree_mismatches "$git_dir" || mismatches=$?
+  check_worktree_mismatches "$git_dir"
+  mismatches=$GROVE_MISMATCH_COUNT
   if [[ $mismatches -eq 0 ]]; then
     ok "All worktrees match their expected branches"
   else
@@ -1257,6 +1238,14 @@ cmd_health() {
 # Returns:
 #   0 on success
 cmd_dashboard() {
+  # The dashboard is a box-drawing TUI and is NOT part of the documented JSON
+  # data contract. Reject --json with a clear stderr error rather than emitting
+  # the TUI as invalid JSON (which would break any consumer that parses stdout).
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    print -r -- "${C_RED}✖ ERROR:${C_RESET} 'grove dashboard' does not support --json (use 'grove status/health/ls --json' instead)" >&2
+    exit 2
+  fi
+
   # Interactive mode
   if [[ "${INTERACTIVE:-false}" == true ]]; then
     interactive_dashboard

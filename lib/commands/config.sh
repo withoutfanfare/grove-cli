@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# config.sh - Configuration and customization commands
+# config.sh - Configuration and customisation commands
 
 # cmd_config — Show current grove configuration
 cmd_config() {
@@ -12,10 +12,13 @@ cmd_config() {
   local hooks_enabled="true"
   [[ -d "$hooks_dir" ]] || hooks_enabled="false"
 
-  local db_enabled="${DB_CREATE:-false}"
+  # Normalise loosely-typed config values (1/yes/on/empty) to strict JSON
+  # booleans so the --json output is always a bare true/false. An unquoted
+  # interpolation of a raw value like "1" or "yes" would be invalid JSON.
+  local db_enabled; db_enabled="$(to_json_bool "${DB_CREATE:-false}")"
   local db_host="${DB_HOST:-127.0.0.1}"
   local db_user="${DB_USER:-root}"
-  local herd_enabled="${HERD_ENABLED:-false}"
+  local herd_enabled; herd_enabled="$(to_json_bool "${HERD_ENABLED:-false}")"
 
   if [[ "$JSON_OUTPUT" == "true" ]]; then
     # Convert protected branches to JSON array using pure Zsh
@@ -191,19 +194,31 @@ cmd_alias() {
         error_exit "INVALID_INPUT" "invalid alias name '$alias_name', use alphanumeric, dash, or underscore" 2
       fi
 
-      # Validate target value (must be safe repo/branch format)
-      # Prevent path traversal and command injection
-      if [[ "$target" == *".."* ]] || [[ "$target" == *";"* ]] || [[ "$target" == *"|"* ]] || \
-         [[ "$target" == *"&"* ]] || [[ "$target" == *'$'* ]] || [[ "$target" == *'`'* ]] || \
-         [[ "$target" == *'\'* ]]; then
-        error_exit "INVALID_INPUT" "invalid alias target '$target', suspicious characters detected" 2
+      # Validate target value (must be safe repo/branch format).
+      # Whitelist allowed characters: alphanumerics plus / _ - . — anything
+      # else (including '=' which would corrupt the name=value line, and a
+      # leading dash which could be mistaken for a flag) is rejected.
+      if [[ ! "$target" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+        error_exit "INVALID_INPUT" "invalid alias target '$target', use alphanumeric, slash, dash, underscore, or dot (no leading dash)" 2
+      fi
+      # Defence in depth: reject path traversal even within the whitelist.
+      if [[ "$target" == *".."* ]]; then
+        error_exit "INVALID_INPUT" "invalid alias target '$target', path traversal not allowed" 2
       fi
 
-      # Remove existing alias if present
-      if grep -Fq "${alias_name}=" "$GROVE_ALIASES_FILE" 2>/dev/null; then
+      # Remove existing alias if present. Anchor to line start so that
+      # re-adding 'foo' does not also clobber an unrelated 'myfoo=...' line.
+      if grep -q "^${alias_name}=" "$GROVE_ALIASES_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
-        grep -Fv "${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
-        mv "$temp_file" "$GROVE_ALIASES_FILE"
+        # grep returns 1 when no lines match (file now empty) — that is fine.
+        # Only overwrite the original when grep did not hit a real error (rc>=2).
+        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
+        if (( $? <= 1 )); then
+          mv "$temp_file" "$GROVE_ALIASES_FILE"
+        else
+          rm -f "$temp_file"
+          error_exit "IO_ERROR" "failed to rewrite aliases file" 5
+        fi
       fi
 
       # Add new alias
@@ -214,11 +229,17 @@ cmd_alias() {
     rm|remove|delete)
       [[ -n "$alias_name" ]] || error_exit "INVALID_INPUT" "Usage: grove alias rm <name>" 2
 
-      if grep -Fq "${alias_name}=" "$GROVE_ALIASES_FILE" 2>/dev/null; then
+      # Anchor to line start so removing 'foo' never deletes 'myfoo=...'.
+      if grep -q "^${alias_name}=" "$GROVE_ALIASES_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
-        grep -Fv "${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
-        mv "$temp_file" "$GROVE_ALIASES_FILE"
-        ok "Alias removed: ${C_YELLOW}$alias_name${C_RESET}"
+        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
+        if (( $? <= 1 )); then
+          mv "$temp_file" "$GROVE_ALIASES_FILE"
+          ok "Alias removed: ${C_YELLOW}$alias_name${C_RESET}"
+        else
+          rm -f "$temp_file"
+          error_exit "IO_ERROR" "failed to rewrite aliases file" 5
+        fi
       else
         error_exit "INVALID_INPUT" "alias not found: '$alias_name'" 2
       fi
@@ -583,6 +604,9 @@ cmd_group() {
       # Declare loop variable outside loop to avoid zsh re-declaration output
       local git_dir
       for repo in "${repos[@]}"; do
+        # Gate the raw input first so 'add' never persists a name that 'show'
+        # would later reject (and never runs git_dir_for on un-validated input).
+        validate_name "$repo" "repository"
         git_dir="$(git_dir_for "$repo")"
         if [[ ! -d "$git_dir" ]]; then
           error_exit "WORKTREE_NOT_FOUND" "repository not found: '$repo'" 3
@@ -592,8 +616,14 @@ cmd_group() {
       # Remove existing group if present
       if grep -q "^${group_name}=" "$GROVE_GROUPS_FILE" 2>/dev/null; then
         local temp_file="$(mktemp)"
+        # grep rc 1 means no remaining lines (fine); only rc>=2 is a real error.
         grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file"
-        mv "$temp_file" "$GROVE_GROUPS_FILE"
+        if (( $? <= 1 )); then
+          mv "$temp_file" "$GROVE_GROUPS_FILE"
+        else
+          rm -f "$temp_file"
+          error_exit "IO_ERROR" "failed to rewrite groups file" 5
+        fi
       fi
 
       # Add new group
@@ -608,8 +638,13 @@ cmd_group() {
       if grep -q "^${group_name}=" "$GROVE_GROUPS_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
         grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file"
-        mv "$temp_file" "$GROVE_GROUPS_FILE"
-        ok "Group removed: ${C_YELLOW}@$group_name${C_RESET}"
+        if (( $? <= 1 )); then
+          mv "$temp_file" "$GROVE_GROUPS_FILE"
+          ok "Group removed: ${C_YELLOW}@$group_name${C_RESET}"
+        else
+          rm -f "$temp_file"
+          error_exit "IO_ERROR" "failed to rewrite groups file" 5
+        fi
       else
         error_exit "INVALID_INPUT" "group not found: '$group_name'" 2
       fi

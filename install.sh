@@ -285,16 +285,25 @@ install_script() {
   echo -e "${BLUE}Installing grove...${NC}"
 
   # Ensure the grove artifact exists and is current. It is generated from lib/ by build.sh;
-  # build it if missing so we never symlink a stale or absent file and report success.
+  # rebuild it when it is missing, or when any lib/ source (or build.sh itself) is newer than
+  # the artifact, so a dev install never symlinks a stale binary and then reports success.
+  local need_build=false
   if [[ ! -f "$SCRIPT_DIR/grove" ]]; then
+    echo -e "  ${DIM}grove artifact missing - building from lib/...${NC}"
+    need_build=true
+  elif [[ -n "$(find "$SCRIPT_DIR/lib" "$SCRIPT_DIR/build.sh" -newer "$SCRIPT_DIR/grove" -print -quit 2>/dev/null)" ]]; then
+    echo -e "  ${DIM}grove artifact is stale (lib/ changed) - rebuilding...${NC}"
+    need_build=true
+  fi
+
+  if [[ "$need_build" == true ]]; then
     if [[ -x "$SCRIPT_DIR/build.sh" ]]; then
-      echo -e "  ${DIM}grove artifact missing - building from lib/...${NC}"
       if ! "$SCRIPT_DIR/build.sh" >/dev/null; then
         echo -e "  ${RED}✖${NC} build.sh failed - cannot install" >&2
         exit 1
       fi
     else
-      echo -e "  ${RED}✖${NC} $SCRIPT_DIR/grove not found and no build.sh to generate it" >&2
+      echo -e "  ${RED}✖${NC} $SCRIPT_DIR/grove is missing or stale and no build.sh to (re)generate it" >&2
       exit 1
     fi
   fi
@@ -412,7 +421,7 @@ EOF
 
 create_hooks_dir() {
   local hooks_dir="$HOME/.grove/hooks"
-  local hook_dirs=("pre-add.d" "post-add.d" "pre-rm.d" "post-rm.d" "post-pull.d" "post-sync.d" "post-switch.d")
+  local hook_dirs=("pre-add.d" "post-add.d" "pre-rm.d" "post-rm.d" "post-pull.d" "post-sync.d" "post-switch.d" "pre-move.d" "post-move.d")
 
   echo -e "${BLUE}Setting up hooks directory...${NC}"
 
@@ -520,7 +529,8 @@ install_hooks_merge() {
     # Get relative path from examples_dir
     local rel_path="${src_file#"$examples_dir"/}"
     local dest_file="$hooks_dir/$rel_path"
-    local dest_dir="$(dirname "$dest_file")"
+    local dest_dir
+    dest_dir="$(dirname "$dest_file")"
 
     # Create destination directory if needed
     [[ -d "$dest_dir" ]] || mkdir -p "$dest_dir"
@@ -582,7 +592,8 @@ install_hooks_overwrite() {
   while IFS= read -r -d '' src_file; do
     local rel_path="${src_file#"$examples_dir"/}"
     local dest_file="$hooks_dir/$rel_path"
-    local dest_dir="$(dirname "$dest_file")"
+    local dest_dir
+    dest_dir="$(dirname "$dest_file")"
 
     [[ -d "$dest_dir" ]] || mkdir -p "$dest_dir"
     cp "$src_file" "$dest_file"
