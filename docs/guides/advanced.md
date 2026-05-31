@@ -2,11 +2,44 @@
 
 > Power features and developer documentation for grove. For getting started, see the [README](../../README.md). For command reference, see [commands.md](../reference/commands.md).
 
+This guide is for experienced users and contributors who want to bend grove to their workflow. It covers the power features (templates, aliases, repository groups, multi-repo and parallel operations, branch-naming validation, dependency sharing, stable service paths, self-update), the maintenance and recovery commands, the per-repo configuration mechanism, and the developer/build notes for working on grove itself.
+
+A few terms are used throughout:
+
+- **Worktree** — a separate working directory checked out from one shared git repository, so several branches can be checked out at once. grove manages a directory of these per repository.
+- **Bare repo** — a `.git` directory with no working tree of its own; grove keeps one bare repo per project under `HERD_ROOT` and creates worktrees from it.
+- **Slug** — a branch name made filesystem-safe (for example `feature/login-form` becomes `feature-login-form`) for use in directory names and database names.
+- **Herd** — [Laravel Herd](https://herd.laravel.com), the optional local PHP environment grove can integrate with to serve each worktree at its own `.test` domain.
+
+## Contents
+
+- [Worktree Templates](#worktree-templates)
+- [Branch Aliases](#branch-aliases)
+- [Repository Groups](#repository-groups)
+- [Multi-Repository Operations](#multi-repository-operations)
+- [Branch Naming Validation](#branch-naming-validation)
+- [Dependency Sharing](#dependency-sharing)
+- [Stable Paths for Services](#stable-paths-for-services)
+- [Per-Repo Configuration Overrides](#per-repo-configuration-overrides)
+- [Maintenance & Recovery](#maintenance--recovery)
+- [Self-Update](#self-update)
+- [Directory Structure](#directory-structure)
+- [Developer Guide](#developer-guide)
+- [Security](#security)
+- [Using grove with Claude Code](#using-grove-with-claude-code)
+- [Repository Structure](#repository-structure)
+
 ---
 
 ## Worktree Templates
 
-Templates let you predefine which setup hooks run when creating worktrees. This is useful when you have different project types or want quick minimal checkouts.
+Templates let you predefine which setup hooks run when creating worktrees. This is useful when you have different project types or want quick minimal checkouts. Templates are user-supplied `.conf` files in `GROVE_TEMPLATES_DIR` (default `~/.grove/templates`).
+
+**No templates ship enabled by default.** A fresh install creates `~/.grove/templates` empty, so `grove templates` prints `(no templates found)` until you copy some in. The four examples below live in `examples/templates/` in the repo — install them with:
+
+```bash
+cp examples/templates/*.conf ~/.grove/templates/
+```
 
 ### Listing Templates
 
@@ -14,9 +47,19 @@ Templates let you predefine which setup hooks run when creating worktrees. This 
 grove templates
 ```
 
-Output:
+On a fresh install (no templates copied in yet):
 ```text
-📋 Available Templates
+Available Templates
+
+  (no templates found)
+
+Usage: grove templates <name>  - Show template details
+       grove add <repo> <branch> --template=<name>
+```
+
+After copying the example templates in:
+```text
+Available Templates
 
   backend - Backend only - PHP, database, no npm/build
   laravel - Laravel with MySQL, Composer, NPM, and migrations
@@ -45,7 +88,7 @@ grove templates minimal
 
 Output:
 ```text
-📋 Template: minimal
+Template: minimal
 
 Description: Minimal - git worktree only, no setup
 
@@ -75,9 +118,9 @@ GROVE_SKIP_BUILD=true
 GROVE_SKIP_HERD=true
 ```
 
-### Included Example Templates
+### Example Templates
 
-The installer includes these templates in `examples/templates/`:
+The repo bundles these templates in `examples/templates/`. They are **not** copied into `~/.grove/templates` by the installer — copy in the ones you want:
 
 | Template | Description |
 |----------|-------------|
@@ -86,7 +129,7 @@ The installer includes these templates in `examples/templates/`:
 | `minimal.conf` | Git worktree only - skips all setup hooks |
 | `backend.conf` | Backend API work - PHP and database, no frontend build |
 
-To install example templates:
+To install all of them:
 ```bash
 cp examples/templates/*.conf ~/.grove/templates/
 ```
@@ -95,63 +138,67 @@ cp examples/templates/*.conf ~/.grove/templates/
 
 ## Branch Aliases
 
-Create shortcuts for frequently accessed worktrees. Aliases save you from typing long repository and branch names.
+Aliases are **repository-name shortcuts**. They save you typing a long repository name; they do not encode a branch.
+
+> **What an alias actually substitutes:** alias resolution (`resolve_repo_arg`) is applied only to the *first* positional argument — the repo — of `code`, `open`, `cd` and `switch`. If the argument is not a real repository, it is looked up as an alias and replaced with the **repo segment** of the target (`example-app` from `example-app/anything`). The branch part of a stored target is **discarded**. A real repository of the same name always wins over an alias.
 
 ### Creating an Alias
 
-Aliases point to a single `repo/branch` target.
-
 ```bash
-grove alias add <name> <repo/branch>
+grove alias add <name> <repo>
 
 # Examples
-grove alias add login example-app/feature/user-authentication
-grove alias add staging example-app/staging
+grove alias add app example-app
+grove alias add api example-api
 ```
+
+The target is validated (alphanumerics plus `/ _ - .`, no leading dash, no `..`). You can store a longer target such as `example-app/staging`, but only the leading repo segment is ever used — so prefer a bare repo name to avoid confusion.
 
 ### Using an Alias
 
-Aliases work with navigation commands:
+Aliases work as the repo argument of the navigation commands. The branch is still given explicitly or chosen via fzf:
 
 ```bash
-# These are equivalent
-grove code login
-grove code example-app feature/user-authentication
+# `app` resolves to repo `example-app`, so these are equivalent:
+grove cd app feature/login
+grove cd example-app feature/login
 
-# Switch to aliased worktree
-cd "$(grove switch login)"
+# Open a worktree's URL in the browser
+grove open app feature/login
 
-# Open in browser
-grove open staging
+# Switch (cd + editor + browser) — branch picked via fzf if omitted
+cd "$(grove switch app)"
 ```
+
+Because the branch is never part of an alias, `grove code app` with no branch behaves exactly like `grove code example-app` with no branch: it shows the fzf picker (or errors if fzf is not installed).
 
 ### Managing Aliases
 
 ```bash
-# List all aliases
+# List all aliases (bare command, or `grove alias list`)
 grove alias
 ```
 
 Output:
 ```text
-📝 Branch Aliases
+Branch Aliases
 
-  login    → example-app/feature/user-authentication
-  staging  → example-app/staging
+  app  → example-app
+  api  → example-api
 ```
 
 ```bash
-# Remove an alias
-grove alias rm login
+# Remove an alias (rm / remove / delete are equivalent)
+grove alias rm app
 ```
 
 ### Alias Storage
 
-Aliases are stored in `~/.grove/aliases` as simple key-value pairs:
+Aliases are stored in `GROVE_ALIASES_FILE` (default `~/.grove/aliases`) as simple `name=target` pairs:
 
 ```text
-login=example-app/feature/user-authentication
-staging=example-app/staging
+app=example-app
+api=example-api
 ```
 
 ---
@@ -168,37 +215,43 @@ grove group add frontend example-app example-api
 
 ### Using Groups
 
-Groups can be used with multi-repo commands using the `@` prefix:
+The `@<group>` prefix is accepted by **`build-all` and `exec-all` only**. `pull-all` and `prune` reject `@` (their repo argument is validated as a plain name) — use `--all-repos` for those instead.
 
 ```bash
-# Pull all worktrees in all repos in the 'frontend' group
-grove pull-all @frontend
+# Build all worktrees across every repo in the 'frontend' group
+grove build-all @frontend
 
-# Build all worktrees in the 'backend' group
-grove build-all @backend
-
-# Execute command across a group
+# Execute a command across a group
 grove exec-all @frontend "npm run lint"
 ```
 
 ### Managing Groups
 
 ```bash
-# List all groups
+# List all groups (bare command, or `grove group list`)
 grove group
+```
 
-# Show repos in a group
+Output (groups are shown with an `@` prefix):
+```text
+Repository Groups
+
+  @frontend → example-app example-api
+```
+
+```bash
+# Show the repos in a group (with worktree counts)
 grove group show frontend
 
-# Delete an entire group
+# Delete an entire group (rm / remove / delete are equivalent)
 grove group rm frontend
 ```
 
-To change which repos are in a group, run `grove group add ...` again with the new list.
+`grove group add` validates that every named repo exists before saving. To change which repos are in a group, run `grove group add ...` again with the new list.
 
 ### Group Storage
 
-Groups are stored in `~/.grove/groups` as simple key-value pairs:
+Groups are stored in `~/.grove/groups` as simple `name=repos` pairs (the `@` is added only for display):
 
 ```text
 frontend=example-app example-api
@@ -208,15 +261,19 @@ frontend=example-app example-api
 
 ## Multi-Repository Operations
 
-The `--all-repos` flag lets you run operations across all repositories at once.
+grove offers two ways to operate across more than one repository:
+
+- **`--all-repos`** — run the command against *every* bare repo under `HERD_ROOT`. Supported by `pull-all`, `prune`, `build-all` and `exec-all`. Not supported with `--json`.
+- **`@<group>`** — run against just the repos in a named group (see [Repository Groups](#repository-groups)). Supported by `build-all` and `exec-all` only.
 
 ### Supported Commands
 
-| Command | With `--all-repos` |
-|---------|-------------------|
-| `grove pull-all` | Pull all worktrees in all repos |
-| `grove build-all` | Build all worktrees in all repos |
-| `grove exec-all` | Run command in all repos |
+| Command | `--all-repos` | `@group` |
+|---------|---------------|----------|
+| `grove pull-all` | Pull every worktree in every repo | — |
+| `grove prune` | Prune every repo in parallel | — |
+| `grove build-all` | Build every worktree in every repo | Build the group |
+| `grove exec-all` | Run a command in every repo | Run in the group |
 
 ### Examples
 
@@ -247,15 +304,27 @@ grove build-all --all-repos
 
 # Run a command in all repos
 grove exec-all --all-repos "php artisan cache:clear"
+
+# Prune stale worktree entries across all repos
+grove prune --all-repos
 ```
 
 ### Parallel Execution
 
-Multi-repo operations run in parallel for efficiency. Configure concurrency in `~/.groverc`:
+Multi-repo and bulk operations run in parallel for efficiency. Concurrency is set by `GROVE_MAX_PARALLEL`, which can be a `~/.groverc` value or an environment variable:
 
 ```bash
 GROVE_MAX_PARALLEL=8  # Default: 4
 ```
+
+It is validated as a positive integer; an invalid value falls back to `4` with a warning, and values above `20` warn but are honoured.
+
+### Fetch Cache Flags
+
+Commands that fetch from the remote share a short-lived fetch cache (TTL `GROVE_FETCH_CACHE_TTL`, default 30s, `0` disables). Two global flags control it for a single run:
+
+- `--no-cache` — bypass the cache and always fetch fresh (sets the TTL to `0` for this invocation).
+- `--refresh` — clear the cache before running the command.
 
 ---
 
@@ -282,21 +351,21 @@ grove add example-app my-branch
 
 Output:
 ```text
-✖ Branch name 'my-branch' does not match required pattern
+Branch name 'my-branch' doesn't match required pattern
 
 Pattern: ^(feature|bugfix|hotfix)/[a-z0-9-]+$
+Examples: feature/my-feature, bugfix/fix-login
 
-Suggestions:
-  • feature/my-branch
-  • bugfix/my-branch
-  • hotfix/my-branch
+Suggestion: feature/my-branch
 
-Use -f to bypass this check.
+Use --force to bypass this check
 ```
+
+The `Examples:` line is drawn from `BRANCH_EXAMPLES` (default `feature/my-feature, bugfix/fix-login`). The single `Suggestion:` line is grove's best guess — it slugifies the name and, unless it already starts with a known prefix (`feature/`, `bugfix/`, `hotfix/`, `release/`), prepends `feature/`.
 
 ### Bypassing Validation
 
-Use `-f` when you need to create a branch that doesn't match the pattern:
+Use `--force` (or `-f`) when you need to create a branch that doesn't match the pattern. grove still warns, but proceeds:
 
 ```bash
 grove add -f example-app special-case-branch
@@ -306,16 +375,22 @@ grove add -f example-app special-case-branch
 
 ## Dependency Sharing
 
-The `share-deps` command shares `vendor/` and `node_modules/` directories across worktrees with identical lockfiles, saving disk space when working across many worktrees. Dependencies are moved to `~/.grove/shared-deps/` and symlinked back, keyed by a hash of the relevant lockfiles.
+The `share-deps` command shares `vendor/` and `node_modules/` directories across worktrees with identical lockfiles, saving disk space when working across many worktrees. The local directory is moved into the shared cache (`GROVE_SHARED_DEPS_DIR`, default `~/.grove/shared-deps`) and symlinked back, keyed by a short hash of the worktree's lockfiles (`composer.lock`, `package-lock.json`, `yarn.lock`).
 
 ```bash
-grove share-deps          # Check current sharing status
+grove share-deps          # Check current sharing status (default action)
 grove share-deps enable   # Enable shared dependencies (from within a worktree)
 grove share-deps disable  # Disable and restore local copies
-grove share-deps clean    # Remove unused shared caches
+grove share-deps clean    # Remove unused shared caches across all repos
 ```
 
+`share-deps` **auto-detects** the worktree from the current directory. If you run it with a repo name from outside a worktree, it uses an fzf picker to choose the worktree (and errors if fzf is not installed). The `clean` action is global and needs no worktree context.
+
 Run `composer install` or `npm ci` after enabling to populate the shared cache.
+
+> **PHP/Laravel: `vendor/` is intentionally skipped.** When a worktree contains a `composer.json`, `share-deps enable` does **not** share `vendor/` — Composer's autoloader resolves the project root from `vendor/` using relative paths, which break under a symlink. You'll see `Skipping vendor - sharing breaks PHP autoloader paths`, and only `node_modules` is linked. `node_modules` is unaffected by this.
+
+> **Replacing an existing local directory:** if a shared cache for that lockfile hash already exists and the worktree still has a local directory, `enable` refuses and prints `Use --force to replace local with shared`. Re-run with `-f`/`--force` to delete the local copy and link the shared cache.
 
 ---
 
@@ -323,7 +398,7 @@ Run `composer install` or `npm ci` after enabling to populate the shared cache.
 
 When using Laravel queue workers or schedulers with LaunchAgents, you need a stable path that doesn't change when you create new worktrees. The `{repo}-current` symlink provides this.
 
-The `09-update-current-link.sh` hook (installed in `~/.grove/hooks/post-add.d/`) automatically updates the symlink whenever you create a new worktree:
+The example hook `examples/hooks/post-add.d/09-update-current-link.sh` updates the symlink whenever you create a worktree, and its companion `examples/hooks/post-switch.d/01-update-current-link.sh` updates it on `grove switch`. These are only present if you installed the example hooks (`./install.sh --merge`, or copy them in manually) — see [Installing Example Hooks](#installing-example-hooks). The symlink looks like:
 
 ```text
 ~/Herd/example-app-current -> ~/Herd/example-app-worktrees/feature-login
@@ -342,11 +417,36 @@ The `09-update-current-link.sh` hook (installed in `~/.grove/hooks/post-add.d/`)
 
 Using `example-app-current` instead of a specific worktree path means the queue worker always runs from your most recently created worktree. This is useful during active development when you want queue jobs to use your current feature branch.
 
-**Skip the current link update** for a specific worktree by setting:
+**Skip the current link update** for a specific worktree by setting `GROVE_SKIP_CURRENT_LINK=true` in the environment. Hooks inherit grove's environment, so the example hook reads it and skips:
 
 ```bash
 GROVE_SKIP_CURRENT_LINK=true grove add example-app hotfix/quick-fix
 ```
+
+---
+
+## Per-Repo Configuration Overrides
+
+Most configuration lives in `~/.groverc` and applies to every repository. For settings that should differ per project, grove reads an optional `.groveconfig` file inside the **bare repo directory** (`~/Herd/<repo>.git/.groveconfig`). It is parsed as key-value pairs against a strict whitelist — never sourced as shell.
+
+Only these four keys may be overridden per-repo:
+
+| Key | Effect |
+|-----|--------|
+| `DEFAULT_BASE` | Base branch for `grove add` and the rebase target for `grove sync` |
+| `GROVE_URL_SUBDOMAIN` | Subdomain prefix for generated `.test` URLs |
+| `PROTECTED_BRANCHES` | Space-separated branches that need `-f` to remove |
+| `GROVE_STALE_THRESHOLD` | Commits-behind-base before a branch is flagged stale |
+
+Example `~/Herd/example-app.git/.groveconfig`:
+
+```text
+DEFAULT_BASE=origin/main
+PROTECTED_BRANCHES=main develop
+GROVE_STALE_THRESHOLD=20
+```
+
+A per-repo override applies only while grove is operating on that repository; the global baseline is restored for the next repo in multi-repo loops. (A `HERD_ROOT/.groveconfig` is also read, applying to all repos under that root.)
 
 ---
 
@@ -415,11 +515,12 @@ Verify with: grove --version
 
 ### Manual Update
 
-If you cloned the repository, you can also update manually:
+If you cloned the repository, you can update manually. To mirror what `grove upgrade` does, run it on the default branch (`main`, falling back to `master`) with a rebase:
 
 ```bash
 cd ~/Projects/grove-cli
-git pull
+git checkout main          # grove upgrade refuses to run on a feature branch
+git pull --rebase
 ./build.sh
 ```
 
@@ -450,6 +551,45 @@ Each worktree:
 - Has its own `vendor/` and `node_modules/`
 - Is served by Herd at its own `.test` domain
 - Can run simultaneously with other worktrees
+
+---
+
+## Maintenance & Recovery
+
+These commands keep a repository's worktrees and Herd state healthy. They are power-user tools — most users won't need them day to day.
+
+### `restructure` — migrate to the nested layout
+
+```bash
+grove restructure <repo>
+```
+
+Migrates a repository's worktrees from the old flat layout (`HERD_ROOT/<repo>--<branch>`) to the current nested layout (`HERD_ROOT/<repo>-worktrees/<site>`). For each worktree it moves the directory, refreshes the Herd SSL site, and rewrites only the `APP_URL=` line in the worktree's `.env` (every other key is preserved). It prompts for confirmation before touching anything; `-f`/`--force` skips the prompt, and a non-interactive run without `--force` fails safe.
+
+### `repair` — fix common worktree issues
+
+```bash
+grove repair [repo]            # one repo, or all repos if omitted
+grove repair --recovery [repo] # also attempt aggressive recovery
+```
+
+Scans for and fixes common problems: prunes orphaned worktree administrative entries, clears stale `index.lock` files, and checks worktree integrity (`.git` pointer files, gitdir references, `HEAD` files). When no repo is given it repairs every repo under `HERD_ROOT`; it does **not** auto-detect from the current directory. Adding `--recovery` enables aggressive recovery, which attempts to rebuild corrupted worktrees (for example a broken `.git/HEAD`).
+
+### `unlock` — remove stale git lock files
+
+```bash
+grove unlock [repo]   # one repo, or all repos if omitted
+```
+
+Removes stale `index.lock` files left behind when a git operation is interrupted. Run from inside a worktree it auto-detects the repo; given a repo name it unlocks just that repo; with no argument it scans every repo under `HERD_ROOT`.
+
+### `cleanup-herd` — remove orphaned Herd configs
+
+```bash
+grove cleanup-herd
+```
+
+Finds Herd nginx site configs, SSL certificates and site symlinks that point at worktree directories which no longer exist, and removes them, then restarts Herd's nginx. It prompts for confirmation (skip with `-f`/`--force`) and requires Herd to be installed.
 
 ---
 
@@ -495,17 +635,22 @@ lib/
 The `build.sh` script concatenates all modules into a single executable:
 
 ```bash
-# Build the grove script
+# Build the grove script (writes ./grove)
 ./build.sh
 
 # Build to a custom location
 ./build.sh --output /path/to/output
+
+# A single positional path is also accepted (back-compat)
+./build.sh /path/to/output
 ```
 
+`--output` requires a non-empty path — a bare `--output` (or a whitespace-only value) is a usage error rather than writing to a file literally named `--output`.
+
 The build process:
-1. Starts with `00-header.sh` (includes shebang)
-2. Concatenates modules in order (stripping shebangs)
-3. Adds command modules from `lib/commands/`
+1. Starts with `00-header.sh` (the only module whose shebang is kept)
+2. Concatenates the core modules in `MODULES` order (stripping any leading shebang)
+3. Concatenates the command modules in `COMMAND_MODULES` order (from `lib/commands/`)
 4. Appends `99-main.sh` (entry point)
 5. Makes the output executable
 
@@ -548,6 +693,7 @@ Modules are sourced in numeric order. Each module may depend on functions from e
 | `09-parallel.sh` | core, spinner |
 | `10-interactive.sh` | core, paths, templates |
 | `11-resilience.sh` | core |
+| `12-deps.sh` | core |
 | `commands/*.sh` | All above |
 
 ### Adding a New Command
@@ -567,31 +713,52 @@ Modules are sourced in numeric order. Each module may depend on functions from e
 
 ### Adding a New Module
 
-1. Create the module file with appropriate number prefix (e.g., `lib/13-newmodule.sh`)
+1. Create the module file. A **core** module gets a numeric prefix in `lib/` (e.g. `lib/13-newmodule.sh`); a **command** module goes in `lib/commands/`.
 2. Add a shebang and module comment:
    ```zsh
    #!/usr/bin/env zsh
    # 13-newmodule.sh - Description of module purpose
    ```
-3. Add the module to the `MODULES` array in `build.sh`
+3. Register it in the right array in `build.sh`, **preserving dependency order**: core modules go in `MODULES`, command modules go in `COMMAND_MODULES`.
 4. Run `./build.sh` and test
 
 ### Test Structure
 
+The test runner (`run-tests.sh`) lives at the repository root, not inside `tests/`.
+
 ```text
+run-tests.sh                  # Test runner (repo root): lint + unit + integration
 tests/
-├── unit/
-│   ├── validation.bats      # Input validation tests
-│   ├── slugify.bats         # Branch slugification
-│   ├── db-naming.bats       # Database name generation
-│   ├── url-generation.bats  # URL/path generation
-│   ├── json-escape.bats     # JSON escaping
-│   ├── config-parsing.bats  # Config file parsing
-│   └── template-security.bats
-├── integration/
-│   └── commands.bats        # CLI parsing, help, validation
-├── test-helper.bash         # Shared test utilities
-└── run-tests.sh             # Test runner
+├── unit/                     # Pure-function tests (12 files)
+│   ├── core-config.bats      # Config loading / reset between repos
+│   ├── database.bats         # Database create/backup/remove helpers
+│   ├── db-naming.bats        # Database name generation
+│   ├── deps.bats             # Shared dependency management
+│   ├── env-rewrite.bats      # .env APP_URL rewrite (move/restructure)
+│   ├── json-escape.bats      # JSON escaping
+│   ├── resilience.bats       # Lock files / transaction rollback
+│   ├── services.bats         # Service management helpers
+│   ├── slugify.bats          # Branch slugification
+│   ├── template-security.bats # Template variable validation
+│   ├── url-generation.bats   # URL/path generation
+│   └── validation.bats       # Input validation / security
+├── integration/              # Command integration tests (14 files)
+│   ├── bulk-ops.bats         # build-all / exec-all
+│   ├── commands.bats         # CLI parsing, help, validation
+│   ├── completion-sync.bats  # _grove completion stays in sync with commands
+│   ├── config-parsing.bats   # Config file parsing
+│   ├── config.bats           # config / setup / alias / group
+│   ├── discovery.bats        # recent / clean / info
+│   ├── git-helpers.bats      # Shared git operations
+│   ├── git-ops.bats          # pull / sync / prune / log / diff
+│   ├── hooks.bats            # Lifecycle hook execution
+│   ├── info.bats             # ls / status / repos / report / health
+│   ├── laravel.bats          # migrate / tinker / fresh
+│   ├── lifecycle.bats        # add / rm / move / clone
+│   ├── maintenance.bats      # doctor / cleanup / unlock / repair
+│   └── navigation.bats       # cd / open / code / switch
+├── test-helper.bash          # Shared test utilities (bash mirrors of zsh lib functions)
+└── fixtures/                 # Sample config fixtures
 ```
 
 To run tests:
@@ -886,22 +1053,30 @@ grove-cli/
     │   └── backend.conf
     └── hooks/                  # Example lifecycle hooks
         ├── README.md           # Comprehensive hooks documentation
+        ├── _lib/               # Shared helpers sourced by example hooks
+        ├── pre-add.d/          # Scripts run before worktree creation (gating)
+        │   └── 00-laravel-preflight.sh
         ├── post-add.d/         # Scripts run after worktree creation
         │   ├── 00-register-project.sh
         │   ├── 01-copy-env.sh
+        │   ├── 01a-inherit-db-from-primary.sh
         │   ├── 02-configure-env.sh
         │   ├── 03-create-database.sh
         │   ├── 04-herd-secure.sh
+        │   ├── 04-laravel-scaffold.sh
         │   ├── 05-composer-install.sh
         │   ├── 06-npm-install.sh
         │   ├── 07-build-assets.sh
         │   ├── 08-run-migrations.sh
-        │   └── example-app/          # Repo-specific hooks example
-        │       ├── 01-symlink-env.sh
-        │       ├── 02-import-database.sh
-        │       └── 03-seed-data.sh
+        │   ├── 09-update-current-link.sh   # Updates {repo}-current symlink
+        │   ├── 10-set-hooks-path.sh
+        │   ├── _laravel/             # Generic Laravel template (copy into <repo>/)
+        │   └── myapp/                # Repo-specific hooks example
+        ├── post-switch.d/      # Scripts run after `grove switch`
+        │   └── 01-update-current-link.sh   # Updates {repo}-current on switch
         ├── pre-rm.d/
-        │   └── 01-backup-database.sh
+        │   ├── 01-backup-database.sh
+        │   └── 02-backup-env.sh
         └── post-rm.d/
             ├── 01-herd-unsecure.sh
             └── 02-drop-database.sh

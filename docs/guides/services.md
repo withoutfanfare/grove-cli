@@ -4,6 +4,22 @@
 
 If you've never heard of Horizon or Supervisor, a quick summary: Laravel Horizon is a dashboard and queue manager that runs as a background process. Supervisor is the system tool that keeps it alive if it crashes. Reverb is Laravel's WebSocket server. Grove can start, stop, and restart all of these for you -- which is especially useful when switching between worktrees.
 
+This guide is for Laravel users who run Supervisor, Horizon, Reverb, or the scheduler and want grove to manage them per worktree. (A *worktree* is a separate working directory checked out from the same git repository; a *bare repo* is a repository with no working tree of its own, which grove keeps under your Herd root.) It covers prerequisites, registering apps, managing and monitoring services, viewing logs, the Horizon dashboard, the `apps.conf` config-file format, integration with `grove switch`, migrating from DevCTL, and troubleshooting.
+
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Registering Apps](#registering-apps)
+- [Managing Services](#managing-services)
+- [Monitoring](#monitoring)
+- [Configuration](#configuration)
+- [Integration with `grove switch`](#integration-with-grove-switch)
+- [Migrating from DevCTL](#migrating-from-devctl)
+- [Troubleshooting](#troubleshooting)
+
+---
+
 ## Prerequisites
 
 Before using service management, make sure you have:
@@ -88,7 +104,47 @@ grove services add myapp \
 
 **What `--system-name` does:** Grove uses the system name to locate the Herd symlink at `~/Herd/<system-name>-current`. If your repo is checked out as `myapp-repo` and Herd serves it from that directory, pass `--system-name=myapp-repo`.
 
-**What `--services` does:** Controls which background processes grove manages. See [Service Types](#service-types) below.
+**What `--services` does:** Controls which background processes grove manages. See [Service Types](#service-types) below. An unrecognised value is rejected:
+
+```text
+Invalid services: foo (must be horizon, horizon:reverb, or none)
+```
+
+**Confirmation output:** A successful registration prints a summary so you can see exactly what was stored (`Supervisor` shows `none` when the process field is empty, e.g. for `services=none`):
+
+```text
+✓ Registered app: myapp
+
+  System name: myapp
+  Services:    horizon
+  Supervisor:  myapp-horizon
+  Domain:      myapp.test
+
+Config: /Users/you/.grove/services/apps.conf
+```
+
+### Validation
+
+Grove validates every value before it is written to the registry, because the config file is a strict pipe-delimited format (see [Config File Format](#config-file-format)) and an invalid value would corrupt it or the `services apps --json` data contract:
+
+- **App name** is run through grove's repository whitelist -- no path traversal (`../`), no leading dash, and no shell or pipe metacharacters.
+- **System name** and **supervisor process** must not contain a `|` or a newline.
+- **Domain** must be a valid hostname: only alphanumerics, dash, and dot. An invalid value dies with `Invalid domain: '<value>' (only alphanumeric, dash, and dot allowed)`.
+
+### Updating an App
+
+There is no in-place update. Re-running `grove services add` for a name that already exists is rejected:
+
+```text
+App 'myapp' is already registered. To update, remove first: grove services remove myapp
+```
+
+To change any setting, remove the app and add it again:
+
+```bash
+grove services remove myapp
+grove services add myapp --services=horizon:reverb
+```
 
 ### Viewing Registered Apps
 
@@ -146,7 +202,7 @@ The status view shows:
 - Whether Redis is reachable (`Running` / `Not running`)
 - For each registered app:
   - The active worktree (via the `-current` symlink)
-  - Supervisor process state — `RUNNING`, `STOPPED`, etc., or `Not configured` when the app's named process isn't known to `supervisorctl`
+  - Supervisor process state — `RUNNING` for a healthy process; otherwise grove echoes the raw state word reported by `supervisorctl` (e.g. `STOPPED`, `FATAL`, `BACKOFF`); or `Not configured` when `supervisorctl` has no matching process. (Apps registered with `services=none` show no Supervisor line at all.)
   - Horizon status — `Running`, `Inactive`, or `Unknown` when PHP or the app's `artisan` binary is unavailable to query
   - Whether the scheduler LaunchAgent is loaded (`Loaded` / `Not loaded`)
 
@@ -193,6 +249,8 @@ grove services restart all
 
 Restart sends `supervisorctl restart <process>`. Note that restart does **not** touch the scheduler LaunchAgent -- only the Supervisor process.
 
+`grove services restart` is also deliberately a no-op in two cases, so it is safe to call from a hook for any repo: with **no argument** it returns silently, and with an **unregistered** app name it returns silently too. (See [Integration with `grove switch`](#integration-with-grove-switch).)
+
 ---
 
 ## Monitoring
@@ -208,7 +266,7 @@ Doctor checks the following and flags anything that needs attention:
 | Check | What it looks for |
 |-------|-------------------|
 | Homebrew | `brew` is on your PATH |
-| PHP | `php` is available (required by Horizon status checks) |
+| PHP | `php` is available (required by Horizon status checks); on success doctor prints the detected PHP version |
 | Redis | `redis-cli ping` returns a response |
 | Supervisor | Supervisor daemon is started via `brew services` |
 | Supervisor configs | `/opt/homebrew/etc/supervisor.d/` exists and lists config count |
@@ -249,6 +307,12 @@ Log file locations:
 
 The command tails the file with `tail -f` and runs until you press Ctrl+C.
 
+Calling `grove services logs` with no app prints a usage line listing the valid types, and an unrecognised type is rejected:
+
+```text
+Unknown log type: foo (valid: horizon, reverb, scheduler, queue)
+```
+
 ### Horizon Dashboard
 
 ```bash
@@ -274,6 +338,8 @@ myapp|myapp|horizon|myapp-horizon|myapp.test
 
 The header comment is included by grove when it creates the file for you. Blank lines and lines beginning with `#` are ignored.
 
+> **Editing by hand?** The format is strictly **five** pipe-delimited fields per record. Grove skips any line that doesn't have exactly five fields (or whose app name is empty), printing a warning to stderr: `Skipping malformed registry line (expected 5 fields, got N): <line>`. A stray `|` shifts the columns and the whole line is dropped. The same constraints that `grove services add` enforces apply to hand edits too -- see [Validation](#validation): the domain must be a valid hostname (alphanumerics, dash, dot), and `system_name`, `supervisor_process`, and `domain` must not contain a `|` or newline. Keeping the file valid also protects the `services apps --json` data contract consumed by the grove desktop app. When in doubt, use `grove services remove` + `grove services add` rather than editing the file.
+
 **Field reference:**
 
 | Field | Description | Default |
@@ -281,8 +347,10 @@ The header comment is included by grove when it creates the file for you. Blank 
 | `app_name` | Short name used in all `grove services` commands | (required) |
 | `system_name` | Directory name in `~/Herd` (bare repo prefix) | Same as `app_name` |
 | `services` | Which services to manage -- see below | `horizon` |
-| `supervisor_process` | Supervisor process name passed to `supervisorctl` | See below |
+| `supervisor_process` | Supervisor process name passed to `supervisorctl` | Set by `grove services add` (see [Supervisor Process Naming](#supervisor-process-naming)) |
 | `domain` | Local `.test` domain | `<system_name>.test` |
+
+> **Empty `supervisor_process`?** The defaults in the table below are what `grove services add` *writes* into the file. If you hand-edit a record and leave `supervisor_process` blank, grove instead falls back at runtime to `<app_name>-horizon` -- note this is based on `app_name`, not `system_name`, so it can differ from the add-time default.
 
 ### Service Types
 
@@ -292,7 +360,10 @@ The header comment is included by grove when it creates the file for you. Blank 
 | `horizon:reverb` | Horizon + Laravel Reverb WebSocket server |
 | `none` | App registered in grove but no queue services to manage |
 
-Use `none` when you want grove to track an app (for symlink checks, scheduler, logs) but the app doesn't run Horizon.
+**What each value enables:**
+
+- `horizon` and `horizon:reverb` enable the full feature set: Supervisor process management on start/stop/restart, Horizon status in `grove services status`, and the `grove services horizon` dashboard command.
+- `none` registers the app for symlink checks, scheduler control, and log paths only. With `services=none`, start/stop/restart make **no** `supervisorctl` call, no Horizon status is shown, and `grove services horizon <app>` is rejected with `<app> does not use Horizon`. Use it when you want grove to track an app that doesn't run Horizon.
 
 ### Supervisor Process Naming
 
@@ -306,6 +377,8 @@ The `supervisor_process` field tells grove which process name to pass to `superv
 
 The `:*` syntax tells Supervisor to restart every process in the `myapp` group at once -- this covers both the `horizon` and `reverb` workers if they're defined as a group in your Supervisor `.ini` file.
 
+**How grove matches a `name:*` group in `status` and `doctor`:** grove strips the `:*` suffix and matches every `supervisorctl` process whose name starts with `name:` (or is exactly `name`). So a stored process of `myapp:*` matches `myapp:horizon`, `myapp:reverb`, and so on. Define your Supervisor group accordingly, or status/doctor won't find the processes.
+
 If your Supervisor config uses a different naming convention, override it with `--supervisor` when registering:
 
 ```bash
@@ -318,30 +391,38 @@ grove services add myapp --supervisor=myapp-worker:horizon
 
 When you run `grove switch` to change the active worktree for a repo, a post-switch hook can automatically restart that app's services so the Horizon worker picks up the new codebase.
 
-The example hook at `examples/hooks/post-switch.d/02-devctl-restart.sh` does this:
+Two example hooks work together, and **filename order matters** -- post-switch hooks run in lexical order:
 
-```zsh
-grove services restart "$GROVE_REPO"
-```
+1. `examples/hooks/post-switch.d/01-update-current-link.sh` -- repoints the `~/Herd/<system-name>-current` symlink at the newly switched-to worktree.
+2. `examples/hooks/post-switch.d/02-devctl-restart.sh` -- restarts that app's services:
+   ```zsh
+   grove services restart "$GROVE_REPO"
+   ```
+
+The `01` hook must run before `02`: restart targets whatever the `-current` symlink points at, so if the symlink hasn't been updated first, the restart hits the *previous* (stale) worktree. **Install both example hooks, not just `02`.**
 
 Grove sets `$GROVE_REPO` automatically before running any hook -- it's the short name of the repository being switched. You don't set it yourself.
 
-**Why this is safe by design:** `grove services restart` is idempotent. If `$GROVE_REPO` doesn't match any registered app, the command exits silently with no error. This means the hook works for every repo without needing any special-casing -- it only does something if the repo is registered.
+**Why this is safe by design:** `grove services restart` is idempotent. If `$GROVE_REPO` doesn't match any registered app, the command returns silently with no error (as does calling it with no argument). This means the hook works for every repo without needing any special-casing -- it only does something if the repo is registered.
 
-### Installing the Hook
+### Installing the Hooks
 
-Copy the example hook to your global hooks directory:
+Copy **both** example hooks to your global hooks directory so the symlink is updated before the restart:
 
 ```bash
+cp examples/hooks/post-switch.d/01-update-current-link.sh ~/.grove/hooks/post-switch.d/
 cp examples/hooks/post-switch.d/02-devctl-restart.sh ~/.grove/hooks/post-switch.d/
+chmod +x ~/.grove/hooks/post-switch.d/01-update-current-link.sh
 chmod +x ~/.grove/hooks/post-switch.d/02-devctl-restart.sh
 ```
 
-Or install it for a specific repo only:
+Or install them for a specific repo only:
 
 ```bash
 mkdir -p ~/.grove/hooks/post-switch.d/myrepo
+cp examples/hooks/post-switch.d/01-update-current-link.sh ~/.grove/hooks/post-switch.d/myrepo/
 cp examples/hooks/post-switch.d/02-devctl-restart.sh ~/.grove/hooks/post-switch.d/myrepo/
+chmod +x ~/.grove/hooks/post-switch.d/myrepo/01-update-current-link.sh
 chmod +x ~/.grove/hooks/post-switch.d/myrepo/02-devctl-restart.sh
 ```
 
@@ -413,7 +494,7 @@ Names are case-sensitive. If the app is listed but spelled differently, either r
 
 ### Supervisor not running
 
-If the daemon line in `grove services status` shows "Supervisor: Not running":
+If the `Supervisor Daemon:` line in `grove services status` shows `Not running (run: brew services start supervisor)`:
 
 ```bash
 brew services start supervisor
@@ -425,7 +506,7 @@ Then verify it started:
 brew services list | grep supervisor
 ```
 
-If the daemon is up but an app reports "Supervisor: Not configured", the daemon is running yet `supervisorctl` doesn't know about that app's named process. Check that your `.ini` files are in `/opt/homebrew/etc/supervisor.d/`, are syntactically valid, and define a process matching the app's `supervisor_process` name.
+If the daemon is up but an app's `Supervisor:` line reports `Not configured`, the daemon is running yet `supervisorctl` doesn't know about that app's named process. Check that your `.ini` files are in `/opt/homebrew/etc/supervisor.d/`, are syntactically valid, and define a process matching the app's `supervisor_process` name (for a `name:*` group, see [Supervisor Process Naming](#supervisor-process-naming) for how grove matches the group prefix).
 
 ### Services not restarting on switch
 
@@ -448,7 +529,7 @@ If the daemon is up but an app reports "Supervisor: Not configured", the daemon 
 
 ### Redis connection issues
 
-If `grove services status` shows "Redis: Not running":
+If the `Redis:` line in `grove services status` shows `Not running (run: brew services start redis)`:
 
 ```bash
 brew services start redis

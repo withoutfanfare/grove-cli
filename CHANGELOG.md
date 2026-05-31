@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Slugification and validation hardened** - Branch slugs and git-ref validation handle more edge cases consistently across path, host, and database generation
 - **`parallel_run` stdin fix** - Parallel operations no longer deadlock or inherit unexpected stdin in bulk and JSON flows
 
+### Documentation
+- **Full documentation audit and rewrite** - Every user- and contributor-facing document (README, the four guides, both reference docs, CONTRIBUTING, and the hooks examples README) was audited against `lib/` source and rewritten for completeness, accuracy, and clarity. Notable corrections: the `grove setup` wizard (seven sections; it *suggests* rather than runs `grove doctor`), the `grove changes --json` shape, the config-key vs `GROVE_*` environment-variable namespaces, and numeric (not alphabetical) hook ordering. Removed an invented `GROVE_SKIP_DEVCTL` config key, and added intros, glossaries, and tables of contents throughout
+- **Documentation index refreshed** - `docs/README.md` now links every current guide and reference with a one-line summary, and separates current docs from archived planning artefacts
+
 ## [4.1.0] - 2026-01-10
 
 ### Added
@@ -120,10 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`wt clean [repo]`** - Remove `node_modules/` and `vendor/` from inactive worktrees (>30 days) to save disk space
 - **`wt alias`** - Manage branch aliases for quick access:
   - `wt alias set <name> <repo> <branch>` - Create an alias
-  - `wt alias get <name>` - Show alias target
   - `wt alias list` - List all aliases
   - `wt alias remove <name>` - Delete an alias
-- **`wt upgrade`** - Self-update command that downloads the latest version from GitHub
+- **`wt upgrade`** - Self-update command that pulls the latest changes and rebuilds locally
 - **`wt version --check`** - Check for available updates without installing
 - **`wt summary [repo] [branch] [base]`** - Comprehensive overview of worktree status vs base branch including commit counts, uncommitted changes, recent commits, and diff statistics. Supports `--json` output
 - **`wt config`** - Output current configuration as JSON for debugging and scripting
