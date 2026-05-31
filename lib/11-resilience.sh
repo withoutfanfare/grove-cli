@@ -138,11 +138,14 @@ check_index_locks() {
 
 # check_disk_space — Exit with error if available disk space is below threshold
 check_disk_space() {
-  local path="$1"
+  # NB: do not name this 'path' — in zsh `path` is the special array tied to
+  # $PATH, so `local path=...` clobbers PATH inside the function and breaks
+  # external commands (tail/awk below) in shells where they aren't pre-hashed.
+  local target_path="$1"
   local min_mb="${2:-1024}"  # Default 1GB
 
   local available_kb
-  available_kb=$(df -k "$path" 2>/dev/null | tail -1 | awk '{print $4}')
+  available_kb=$(df -k "$target_path" 2>/dev/null | tail -1 | awk '{print $4}')
   local available_mb=$((available_kb / 1024))
 
   if (( available_mb < min_mb )); then

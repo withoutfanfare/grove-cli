@@ -119,24 +119,25 @@ lookup_worktree_path() {
 
   local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || return 0
 
-  local path="" current_branch="" line=""
+  # NB: not 'path' — in zsh that is the special array bound to $PATH.
+  local wt_path="" current_branch="" line=""
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
-      if [[ "$current_branch" == "$branch" && -n "$path" ]]; then
-        print -r -- "$path"
+      if [[ "$current_branch" == "$branch" && -n "$wt_path" ]]; then
+        print -r -- "$wt_path"
         return 0
       fi
-      path=""
+      wt_path=""
       current_branch=""
       continue
     fi
-    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
+    [[ "$line" == worktree\ * ]] && wt_path="${line#worktree }"
     [[ "$line" == branch\ refs/heads/* ]] && current_branch="${line#branch refs/heads/}"
   done <<< "$out"
 
   # Handle last entry (no trailing blank line)
-  if [[ "$current_branch" == "$branch" && -n "$path" ]]; then
-    print -r -- "$path"
+  if [[ "$current_branch" == "$branch" && -n "$wt_path" ]]; then
+    print -r -- "$wt_path"
     return 0
   fi
 
