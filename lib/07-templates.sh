@@ -40,10 +40,10 @@ extract_template_desc() {
 suggest_similar() {
   local input="$1" type="$2"
   shift 2
-  local options=("$@")
+  local candidates=("$@")
   local best_match="" best_score=999
 
-  for opt in "${options[@]}"; do
+  for opt in "${candidates[@]}"; do
     # Simple similarity: count matching characters at start
     local i=0 score=0
     local input_lower="${input:l}" opt_lower="${opt:l}"

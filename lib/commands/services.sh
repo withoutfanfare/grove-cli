@@ -712,13 +712,13 @@ cmd_services_doctor() {
       fi
       local process
       process="$(svc_get_supervisor_process "$app")"
-      local status
-      status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
-      if [[ -n "$status" ]]; then
-        if print -r -- "$status" | grep -q "RUNNING"; then
+      local proc_status
+      proc_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
+      if [[ -n "$proc_status" ]]; then
+        if print -r -- "$proc_status" | grep -q "RUNNING"; then
           ok "$app: RUNNING"
         else
-          warn "$app: $(print -r -- "$status" | awk '{print $2}')"
+          warn "$app: $(print -r -- "$proc_status" | awk '{print $2}')"
         fi
       else
         warn "$app: Not configured"
