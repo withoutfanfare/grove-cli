@@ -24,13 +24,17 @@ HERD_ROOT=$HOME/Herd
 # DATABASE SETTINGS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# grove core never creates, backs up, or drops databases itself. The settings below
+# are read by the reference database helpers that the *example* lifecycle hooks invoke
+# (see examples/hooks/). They have no effect unless those hooks are installed.
+
 # MySQL connection details
 # DB_HOST=127.0.0.1
 # DB_USER=root
 # DB_PASSWORD=
 
-# Auto-create database when running 'grove add'
-# Set to 'false' to disable automatic database creation
+# Let the example post-add hooks auto-create a database after 'grove add'
+# Set to 'false' to disable database creation in those hooks
 # Default: true
 # DB_CREATE=true
 
@@ -38,8 +42,8 @@ HERD_ROOT=$HOME/Herd
 # DATABASE BACKUP SETTINGS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Backup database when running 'grove rm'
-# Set to 'false' to disable (or use --no-backup flag)
+# Let the example pre-rm hooks back up the database before 'grove rm' removes a worktree
+# Set to 'false' to disable (or pass --no-backup to 'grove rm')
 # Default: true
 # DB_BACKUP=true
 

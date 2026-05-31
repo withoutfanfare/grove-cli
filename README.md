@@ -1,8 +1,26 @@
 # grove - Git Worktree Manager
 
-A command-line tool for managing git worktrees with optional Laravel Herd integration. Work on multiple branches at once without stash gymnastics.
+**grove keeps every branch in its own folder, so you can work on several at once without stashing, switching, or losing your place.** It is a command-line tool for managing [git worktrees](#what-are-git-worktrees) with optional [Laravel Herd](https://herd.laravel.com) integration.
 
 **Framework-agnostic by design.** The core `grove` tool handles git worktree operations only. Framework setup (Laravel, Node.js, etc.) happens in lifecycle hooks that you can use, tweak, or ignore.
+
+> This README is the front door: install grove, create your first worktree, and find any command fast. It is written for someone who has never used grove. Deeper reference material lives under [`docs/`](#further-reading).
+
+## Contents
+
+- [At a glance](#at-a-glance)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [What are Git Worktrees?](#what-are-git-worktrees) — read this first if worktrees are new to you
+- [First-time onboarding](#first-time-onboarding)
+- [Quick Reference](#quick-reference)
+- [Common Workday Scenarios](#common-workday-scenarios)
+- [Configuration](#configuration)
+- [Flags](#flags)
+- [Troubleshooting](#troubleshooting)
+- [Further Reading](#further-reading)
+- [Tips](#tips)
+- [Contributing & Testing](#contributing--testing)
 
 ## At a glance
 
@@ -12,6 +30,18 @@ A command-line tool for managing git worktrees with optional Laravel Herd integr
 - Safe by default: health checks, branch protection, mismatch warnings
 - Batch commands for pulling, building, and syncing across worktrees
 - Optional service management for Horizon, Reverb, and schedulers
+
+## Requirements
+
+- **macOS only.** The installer hard-stops on Linux or Windows. Linux and Windows (via WSL) support is planned — see the [roadmap](docs/development/roadmap.md).
+- **Required:** `zsh` and `git` (the installer will not proceed without them).
+- **Optional, for fuller functionality:**
+  - `fzf` — interactive pickers (`grove add -i`, branch selection)
+  - `jq` — pretty-printed JSON (`--pretty`)
+  - `mysql` — per-worktree databases (used by the example database hooks)
+  - [Laravel Herd](https://herd.laravel.com) — automatic HTTPS `.test` site URLs
+
+The installer checks for all of these and tells you what is missing.
 
 ## Installation
 
@@ -28,9 +58,32 @@ grove --version
 grove doctor
 ```
 
+The installer symlinks `grove` into `/usr/local/bin` (override with `GROVE_INSTALL_DIR`), installs zsh tab-completion, and creates `~/.groverc` plus the `~/.grove/` directories. It also copies the bundled example Laravel hooks; re-running over existing hooks prompts you, or you can pass a hook mode up front:
+
+```bash
+./install.sh --merge       # keep existing hooks, add any new examples (default)
+./install.sh --overwrite   # replace hooks with the examples (backs up the old ones first)
+./install.sh --skip-hooks  # leave hooks untouched
+./install.sh --help        # full list of flags and env vars
+```
+
+> **`command not found: grove` after install?** Your install directory is probably not on your `PATH`. The installer prints the exact line to add — by default:
+> ```bash
+> echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zshrc
+> ```
+> Then open a new terminal.
+
 For detailed install options, manual install, or platform notes, see [docs/guides/getting-started.md](docs/guides/getting-started.md).
 
 ## First-time onboarding
+
+> New to worktrees? Skim [What are Git Worktrees?](#what-are-git-worktrees) and [The Golden Rule](#the-golden-rule-one-branch-per-worktree) first — the steps below will make more sense.
+
+A few terms used below:
+
+- **Bare repo** — a copy of a repository with no working files of its own; it stores the git history that all your worktrees share. grove keeps one per project (e.g. `~/Herd/example-app.git/`).
+- **Worktree** — a real, checked-out folder for a single branch. You edit, run, and commit here.
+- **Herd** — [Laravel Herd](https://herd.laravel.com), which serves each worktree at its own HTTPS `.test` URL (optional).
 
 1. **Run the setup wizard**
    ```bash
@@ -60,13 +113,15 @@ For detailed install options, manual install, or platform notes, see [docs/guide
    cd "$(grove switch example-app staging)"
    ```
 
+   `grove switch` (and `grove cd`) print the worktree's path to stdout; wrapping the command in `cd "$(...)"` is what moves your shell into that folder. `grove switch` additionally opens the worktree in your editor and browser. (The [Quick navigation function](#quick-navigation-function) tip turns this into a short `gcd` command.)
+
 4. **Daily flow**
    ```bash
    grove add example-app feature/my-branch
    cd "$(grove switch example-app feature/my-branch)"
    ```
 
-**Golden rule:** one worktree = one branch. Do not run `git checkout` inside a worktree. Switch worktrees instead.
+**Golden rule:** one worktree = one branch. Do not run `git checkout` inside a worktree — switch worktrees instead. See [The Golden Rule](#the-golden-rule-one-branch-per-worktree) for why.
 
 ---
 
@@ -129,23 +184,26 @@ grove setup
 grove doctor
 grove config
 grove repos
+grove version                                         # print the version (also: grove --version)
 
 # Create / rename / remove worktrees
 grove add example-app staging
 grove add example-app feature/login
 grove add example-app feature/api origin/staging
-grove add -i                                          # interactive wizard
+grove add -i                                          # interactive wizard (also: grove -i; needs fzf)
 grove add example-app feature/api --template=backend  # use template
 grove move example-app feature/login login
 grove rm example-app feature/login
 grove rm --drop-db --delete-branch example-app feature/login
 
-# Navigate (auto-detects repo/branch if inside a worktree)
+# Navigate
+# cd / code / open auto-detect the repo + branch when run from inside a worktree.
+# switch and exec do NOT auto-detect (see the inline notes below).
 cd "$(grove cd example-app feature/login)"
-grove code example-app feature/login    # open in editor
-grove open example-app feature/login    # open URL in browser
-grove switch example-app feature/login  # cd + code + open in one
-grove exec example-app feature/login php artisan migrate
+grove code example-app feature/login    # open in editor (auto-detects from inside a worktree)
+grove open example-app feature/login    # open URL in browser (auto-detects from inside a worktree)
+grove switch example-app feature/login  # cd + code + open in one (repo required, no auto-detect)
+grove exec example-app feature/login php artisan migrate  # (repo + branch required)
 
 # Git ops + visibility
 grove ls example-app
@@ -200,6 +258,7 @@ grove build-all @client-work                # run across every repo in the group
 grove exec-all @client-work npm test        # exec across the group
 grove templates
 grove repair example-app
+grove restructure example-app               # migrate worktrees to the nested layout shown above
 grove cleanup-herd
 grove unlock example-app
 grove share-deps status
@@ -219,7 +278,7 @@ grove status example-app
 # Pull all worktrees to get overnight changes
 grove pull-all example-app
 
-# Jump straight into your current feature
+# Pick a worktree to jump into (opens an fzf picker; requires fzf)
 cd "$(grove switch example-app)"
 ```
 
@@ -318,19 +377,24 @@ grove sync example-app feature/other-feature
 
 ## Configuration
 
-Create `~/.groverc` (or run `grove setup`):
+Create `~/.groverc` (or run `grove setup`). This mirrors what the installer writes:
 
 ```bash
 HERD_ROOT=$HOME/Herd                    # Where bare repos and worktrees live
 DEFAULT_BASE=origin/staging             # Base branch for new worktrees
-DEFAULT_EDITOR=cursor                   # Editor command (cursor, code, phpstorm)
+DEFAULT_EDITOR=cursor                   # Editor command (cursor, code, zed, phpstorm)
+DB_HOST=127.0.0.1                       # MySQL host
 DB_USER=root                            # MySQL user
 DB_PASSWORD=                            # MySQL password
-DB_BACKUP_DIR=$HOME/.grove/backups      # Where database backups go
+DB_CREATE=true                          # Let the example hooks create a per-worktree database
+DB_BACKUP=true                          # Back up the database when removing a worktree
+DB_BACKUP_DIR="$HOME/.grove/backups"    # Where database backups go
 PROTECTED_BRANCHES="staging main master"
 ```
 
-For full configuration options, see [docs/reference/configuration.md](docs/reference/configuration.md).
+**Per-repo overrides:** drop a `.groveconfig` file in a project's bare repo (`$HERD_ROOT/<repo>.git/`) to override `DEFAULT_BASE`, `GROVE_URL_SUBDOMAIN`, `PROTECTED_BRANCHES`, or `GROVE_STALE_THRESHOLD` for that repo only.
+
+For full configuration options (including the `GROVE_*` environment-variable overrides, whose names differ from the config-file keys), see [docs/reference/configuration.md](docs/reference/configuration.md).
 
 ### Hooks
 
@@ -375,7 +439,7 @@ grove services logs myapp           # tail Horizon logs
 grove services logs myapp reverb    # tail Reverb logs
 ```
 
-When you run `grove switch`, services automatically restart for the switched app. No extra configuration needed.
+When you run `grove switch`, the bundled `post-switch` hook restarts services for the switched app. This works out of the box on a default install that kept the example hooks; if you installed with `--skip-hooks` or removed that hook, nothing restarts.
 
 For full setup, config format, and troubleshooting, see [docs/guides/services.md](docs/guides/services.md).
 
@@ -388,8 +452,8 @@ For full setup, config format, and troubleshooting, see [docs/guides/services.md
 | `-q, --quiet` | Suppress informational output |
 | `-f, --force` | Skip confirmations / force protected branch removal |
 | `-i, --interactive` | Launch interactive worktree creation wizard |
-| `--json` | Output in JSON format (for scripting and the Tauri app) |
-| `--pretty` | Pretty-print JSON output with colours |
+| `--json` | Output in JSON format (machine-readable data contract, consumed by scripts and the grove-app desktop application) |
+| `--pretty` | Pretty-print JSON output with colours (needs `jq`) |
 | `--dry-run` | Preview actions without executing (`grove add`) |
 | `--delete-branch` | Delete branch when removing worktree |
 | `--drop-db` | Drop database when removing worktree |
@@ -397,18 +461,36 @@ For full setup, config format, and troubleshooting, see [docs/guides/services.md
 | `--no-cache` | Bypass the fetch cache (always fetch fresh) |
 | `--refresh` | Clear the fetch cache before running the command |
 | `--template=<name>` | Apply template when creating worktree |
-| `--all-repos` | Apply operation across all repositories |
+| `--all-repos` | Broaden `prune` / `pull-all` / `build-all` / `exec-all` to all repositories |
 | `-v, --version` | Show version (add `--check` to check for updates) |
+
+Some flags are specific to a single command but still accepted on the command line:
+
+| Flag | Used by |
+|------|---------|
+| `--output <file>` | `grove report` — write the report to a file instead of stdout |
+| `-n N` | `grove log` — limit the number of commits shown (default 5) |
+| `--recovery` | `grove repair` — attempt more aggressive recovery |
+| `--` | End-of-options marker — everything after it is passed through verbatim (lets `exec` / `exec-all` run commands containing dashes) |
+
+See the [Command Reference](docs/reference/commands.md) for every flag and the full JSON schemas.
 
 ---
 
 ## Troubleshooting
 
+### `command not found: grove`
+
+Your install directory (default `/usr/local/bin`) is not on your `PATH`. Add it and open a new terminal:
+```bash
+echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zshrc
+```
+
 ### "Bare repo not found"
 
 Clone the repo first:
 ```bash
-grove clone git@github.com:org/repo.git
+grove clone git@github.com:your-org/example-app.git example-app
 ```
 
 ### "Worktree already exists"
@@ -446,7 +528,7 @@ grove rm -f example-app staging
 
 ### Database not created
 
-Database work is delegated to the lifecycle hooks (see `examples/hooks/`), gated by `DB_CREATE`. If a worktree's database is missing:
+grove core never touches databases. Database creation is done by the bundled example hooks (see `examples/hooks/`), and only when `DB_CREATE=true` and those hooks are installed — see [Database per worktree](#database-per-worktree) for the full model. If a worktree's database is missing:
 
 1. Check the example database hooks are installed and executable: `grove doctor`
 2. Check MySQL is running: `mysql -u root -e "SELECT 1"`
@@ -503,17 +585,21 @@ gcd() {
 
 ### Database per worktree
 
-Grove does not touch databases out of the box. `DB_CREATE` and `DB_BACKUP` are gates: when enabled, the reference helpers shipped in `examples/hooks/` (invoked by your lifecycle hooks) create and back up a per-worktree database named `<repo>__<branch_slug>`:
+grove core never creates databases; the bundled example hooks do, when `DB_CREATE=true` and the hooks are installed. `DB_CREATE` and `DB_BACKUP` are gates: when enabled, the reference helpers shipped in `examples/hooks/` (invoked by your lifecycle hooks) create and back up a per-worktree database named `<repo>__<branch_slug>` (the *slug* is the filesystem-safe form of the branch name):
 - `example-app` + `feature/login` = `example_app__feature_login`
 
-Install the example database hooks and set `DB_DATABASE` in your `.env.example`, and the hooks handle the rest.
+Install the example database hooks and set `DB_DATABASE` in your project's `.env.example` (the file the `post-add` database hook reads to know which database to create), and the hooks handle the rest. See also [Database not created](#database-not-created) in Troubleshooting.
 
 ---
 
-## Testing
+## Contributing & Testing
+
+> **Never edit the `grove` file directly.** It is a generated artifact, built from the modular sources in `lib/` by `./build.sh`. Make your changes in `lib/`, then run `./build.sh` to regenerate `grove`.
+
+> The `--json` output is a documented **data contract** consumed by the grove-app desktop application. Validate any change to a JSON command before committing (e.g. `./grove repos --json | python3 -c "import json,sys; json.load(sys.stdin)"`).
 
 ```bash
-# Run all tests
+# Run all tests (shellcheck + unit + integration)
 ./run-tests.sh
 
 # Run specific categories
@@ -522,7 +608,7 @@ Install the example database hooks and set `DB_DATABASE` in your `.env.example`,
 ./run-tests.sh lint
 ```
 
-Install BATS: `brew install bats-core`
+Install BATS: `brew install bats-core`. For the full contributor workflow, see the [Advanced Guide](docs/guides/advanced.md).
 
 ---
 

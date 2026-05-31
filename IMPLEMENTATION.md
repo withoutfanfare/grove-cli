@@ -3,6 +3,14 @@
 **Goal:** make `grove` safe and friction-free for the wider internal team to adopt.
 **Audited version:** 4.1.0 · **Branch:** `chore/internal-readiness-audit` · **Date:** 2026-05-29
 
+> **Status (2026-05-30): implemented and shipped.** The P0–P3 work from this plan has
+> landed on `chore/internal-readiness-audit` (see commits `590547c`, `76ef9be`). For
+> example, P1-1 (`grove migrate` not wired into the dispatcher) is fixed —
+> `migrate` now dispatches at `lib/99-main.sh:309` — and P1-6 (CONTRIBUTING telling
+> contributors to edit the generated `grove` file) is resolved. **Treat this document as
+> a historical audit record, not a list of open work**; the findings below describe the
+> *pre-fix* state. For current behaviour, see the [documentation](docs/README.md).
+
 > **How this was produced.** An 8-dimension review team (security, shell-correctness,
 > JSON contract, git-ops, database, services, docs, setup/onboarding) read the `lib/`
 > source. Every critical/high finding was then handed to an independent agent told to

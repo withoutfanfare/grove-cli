@@ -1,23 +1,473 @@
 # Lifecycle Hooks
 
-grove supports lifecycle hooks that run automatically during worktree operations. All worktree setup (database, .env, composer, npm, Herd) is handled via hooks, making grove highly customisable.
+grove is a **generic git worktree manager**. A *worktree* is a separate working
+directory backed by one shared git repository, so you can have several branches
+checked out at once. grove keeps each repository as a *bare repo* (a `.git`
+directory with no working files of its own) and creates worktrees beside it.
 
-## Quick Start
+grove deliberately ships with **no framework-specific behaviour built in**. All
+setup — copying `.env`, creating databases, running `composer`/`npm`, securing a
+Laravel [Herd](https://herd.laravel.com) site (Herd is Laravel's local
+development environment) — is performed by **lifecycle hooks**: ordinary scripts
+that grove runs at well-defined points during worktree operations. This document
+explains how the hook system works, which hook points exist, what environment
+each hook receives, the example hooks bundled in this directory, and how to write
+your own.
+
+**Audience:** anyone writing or customising grove lifecycle hooks. The bundled
+examples are Laravel-oriented, but the hook *mechanism* is framework-agnostic —
+the [Non-Laravel Projects](#non-laravel-projects) section shows how to use grove
+without any of them.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [How hooks work](#how-hooks-work)
+  - [Hook execution model](#hook-execution-model)
+  - [Hook resolution order](#hook-resolution-order)
+  - [Security model](#security-model)
+- [Available hook points](#available-hook-points)
+- [Environment variables](#environment-variables)
+- [Directory structure](#directory-structure)
+- [Execution order example](#execution-order-example)
+- [Bundled example hooks](#bundled-example-hooks)
+- [Configuration for hooks](#configuration-for-hooks)
+  - [Configuration hierarchy](#configuration-hierarchy)
+  - [Shared config loader](#shared-config-loader)
+  - [Database hook behaviour](#database-hook-behaviour)
+- [Control flags (skipping hooks)](#control-flags-skipping-hooks)
+- [Laravel quick-start (optional)](#laravel-quick-start-optional)
+- [Common patterns](#common-patterns)
+- [Creating repo-specific hooks](#creating-repo-specific-hooks)
+- [Non-Laravel projects](#non-laravel-projects)
+- [Tips](#tips)
+- [Migrating from built-in setup](#migrating-from-built-in-setup)
+
+## Quick start
+
+Run these commands **from the root of your `grove-cli` checkout** (the installer
+and the example files are relative to it):
 
 ```bash
+cd /path/to/grove-cli
+
 # Install all example hooks (recommended for Laravel projects)
 ./install.sh --merge
 
-# Or manually copy specific hooks
+# Or manually copy specific hooks into your hooks directory
 cp examples/hooks/post-add.d/03-create-database.sh ~/.grove/hooks/post-add.d/
 cp examples/hooks/post-add.d/05-composer-install.sh ~/.grove/hooks/post-add.d/
 ```
 
-### Onboarding a new Laravel repo
+The `--merge` flag installs the example hooks without overwriting any custom
+hooks you may already have. By default hooks live under `~/.grove/hooks/`
+(configurable via `GROVE_HOOKS_DIR`).
 
-Once hooks are installed, each Laravel repo needs a one-time setup so that new
-worktrees get a matching `.env`, shared storage, and the Laravel-specific
-post-add symlinks:
+## How hooks work
+
+### Hook execution model
+
+When grove reaches a lifecycle point it runs the matching hooks one at a time.
+Each hook runs:
+
+- **In its own subshell.** Variables a hook `export`s do **not** reach the next
+  hook. (This is why a hook cannot set a "skip" flag for its siblings — see
+  [Non-Laravel Projects](#non-laravel-projects).)
+- **With stdin redirected from `/dev/null`.** Hooks **cannot prompt for
+  interactive input**; a `read` will return immediately. This keeps bulk and
+  `--json` flows from deadlocking.
+- **With the worktree directory as the current working directory** (`cd`-ing
+  into `$GROVE_PATH`, falling back to `$HOME` if that path does not exist).
+  Relative paths and bare `.env` references in a hook therefore resolve inside
+  the worktree.
+
+`pre-*` hooks are **gating**: if any of them exits non-zero, grove aborts the
+operation. `post-*` hooks are **non-fatal**: a failing one prints a warning and
+grove continues to the next hook.
+
+### Hook resolution order
+
+For a given event (e.g. `post-add`), grove looks in three places, in this order:
+
+1. **Single hook file** — `~/.grove/hooks/<hook>` (if it exists and is
+   owner-executable).
+2. **Global hook directory** — `~/.grove/hooks/<hook>.d/*.sh`, run in **numeric
+   order** (e.g. `02-` runs before `10-`; grove sorts numerically, not
+   lexically, so multi-digit prefixes order as you expect).
+3. **Repo-specific directory** — `~/.grove/hooks/<hook>.d/<repo>/*.sh`, also run
+   in **numeric order**, after all global directory hooks.
+
+`<repo>` is the repository name (e.g. `example-app`).
+
+**Directory scanning is non-recursive.** Only files directly inside these
+locations run; nested subdirectories are ignored, with the single exception of
+the repo-specific `<repo>/` folder. Folders named with a leading underscore
+(such as `_lib/` and `post-add.d/_laravel/`) are shared libraries — they are not
+a repo name, so grove never executes them directly; their scripts are symlinked
+into a `<repo>/` folder to run.
+
+### Security model
+
+Before running anything, grove rejects any hook **file or directory** that is
+not safe to trust. A hook (or one of its containing directories — the `.d`
+directory, the repo subdirectory) is **skipped with a warning** if it is:
+
+- **not owned by the current user**, or
+- **group-writable**, or
+- **world-writable**.
+
+This prevents a co-located user or a loosely-permissioned directory from
+injecting code into your worktree setup. Keep hooks owned by you and mode `0755`
+(or `0700`); keep their parent directories likewise not group/other-writable.
+
+## Available hook points
+
+| Hook | When | Can abort? | Typical use |
+|------|------|------------|-------------|
+| `pre-add` | Before worktree creation | Yes (non-zero exit) | Validation, resource checks |
+| `post-add` | After worktree creation | No | Setup: `.env`, database, composer, npm |
+| `pre-rm` | Before worktree removal | Yes (non-zero exit) | Database backup, validation |
+| `post-rm` | After worktree removal | No | Cleanup: Herd, database drop |
+| `pre-move` | Before worktree move/rename | Yes (non-zero exit) | Validation before relocating |
+| `post-move` | After worktree move/rename | No | Re-secure Herd, update `.env` URL |
+| `post-pull` | After `grove pull` succeeds | No | Cache clear, migrations |
+| `post-switch` | After `grove switch` succeeds | No | Configure `.env`, update symlinks |
+| `post-sync` | After `grove sync` succeeds | No | Rebuild after rebase |
+
+"Can abort?" means a non-zero exit stops the operation. Note that being *able* to
+abort does not mean a hook *will*: a `pre-*` hook that only wants to warn must
+explicitly `exit 0` (the bundled `pre-add.d/00-laravel-preflight.sh` does exactly
+this — see [Pre-add hooks](#pre-add-hooks-pre-addd)).
+
+## Environment variables
+
+grove exports the following into every hook's subshell:
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `GROVE_REPO` | `example-app` | Repository name |
+| `GROVE_BRANCH` | `feature/new-feature` | Branch name |
+| `GROVE_BRANCH_SLUG` | `feature-new-feature` | Filesystem-safe branch slug (`/` replaced with `-`) |
+| `GROVE_PATH` | `/Users/you/Herd/example-app-worktrees/new-feature` | Worktree directory path (and the hook's working directory) |
+| `GROVE_URL` | `https://new-feature.test` | Local development URL |
+| `GROVE_DB_NAME` | `example_app__feature_new_feature` | Generated database name |
+| `GROVE_HOOK_NAME` | `post-add` | The event currently being run |
+| `GROVE_NO_BACKUP` | `true` | Set only when `--no-backup` was passed |
+| `GROVE_DROP_DB` | `true` | Set only when `--drop-db` was passed |
+
+`GROVE_NO_BACKUP` and `GROVE_DROP_DB` are exported **only** when the
+corresponding flag is present; otherwise they are unset.
+
+## Directory structure
+
+A fully populated hooks directory looks like this. (The bundled examples target
+the Laravel workflow; you only need the hooks relevant to your projects.)
+
+```text
+~/.grove/hooks/
+├── _lib/                          # Shared utilities (not a hook; never run directly)
+│   └── load-config.sh             # Config loader (global → project → repo override)
+│
+├── pre-add                        # Single script (runs first, can abort)
+├── pre-add.d/                     # Multiple scripts (numeric order, can abort)
+│   └── 00-laravel-preflight.sh    # Warn-only Laravel setup check (always exits 0)
+│
+├── post-add                       # Single script
+├── post-add.d/                    # Multiple scripts (numeric order)
+│   ├── 00-register-project.sh     # Register in ~/.projects
+│   ├── 01-copy-env.sh             # Copy .env.example → .env
+│   ├── 01a-inherit-db-from-primary.sh  # Inherit DB_DATABASE when DB_CREATE=false
+│   ├── 02-configure-env.sh        # Set APP_URL / VITE_APP_URL (early pass)
+│   ├── 03-create-database.sh      # Create MySQL database
+│   ├── 04-herd-secure.sh          # Secure site with Herd HTTPS
+│   ├── 04-laravel-scaffold.sh     # Create missing Laravel runtime dirs
+│   ├── 05-composer-install.sh     # composer install + key:generate
+│   ├── 06-npm-install.sh          # npm install
+│   ├── 07-build-assets.sh         # npm run build
+│   ├── 08-run-migrations.sh       # php artisan migrate
+│   ├── 09-update-current-link.sh  # Update {repo}-current symlink
+│   ├── 10-set-hooks-path.sh       # Point worktree at the bare repo's git hooks
+│   │
+│   ├── _laravel/                  # Shared Laravel hooks (symlinked into <repo>/)
+│   │   ├── 01-ai-files.sh
+│   │   ├── 02-copy-env.sh
+│   │   ├── 03-configure-env.sh
+│   │   ├── 04-import-database.sh
+│   │   ├── 05-symlink-storage.sh
+│   │   └── link-repo.sh
+│   │
+│   └── example-app/               # Repo-specific hooks for 'example-app' (run last)
+│       ├── 01-symlink-env.sh      # Replace .env with a symlink
+│       ├── 02-import-database.sh
+│       ├── 03-seed-data.sh
+│       └── 04-symlink-storage.sh
+│
+├── pre-rm                         # Before worktree removal (can abort)
+├── pre-rm.d/
+│   ├── 01-backup-database.sh      # Back up database before removal
+│   └── 02-backup-env.sh           # Back up .env for review
+│
+├── post-rm                        # After worktree removal
+├── post-rm.d/
+│   ├── 01-herd-unsecure.sh        # Remove Herd SSL / nginx config
+│   ├── 02-drop-database.sh        # Drop database (only with --drop-db)
+│   └── example-app/
+│       └── 01-cleanup-symlinks.sh # Repo-specific removal cleanup / audit log
+│
+├── pre-move                       # Before worktree move/rename (can abort)
+├── pre-move.d/
+│   └── *.sh
+│
+├── post-move                      # After worktree move/rename
+├── post-move.d/
+│   └── *.sh                       # Re-secure Herd, update .env URL
+│
+├── post-pull.d/                   # After grove pull succeeds
+│   └── *.sh
+│
+├── post-switch.d/                 # After grove switch succeeds
+│   ├── 01-update-current-link.sh  # Update {repo}-current symlink
+│   ├── 02-devctl-restart.sh       # Restart grove services (Supervisor/Horizon)
+│   └── example-app/
+│       └── 01-configure-env.sh    # Set APP_URL, SESSION_DOMAIN, DB_DATABASE
+│
+└── post-sync.d/                   # After grove sync succeeds
+    └── *.sh
+```
+
+> The [Bundled example hooks](#bundled-example-hooks) tables are the single
+> source of truth for what each file does; this tree is just the layout.
+
+## Execution order example
+
+For the `example-app` repo, `grove add example-app feature/login` runs the
+`post-add` hooks in this order:
+
+```text
+post-add                          (single file, if it exists)
+post-add.d/00-register-project.sh         (global)
+post-add.d/01-copy-env.sh                 (global)
+post-add.d/01a-inherit-db-from-primary.sh (global)
+post-add.d/02-configure-env.sh            (global)
+post-add.d/03-create-database.sh          (global)
+post-add.d/04-herd-secure.sh              (global)
+post-add.d/04-laravel-scaffold.sh         (global)
+post-add.d/05-composer-install.sh         (global)
+post-add.d/06-npm-install.sh              (global)
+post-add.d/07-build-assets.sh             (global)
+post-add.d/08-run-migrations.sh           (global)
+post-add.d/09-update-current-link.sh      (global)
+post-add.d/10-set-hooks-path.sh           (global)
+post-add.d/example-app/01-symlink-env.sh      (repo-specific)
+post-add.d/example-app/02-import-database.sh  (repo-specific)
+post-add.d/example-app/03-seed-data.sh        (repo-specific)
+post-add.d/example-app/04-symlink-storage.sh  (repo-specific)
+```
+
+Note that the `09-`/`10-` global steps run **before** the repo-specific
+`example-app/*` hooks, because all global directory hooks precede the
+repo-specific folder. (`04-herd-secure.sh` and `04-laravel-scaffold.sh` share the
+`04` prefix; among same-prefixed files the remaining characters break the tie.)
+
+## Bundled example hooks
+
+Each subsection below lists exactly the files shipped under `examples/hooks/`.
+
+### Pre-add hooks (`pre-add.d/`)
+
+| Hook | Purpose |
+|------|---------|
+| `00-laravel-preflight.sh` | Warns (non-blocking) when a Laravel repo is missing setup — unlinked `_laravel` hooks, missing `.env` template, or missing primary worktree — and prints the exact fix commands. **Intentionally always exits 0**, so it never aborts creation even though `pre-add` hooks *can*. Silence it with `GROVE_SKIP_PREFLIGHT=true`. |
+
+### Global post-add hooks (`post-add.d/`)
+
+| Hook | Purpose | Skip flag |
+|------|---------|-----------|
+| `00-register-project.sh` | Register the worktree in `~/.projects` for quick navigation | — |
+| `01-copy-env.sh` | Copy `.env.example` to `.env` | — |
+| `01a-inherit-db-from-primary.sh` | When `DB_CREATE=false`, sync `DB_DATABASE` from the primary worktree's `.env` (prevents stale `.env.example` DB names cascading into new worktrees) | — |
+| `02-configure-env.sh` | Early `.env` pass: set `APP_URL`, `VITE_APP_URL`, and (for multi-tenant apps) `MULTITENANCY_LANDLORD_DOMAIN` / `MULTITENANCY_TENANT_PROTOCOL`. **Does not set `DB_DATABASE`** — that is deliberately deferred to a repo-specific hook that runs after any `.env` symlink. | — |
+| `03-create-database.sh` | Create the MySQL database | `GROVE_SKIP_DB` |
+| `04-herd-secure.sh` | Link and secure the site with Herd HTTPS | `GROVE_SKIP_HERD` |
+| `04-laravel-scaffold.sh` | Create missing Laravel runtime dirs (`bootstrap/cache`, `storage/framework/{cache/data,sessions,testing,views}`, `storage/logs`) before composer runs. Defensive against repos whose `.gitignore` excludes those dirs. | — |
+| `05-composer-install.sh` | Run `composer install` and generate the app key | `GROVE_SKIP_COMPOSER` |
+| `06-npm-install.sh` | Run `npm install` | `GROVE_SKIP_NPM` |
+| `07-build-assets.sh` | Run `npm run build` if a build script exists | `GROVE_SKIP_BUILD` |
+| `08-run-migrations.sh` | Run Laravel migrations (only when `artisan` is present) | `GROVE_SKIP_MIGRATE` |
+| `09-update-current-link.sh` | Update the `{repo}-current` symlink (a stable path for queue workers / schedulers) to point at the new worktree | `GROVE_SKIP_CURRENT_LINK` |
+| `10-set-hooks-path.sh` | Run `git config core.hooksPath` so the worktree uses the bare repo's git hooks (worktrees don't inherit them by default) | `GROVE_SKIP_HOOKS_PATH` |
+
+### Shared Laravel hooks (`post-add.d/_laravel/`)
+
+Laravel-specific hooks you opt into **per repo** by symlinking them via
+`link-repo.sh`. Because they live one directory deeper than the global hooks,
+they source the shared loader with **two** `../` segments
+(`$SCRIPT_DIR/../../_lib/load-config.sh`) — see
+[Shared config loader](#shared-config-loader) for why the depth matters.
+
+| Hook | Purpose |
+|------|---------|
+| `01-ai-files.sh` | Symlink shared AI/LLM context files into the worktree |
+| `02-copy-env.sh` | Overwrite `.env` with a pre-built template from `~/Development/Code/Worktree/<repo>/<repo>-env/.env` |
+| `03-configure-env.sh` | Set `APP_URL`, `VITE_APP_URL`, `SESSION_DOMAIN`, and `DB_DATABASE` for the worktree |
+| `04-import-database.sh` | Import a gzipped SQL dump from the template folder |
+| `05-symlink-storage.sh` | Symlink `storage/app` to a shared directory (preserves uploads across worktrees) |
+| `link-repo.sh` | Run once per repo (`bash _laravel/link-repo.sh <repo>`) to create symlinks from `<repo>/*.sh` to `_laravel/*.sh` |
+
+### Repo-specific post-add hooks (`post-add.d/example-app/`)
+
+These ship under `examples/hooks/post-add.d/myapp/`; copy them under a folder
+named after your own repo.
+
+| Hook | Purpose |
+|------|---------|
+| `01-symlink-env.sh` | Replace `.env` with a symlink to a pre-built version |
+| `02-import-database.sh` | Import a database from a gzipped SQL dump |
+| `03-seed-data.sh` | Seed the database with development data |
+| `04-symlink-storage.sh` | Symlink `storage/app` to a shared directory |
+
+### Pre-removal hooks (`pre-rm.d/`)
+
+| Hook | Purpose |
+|------|---------|
+| `01-backup-database.sh` | Back up the database before removal (respects `DB_BACKUP`) |
+| `02-backup-env.sh` | Back up `.env` to the template folder for review |
+
+### Post-removal hooks (`post-rm.d/`)
+
+| Hook | Purpose | Condition |
+|------|---------|-----------|
+| `01-herd-unsecure.sh` | Remove the Herd SSL certificate and nginx config | — |
+| `02-drop-database.sh` | Drop the database | Only when `--drop-db` (`GROVE_DROP_DB`) was passed |
+| `example-app/01-cleanup-symlinks.sh` | Repo-specific removal cleanup: logs the removal for audit purposes and is the place to add bespoke teardown (it includes a commented Slack-notification example) | Repo-specific |
+
+### Post-switch hooks (`post-switch.d/`)
+
+| Hook | Purpose | Skip flag |
+|------|---------|-----------|
+| `01-update-current-link.sh` | Update the `{repo}-current` symlink to point at the active worktree | `GROVE_SKIP_CURRENT_LINK` |
+| `02-devctl-restart.sh` | Restart grove services (Supervisor/Horizon/Reverb) so they pick up the new worktree; exits silently if the repo has no registered service app | `GROVE_SKIP_SERVICES` |
+| `example-app/01-configure-env.sh` | Set `APP_URL`, `SESSION_DOMAIN`, and (only when `DB_CREATE=true`) `DB_DATABASE` in `.env` | — |
+
+## Configuration for hooks
+
+### Configuration hierarchy
+
+Database hooks and other configuration-aware hooks read settings from a
+**hierarchy**, loaded in order with later values overriding earlier ones:
+
+1. **Defaults** (built into the loader)
+2. **Global config** — `~/.groverc`
+3. **Project config** — `$HERD_ROOT/.groveconfig`
+4. **Repo-specific config** — `$HERD_ROOT/<repo>.git/.groveconfig`
+
+The repo-specific file is resolved using `$GROVE_REPO`, which is only set when
+the loader runs inside a hook. In practice the path is
+`$HERD_ROOT/${GROVE_REPO}.git/.groveconfig`, so this fourth level only applies in
+a hook context.
+
+This lets you, for example:
+
+- Disable database management globally (`DB_CREATE=false` in `~/.groverc`), then
+- Re-enable it for a specific repo (`DB_CREATE=true` in that repo's
+  `.groveconfig`).
+
+### Shared config loader
+
+Hooks that need configuration should source the shared loader. The relative path
+depends on **how deeply nested the hook is**:
+
+```bash
+#!/bin/bash
+# Resolve the loader relative to this script, then source it.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# A hook directly in post-add.d/ (or a repo subdirectory post-add.d/<repo>/):
+source "$SCRIPT_DIR/../_lib/load-config.sh"      # one level up
+
+# A hook in post-add.d/_laravel/ (one directory deeper):
+# source "$SCRIPT_DIR/../../_lib/load-config.sh" # two levels up
+```
+
+Get the depth wrong and the `source` silently sources nothing (or errors), so
+the variables below stay at their environment defaults. After sourcing, these
+variables are available:
+
+```text
+DB_HOST, DB_USER, DB_PASSWORD, DB_CREATE, DB_BACKUP, DB_BACKUP_DIR
+HERD_ROOT, HERD_CONFIG, DEFAULT_BASE, PROTECTED_BRANCHES
+```
+
+Two caveats:
+
+- **The loader supplies built-in defaults only for** `DB_HOST`, `DB_USER`,
+  `DB_PASSWORD`, `DB_CREATE`, `DB_BACKUP`, `DB_BACKUP_DIR`, `HERD_ROOT`, and
+  `HERD_CONFIG`. `DEFAULT_BASE` and `PROTECTED_BRANCHES` are set **only if a
+  config file defines them** — a hook reading `$DEFAULT_BASE` will get an empty
+  value otherwise.
+- **`DB_BACKUP_DIR` defaults to `$HOME/Code/Project Support/Worktree/Database/Backup`
+  in this loader**, which differs from grove core's own `DB_BACKUP_DIR` default
+  of `$HOME/.grove/backups`. If you rely on the default, set `DB_BACKUP_DIR`
+  explicitly in `~/.groverc` so the two agree.
+
+### Database hook behaviour
+
+| Global `DB_CREATE` | Repo `DB_CREATE` | Result |
+|--------------------|------------------|--------|
+| `true` (default) | (not set) | Database created, managed by grove |
+| `true` | `false` | No database management for this repo |
+| `false` | (not set) | No database management |
+| `false` | `true` | Database created for this repo only |
+
+## Control flags (skipping hooks)
+
+Set an environment variable on the `grove` command line to skip individual hooks
+for a single run. Because each flag is read inside the hook's own subshell, it
+must be present in the environment of the whole `grove` invocation:
+
+```bash
+# Skip database creation for one add
+GROVE_SKIP_DB=true grove add example-app feature/no-db
+
+# Skip composer install
+GROVE_SKIP_COMPOSER=true grove add example-app feature/quick
+
+# Skip all asset work
+GROVE_SKIP_NPM=true GROVE_SKIP_BUILD=true grove add example-app feature/backend-only
+```
+
+The bundled hooks honour these skip flags:
+
+| Flag | Skips |
+|------|-------|
+| `GROVE_SKIP_PREFLIGHT` | `pre-add.d/00-laravel-preflight.sh` (silences the warnings) |
+| `GROVE_SKIP_DB` | `03-create-database.sh` |
+| `GROVE_SKIP_HERD` | `04-herd-secure.sh` |
+| `GROVE_SKIP_COMPOSER` | `05-composer-install.sh` |
+| `GROVE_SKIP_NPM` | `06-npm-install.sh` |
+| `GROVE_SKIP_BUILD` | `07-build-assets.sh` |
+| `GROVE_SKIP_MIGRATE` | `08-run-migrations.sh` |
+| `GROVE_SKIP_CURRENT_LINK` | `09-update-current-link.sh` and `post-switch.d/01-update-current-link.sh` |
+| `GROVE_SKIP_HOOKS_PATH` | `10-set-hooks-path.sh` |
+| `GROVE_SKIP_SERVICES` | `post-switch.d/02-devctl-restart.sh` |
+
+To disable database behaviour **permanently** for a repo, prefer configuration
+over a per-run flag:
+
+```bash
+# In ~/.groverc (global) or ~/Herd/example-app.git/.groveconfig (per-repo)
+DB_CREATE=false    # Disable database creation/management
+DB_BACKUP=false    # Disable database backups on removal
+```
+
+## Laravel quick-start (optional)
+
+> Skip this section if you are not using Laravel — nothing here is required for
+> the generic hook model above.
+
+Once the example hooks are installed, each Laravel repo needs a one-time setup so
+new worktrees get a matching `.env`, shared storage, and the Laravel-specific
+`post-add` symlinks:
 
 ```bash
 # After cloning the repo with grove and creating the primary worktree:
@@ -29,313 +479,43 @@ bash ~/.grove/hooks/setup-laravel-repo.sh <repo>
 ```
 
 `setup-laravel-repo.sh` is idempotent and:
+
 - Symlinks `_laravel/*.sh` into `post-add.d/<repo>/`
 - Snapshots `.env` and `.env.example` from the primary worktree into
   `~/Development/Code/Worktree/<repo>/<repo>-env/`
 - Ensures the shared `storage/app/` directory exists
 
-If you forget this step, `pre-add.d/00-laravel-preflight.sh` will print the
-exact command to run when you next attempt `grove add`.
+If you forget this step, `pre-add.d/00-laravel-preflight.sh` prints the exact
+command to run the next time you attempt `grove add` (it warns but does not
+block).
 
-## Architecture
+> **Note on paths:** the bundled `setup-laravel-repo.sh` and the `_laravel`
+> hooks hard-code `~/Development/Code/Worktree` as their template root. Some
+> helper output (e.g. `link-repo.sh`) and the [Common patterns](#common-patterns)
+> snippets below use a shorter `~/Code/Worktree` for brevity. The exact location
+> is a convention you choose — pick one root and use it consistently across your
+> own hooks.
 
-grove is a **generic git worktree manager**. All framework-specific setup (Laravel, Node.js, etc.) is handled via hooks:
+## Common patterns
 
-```text
-grove add myapp feature/new
-    │
-    ├── Git: Create worktree
-    ├── Git: Set up remote tracking
-    │
-    └── Run post-add hooks:
-        ├── 01-copy-env.sh         # Copy .env.example → .env
-        ├── 02-configure-env.sh    # Set APP_URL (early pass)
-        ├── 03-create-database.sh  # Create MySQL database
-        ├── 04-herd-secure.sh      # Secure with HTTPS
-        ├── 05-composer-install.sh # composer install
-        ├── 06-npm-install.sh      # npm install
-        ├── 07-build-assets.sh     # npm run build
-        ├── 08-run-migrations.sh   # php artisan migrate
-        │
-        └── myapp/                 # Repo-specific hooks (run last)
-            ├── 01-symlink-env.sh  # Override with symlinked .env
-            ├── 02-import-database.sh
-            ├── 03-seed-data.sh
-            └── 04-symlink-storage.sh
-```
+The snippets below choose `~/Code/Worktree` as the template root. This is just a
+convention — use whatever directory you prefer, but keep it consistent (the
+bundled Laravel hooks use `~/Development/Code/Worktree`, as noted above).
 
-## Hook Resolution Order
+### Pre-built `.env` files
 
-Hooks are discovered and executed in this order:
-
-1. **Single hook file**: `~/.grove/hooks/<hook>` (if exists and executable)
-2. **Global hook directory**: `~/.grove/hooks/<hook>.d/*.sh` (alphabetical order)
-3. **Repo-specific directory**: `~/.grove/hooks/<hook>.d/<repo>/*.sh` (alphabetical order)
-
-**Important**: Directory scanning is **non-recursive**. Only files directly in these locations are executed—subdirectories are ignored (except the repo-specific `<repo>/` folder).
-
-## Directory Structure
-
-```text
-~/.grove/hooks/
-├── _lib/                       # Shared utilities
-│   └── load-config.sh          # Config loader (global → repo override)
-│
-├── pre-add                     # Single script (runs first)
-├── pre-add.d/                  # Multiple scripts (run in order)
-│   └── *.sh
-│
-├── post-add                    # Single script
-├── post-add.d/                 # Multiple scripts
-│   ├── 00-register-project.sh  # Register in projects file
-│   ├── 01-copy-env.sh          # Copy .env.example → .env
-│   ├── 02-configure-env.sh     # Set APP_URL, DB_DATABASE
-│   ├── 03-create-database.sh   # Create MySQL database
-│   ├── 04-herd-secure.sh       # Secure with Herd HTTPS
-│   ├── 05-composer-install.sh  # composer install + key:generate
-│   ├── 06-npm-install.sh       # npm install
-│   ├── 07-build-assets.sh      # npm run build
-│   ├── 08-run-migrations.sh    # php artisan migrate
-│   │
-│   └── myapp/                  # Repo-specific hooks for 'myapp'
-│       ├── 01-symlink-env.sh   # Symlink to pre-built .env
-│       ├── 02-import-database.sh
-│       ├── 03-seed-data.sh
-│       └── 04-symlink-storage.sh
-│
-├── pre-rm                      # Before worktree removal (can abort)
-├── pre-rm.d/
-│   ├── 01-backup-database.sh   # Backup database before removal
-│   └── 02-backup-env.sh        # Backup .env for review
-│
-├── post-rm                     # After worktree removal
-├── post-rm.d/
-│   ├── 01-herd-unsecure.sh     # Remove Herd SSL
-│   ├── 02-drop-database.sh     # Drop database (if --drop-db)
-│   └── myapp/
-│       └── 01-cleanup-symlinks.sh
-│
-├── pre-move                    # Before worktree move/rename (can abort)
-├── pre-move.d/
-│   └── *.sh
-│
-├── post-move                   # After worktree move/rename
-├── post-move.d/
-│   └── *.sh                    # Re-secure Herd, update .env URL
-│
-├── post-pull.d/                # After grove pull succeeds
-│   └── *.sh
-│
-├── post-switch.d/              # After grove switch succeeds
-│   ├── 01-update-current-link.sh  # Update {repo}-current symlink
-│   ├── 02-devctl-restart.sh    # Restart grove services
-│   └── myapp/
-│       └── 01-configure-env.sh # Set APP_URL + DB_DATABASE
-│
-└── post-sync.d/                # After grove sync succeeds
-    └── *.sh
-```
-
-## Execution Order Example
-
-For the `myapp` repo running `grove add myapp feature/login`:
-
-```text
-post-add                      (single file, if exists)
-00-register-project.sh        (global)
-01-copy-env.sh                (global)
-02-configure-env.sh           (global)
-03-create-database.sh         (global)
-04-herd-secure.sh             (global)
-05-composer-install.sh        (global)
-06-npm-install.sh             (global)
-07-build-assets.sh            (global)
-08-run-migrations.sh          (global)
-myapp/01-symlink-env.sh       (repo-specific)
-myapp/02-import-database.sh   (repo-specific)
-myapp/03-seed-data.sh         (repo-specific)
-myapp/04-symlink-storage.sh   (repo-specific)
-```
-
-## Available Hooks
-
-| Hook | When | Can Abort? | Use Case |
-|------|------|------------|----------|
-| `pre-add` | Before worktree creation | Yes (exit 1) | Validation, resource checks |
-| `post-add` | After worktree creation | No | Setup: .env, database, composer, npm |
-| `pre-rm` | Before worktree removal | Yes (exit 1) | Database backup, validation |
-| `post-rm` | After worktree removal | No | Cleanup: Herd, database drop |
-| `pre-move` | Before worktree move/rename | Yes (exit 1) | Validation before relocating |
-| `post-move` | After worktree move/rename | No | Re-secure Herd, update `.env` URL |
-| `post-pull` | After `grove pull` succeeds | No | Cache clear, migrations |
-| `post-switch` | After `grove switch` succeeds | No | Configure .env, update symlinks |
-| `post-sync` | After `grove sync` succeeds | No | Rebuild after rebase |
-
-## Environment Variables
-
-Available in all hooks:
-
-| Variable | Example | Description |
-|----------|---------|-------------|
-| `GROVE_REPO` | `myapp` | Repository name |
-| `GROVE_BRANCH` | `feature/new-feature` | Branch name |
-| `GROVE_BRANCH_SLUG` | `feature-new-feature` | URL-safe branch slug (/ replaced with -) |
-| `GROVE_PATH` | `/Users/you/Herd/myapp-worktrees/new-feature` | Worktree directory path |
-| `GROVE_URL` | `https://new-feature.test` | Local development URL |
-| `GROVE_DB_NAME` | `myapp__feature_new_feature` | Generated database name |
-| `GROVE_HOOK_NAME` | `post-add` | Current hook being executed |
-| `GROVE_NO_BACKUP` | `true` | Set when `--no-backup` flag used |
-| `GROVE_DROP_DB` | `true` | Set when `--drop-db` flag used |
-
-## Example Hooks Included
-
-### Pre-Add Hooks (pre-add.d/)
-
-| Hook | Purpose |
-|------|---------|
-| `00-laravel-preflight.sh` | Warn (non-blocking) when a Laravel repo is missing setup — unlinked hooks, missing `.env` template, missing primary worktree. Prints exact fix commands. |
-
-### Global Hooks (post-add.d/)
-
-| Hook | Purpose |
-|------|---------|
-| `00-register-project.sh` | Register worktree in `~/.projects` for quick navigation |
-| `01-copy-env.sh` | Copy `.env.example` to `.env` |
-| `01a-inherit-db-from-primary.sh` | When `DB_CREATE=false`, sync `DB_DATABASE` from the primary worktree's `.env` (prevents stale `.env.example` DB names cascading into new worktrees) |
-| `02-configure-env.sh` | Set `APP_URL` in `.env` (early pass) |
-| `03-create-database.sh` | Create MySQL database |
-| `04-herd-secure.sh` | Secure site with Herd HTTPS |
-| `04-laravel-scaffold.sh` | Create missing Laravel runtime dirs (`bootstrap/cache`, `storage/framework/{cache/data,sessions,testing,views}`, `storage/logs`) before composer runs. Defensive against repos whose `.gitignore` excludes these dirs outright. |
-| `05-composer-install.sh` | Run `composer install` + generate app key |
-| `06-npm-install.sh` | Run `npm install` |
-| `07-build-assets.sh` | Run `npm run build` if build script exists |
-| `08-run-migrations.sh` | Run Laravel migrations |
-
-### Shared Laravel Hooks (post-add.d/_laravel/)
-
-Laravel-specific hooks that you opt into per repo by symlinking them via `link-repo.sh`:
-
-| Hook | Purpose |
-|------|---------|
-| `01-ai-files.sh` | Symlink shared AI/LLM context into the worktree |
-| `02-copy-env.sh` | Overwrite `.env` with pre-built template from `~/Development/Code/Worktree/<repo>/<repo>-env/.env` |
-| `03-configure-env.sh` | Set `APP_URL`, `VITE_APP_URL`, `SESSION_DOMAIN`, and `DB_DATABASE` for the worktree |
-| `04-import-database.sh` | Import gzipped SQL dump from the template folder |
-| `05-symlink-storage.sh` | Symlink `storage/app` to a shared directory (preserves uploads across worktrees) |
-| `link-repo.sh` | Run once per repo: `bash _laravel/link-repo.sh <repo>` — creates symlinks from `<repo>/*.sh` to `_laravel/*.sh` |
-
-### Repo-Specific Hooks (post-add.d/myapp/)
-
-| Hook | Purpose |
-|------|---------|
-| `01-symlink-env.sh` | Replace `.env` with symlink to pre-built version |
-| `02-import-database.sh` | Import database from gzipped SQL dump |
-| `03-seed-data.sh` | Seed database with development data |
-| `04-symlink-storage.sh` | Symlink `storage/app` to shared directory |
-
-### Pre-Removal Hooks (pre-rm.d/)
-
-| Hook | Purpose |
-|------|---------|
-| `01-backup-database.sh` | Backup database before removal (respects DB_BACKUP) |
-| `02-backup-env.sh` | Backup .env to template folder for review |
-
-### Post-Removal Hooks (post-rm.d/)
-
-| Hook | Purpose |
-|------|---------|
-| `01-herd-unsecure.sh` | Remove Herd SSL and nginx config |
-| `02-drop-database.sh` | Drop database (only if `--drop-db` flag) |
-
-### Post-Switch Hooks (post-switch.d/)
-
-| Hook | Purpose |
-|------|---------|
-| `01-update-current-link.sh` | Update `{repo}-current` symlink to point to active worktree |
-| `02-devctl-restart.sh` | Restart grove services (Supervisor/Horizon) |
-
-### Repo-Specific Post-Switch (post-switch.d/myapp/)
-
-| Hook | Purpose |
-|------|---------|
-| `01-configure-env.sh` | Set `APP_URL`, `SESSION_DOMAIN`, and `DB_DATABASE` in `.env` |
-
-## Configuration Hierarchy
-
-Database hooks and other configuration-aware hooks respect a **configuration hierarchy**. Settings are loaded in order, with later values overriding earlier ones:
-
-1. **Defaults** (built into hooks)
-2. **Global config** (`~/.groverc`)
-3. **Project config** (`$HERD_ROOT/.groveconfig`)
-4. **Repo-specific config** (`$HERD_ROOT/<repo>.git/.groveconfig`)
-
-This allows you to:
-- Disable database management globally (`DB_CREATE=false` in `~/.groverc`)
-- Re-enable it for specific repos (`DB_CREATE=true` in repo's `.groveconfig`)
-
-### Shared Config Loader
-
-Hooks that need configuration should source the shared loader:
-
-```bash
-#!/bin/bash
-# Load configuration (global -> project -> repo-specific)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/../_lib/load-config.sh"
-
-# Now these variables are available:
-# DB_HOST, DB_USER, DB_PASSWORD, DB_CREATE, DB_BACKUP, DB_BACKUP_DIR
-# HERD_ROOT, HERD_CONFIG, DEFAULT_BASE, PROTECTED_BRANCHES
-```
-
-### Database Hook Behaviour
-
-| Global `DB_CREATE` | Repo `DB_CREATE` | Result |
-|-------------------|------------------|--------|
-| `true` (default) | (not set) | Database created, managed by grove |
-| `true` | `false` | No database management for this repo |
-| `false` | (not set) | No database management |
-| `false` | `true` | Database created for this repo only |
-
-## Control Flags
-
-Skip specific hooks by setting environment variables:
-
-```bash
-# Skip database creation (one-time)
-GROVE_SKIP_DB=true grove add myapp feature/no-db
-
-# Skip composer install
-GROVE_SKIP_COMPOSER=true grove add myapp feature/quick
-
-# Skip all npm operations
-GROVE_SKIP_NPM=true GROVE_SKIP_BUILD=true grove add myapp feature/backend-only
-```
-
-Or disable permanently via configuration:
-
-```bash
-# In ~/.groverc (global) or ~/Herd/myapp.git/.groveconfig (per-repo)
-DB_CREATE=false    # Disable database creation/management
-DB_BACKUP=false    # Disable database backups on removal
-```
-
-## Common Patterns
-
-### Pre-built .env Files
-
-Keep your secrets in one place and symlink from worktrees:
+Keep your secrets in one place and symlink them into each worktree:
 
 ```bash
 # Create env storage directory
-mkdir -p ~/Code/Worktree/myapp/myapp-env
+mkdir -p ~/Code/Worktree/example-app/example-app-env
 
 # Create your .env with all secrets
-cp /path/to/configured/.env ~/Code/Worktree/myapp/myapp-env/.env
+cp /path/to/configured/.env ~/Code/Worktree/example-app/example-app-env/.env
 
-# Create repo-specific hook to symlink it
-mkdir -p ~/.grove/hooks/post-add.d/myapp
-cat > ~/.grove/hooks/post-add.d/myapp/01-symlink-env.sh << 'EOF'
+# Create a repo-specific hook to symlink it
+mkdir -p ~/.grove/hooks/post-add.d/example-app
+cat > ~/.grove/hooks/post-add.d/example-app/01-symlink-env.sh << 'EOF'
 #!/bin/bash
 ENV_SOURCE="$HOME/Code/Worktree/${GROVE_REPO}/${GROVE_REPO}-env/.env"
 if [[ -f "$ENV_SOURCE" ]]; then
@@ -344,20 +524,20 @@ if [[ -f "$ENV_SOURCE" ]]; then
   echo "  Linked .env → $ENV_SOURCE"
 fi
 EOF
-chmod +x ~/.grove/hooks/post-add.d/myapp/01-symlink-env.sh
+chmod +x ~/.grove/hooks/post-add.d/example-app/01-symlink-env.sh
 ```
 
-### Shared Storage Directory
+### Shared storage directory
 
 Preserve uploaded files and generated content across worktrees:
 
 ```bash
 # Create shared storage directory
-mkdir -p ~/Code/Worktree/myapp/storage/app/public
+mkdir -p ~/Code/Worktree/example-app/storage/app/public
 
-# Create repo-specific hook to symlink it
-mkdir -p ~/.grove/hooks/post-add.d/myapp
-cat > ~/.grove/hooks/post-add.d/myapp/04-symlink-storage.sh << 'EOF'
+# Create a repo-specific hook to symlink it
+mkdir -p ~/.grove/hooks/post-add.d/example-app
+cat > ~/.grove/hooks/post-add.d/example-app/04-symlink-storage.sh << 'EOF'
 #!/bin/bash
 STORAGE_APP_SOURCE="$HOME/Code/Worktree/${GROVE_REPO}/storage/app"
 if [[ -d "$STORAGE_APP_SOURCE" ]]; then
@@ -367,26 +547,27 @@ if [[ -d "$STORAGE_APP_SOURCE" ]]; then
   echo "  Linked storage/app → $STORAGE_APP_SOURCE"
 fi
 EOF
-chmod +x ~/.grove/hooks/post-add.d/myapp/04-symlink-storage.sh
+chmod +x ~/.grove/hooks/post-add.d/example-app/04-symlink-storage.sh
 ```
 
 This is useful for:
-- User uploads that you need to test with
+
+- User uploads you need to test with
 - Generated PDFs, images, or exports
 - Cached files that take time to regenerate
 - Any files in `storage/app` you want persisted
 
-### Import Database from SQL Dump
+### Import a database from an SQL dump
 
 For repos that need a baseline database:
 
 ```bash
 # Store your SQL dump
-mkdir -p ~/Code/Worktree/myapp/myapp-db
-mysqldump myapp_reference | gzip > ~/Code/Worktree/myapp/myapp-db/myapp.sql.gz
+mkdir -p ~/Code/Worktree/example-app/example-app-db
+mysqldump example_app_reference | gzip > ~/Code/Worktree/example-app/example-app-db/example-app.sql.gz
 
-# Create repo-specific hook
-cat > ~/.grove/hooks/post-add.d/myapp/02-import-database.sh << 'EOF'
+# Create a repo-specific hook
+cat > ~/.grove/hooks/post-add.d/example-app/02-import-database.sh << 'EOF'
 #!/bin/bash
 DB_DUMP="$HOME/Code/Worktree/${GROVE_REPO}/${GROVE_REPO}-db/${GROVE_REPO}.sql.gz"
 if [[ -f "$DB_DUMP" ]]; then
@@ -394,12 +575,13 @@ if [[ -f "$DB_DUMP" ]]; then
   gunzip -c "$DB_DUMP" | mysql "$GROVE_DB_NAME"
 fi
 EOF
-chmod +x ~/.grove/hooks/post-add.d/myapp/02-import-database.sh
+chmod +x ~/.grove/hooks/post-add.d/example-app/02-import-database.sh
 ```
 
-### Quick Project Navigation
+### Quick project navigation
 
-Register worktrees for quick access with `cproj`:
+Register worktrees for quick access with a `cproj` shell function (works with the
+bundled `00-register-project.sh` hook, which writes to `~/.projects`):
 
 ```bash
 # Add to ~/.zshrc:
@@ -422,28 +604,64 @@ compdef _cproj cproj
 
 Then use: `cproj login-feature`
 
-### Non-Laravel Projects
+## Creating repo-specific hooks
 
-For projects without Laravel/PHP, skip those hooks using one of the
-mechanisms below.
+To add custom hooks for a specific repository:
+
+1. **Create the repo directory** (named after the repo):
+
+   ```bash
+   mkdir -p ~/.grove/hooks/post-add.d/example-app
+   ```
+
+2. **Add your hook scripts** (numbered prefixes control execution order):
+
+   ```bash
+   cat > ~/.grove/hooks/post-add.d/example-app/01-custom-setup.sh << 'EOF'
+   #!/bin/bash
+   echo "  Running custom setup for ${GROVE_REPO}..."
+   # Your custom logic here
+   EOF
+   chmod +x ~/.grove/hooks/post-add.d/example-app/01-custom-setup.sh
+   ```
+
+3. **Optionally copy the examples as a starting point:**
+
+   ```bash
+   cp examples/hooks/post-add.d/myapp/*.sh ~/.grove/hooks/post-add.d/example-app/
+   # Edit as needed
+   ```
+
+Repo-specific hooks run **after** all global hooks, so you can:
+
+- Override earlier setup (e.g. replace the copied `.env` with a symlink)
+- Add extra steps specific to that project
+- Import project-specific data
+
+## Non-Laravel projects
+
+The hook *mechanism* has nothing to do with Laravel — the bundled examples just
+happen to target it. For projects without Laravel/PHP, skip the framework hooks
+using one of the mechanisms below.
 
 > **Why not a sibling "skip" hook?** It is tempting to drop a
 > `00-skip-laravel.sh` into the repo's hook directory that does
-> `export GROVE_SKIP_DB=true`. **This cannot work.** Each hook runs in its
-> own subshell, so an `export` never reaches the sibling hooks it is meant
-> to influence. And repo-specific hooks always run **after** all the global
-> Laravel hooks, so they could not pre-empt them even if the export did
-> propagate. Use one of the following instead.
+> `export GROVE_SKIP_DB=true`. **This cannot work.** Each hook runs in its own
+> subshell, so an `export` never reaches the sibling hooks it is meant to
+> influence. And repo-specific hooks always run **after** all the global Laravel
+> hooks, so they could not pre-empt them even if the export did propagate. Use
+> one of the following instead.
 
-**Per-invocation (one-off):** set the skip flag on the `grove` command line
-itself, so it is present in the environment for every hook in that run:
+**Per-invocation (one-off):** set the skip flag(s) on the `grove` command line
+itself, so they are present in the environment for every hook in that run (see
+[Control flags](#control-flags-skipping-hooks) for the full list):
 
 ```bash
 GROVE_SKIP_DB=true GROVE_SKIP_COMPOSER=true grove add frontend-app feature/ui
 ```
 
-**Per-repo via `.groveconfig` (where applicable):** for database management,
-disable it permanently for the repo:
+**Per-repo via `.groveconfig`:** for database management, disable it permanently
+for the repo:
 
 ```bash
 # In ~/Herd/frontend-app.git/.groveconfig
@@ -451,56 +669,34 @@ DB_CREATE=false    # No database created/managed for this repo
 DB_BACKUP=false    # No database backup on removal
 ```
 
-**Don't install them at all:** simply don't install the Laravel hooks for
-this repo and only use what you need.
-
-## Creating Repo-Specific Hooks
-
-To add custom hooks for a specific repository:
-
-1. **Create the repo directory**:
-   ```bash
-   mkdir -p ~/.grove/hooks/post-add.d/myrepo
-   ```
-
-2. **Add your hook scripts**:
-   ```bash
-   # Use numbered prefixes to control execution order
-   cat > ~/.grove/hooks/post-add.d/myrepo/01-custom-setup.sh << 'EOF'
-   #!/bin/bash
-   echo "  Running custom setup for ${GROVE_REPO}..."
-   # Your custom logic here
-   EOF
-   chmod +x ~/.grove/hooks/post-add.d/myrepo/01-custom-setup.sh
-   ```
-
-3. **Copy examples as a starting point** (optional):
-   ```bash
-   cp examples/hooks/post-add.d/myapp/*.sh ~/.grove/hooks/post-add.d/myrepo/
-   # Edit as needed
-   ```
-
-Repo-specific hooks run **after** all global hooks, so you can:
-- Override earlier setup (e.g., replace copied .env with a symlink)
-- Add extra steps specific to that project
-- Import project-specific data
+**Don't install them at all:** simply don't install the Laravel hooks for this
+repo and only use the ones you need.
 
 ## Tips
 
-- **Numbering**: Use `00-`, `01-`, etc. to control execution order
-- **Permissions**: All hooks must be executable (`chmod +x`)
-- **Conditionals**: Check if files exist before running commands
-- **Output**: Prefix messages with spaces (`echo "  message"`) for clean output
-- **Failures**: Hooks continue even if one fails (except pre-* hooks which can abort)
-- **Security**: Hooks must be owned by you and not world-writable
+- **Numbering:** use `00-`, `01-`, etc. to control execution order (sorted
+  numerically, so `10-` runs after `2-`).
+- **Permissions:** every hook must be executable (`chmod +x`) **and** owned by
+  you, **and** not group- or world-writable (see
+  [Security model](#security-model)).
+- **No prompts:** stdin is `/dev/null`, so hooks cannot ask for interactive
+  input — read from the environment or config files instead.
+- **Conditionals:** check that files exist before acting on them.
+- **Output:** prefix messages with spaces (`echo "  message"`) for clean,
+  indented output.
+- **Failures:** `post-*` hooks continue even if one fails; `pre-*` hooks can
+  abort the operation by exiting non-zero.
 
-## Migrating from Built-in Setup
+## Migrating from built-in setup
 
-If you were using grove before hooks were introduced, the built-in Laravel setup is now handled by hooks. Run the installer with `--merge` to get the example hooks:
+If you used grove before hooks existed, the old built-in Laravel setup is now
+performed entirely by hooks. Run the installer with `--merge` to add the example
+hooks without overwriting any custom ones:
 
 ```bash
-cd ~/Projects/grove-cli
+cd /path/to/grove-cli
 ./install.sh --merge
 ```
 
-This will install the example hooks without overwriting any custom hooks you may have.
+This installs the example hooks without overwriting any custom hooks you may
+have.
