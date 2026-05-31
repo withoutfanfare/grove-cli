@@ -1,8 +1,40 @@
 # grove Tutorials (Onboarding + Recipes)
 
-This document is a **recipe-style onboarding guide** for `grove`. Every command shown is copy/paste-able, and each `grove` command has at least one working example.
+This document is a **recipe-style onboarding guide** for `grove`, a command-line git worktree manager with optional Laravel Herd integration. It is aimed at someone learning by doing: start with the 10-minute Quick Start, skim the Concepts, then dip into the Command cookbook for a runnable recipe for every command. Every command shown is copy/paste-able, and each `grove` command has at least one working example.
+
+A few terms used throughout:
+
+- **Worktree** — a checked-out branch in its own directory. grove gives each branch its own folder so you can work on several branches at once without stashing or switching.
+- **Bare repo** — a git repository with no working tree of its own (just the `.git` data). grove clones projects as bare repos and hangs worktrees off them.
+- **Slug** — a filesystem-safe version of a branch name (`feature/login` → `feature-login`) used for directory and database names.
+- **Herd** — [Laravel Herd](https://herd.laravel.com/), a local PHP dev environment. grove can register/unregister Herd `.test` sites for each worktree, but Herd is optional.
 
 If you’re brand new to worktrees, skim the “Golden Rule” section in `README.md` first.
+
+## Table of Contents
+
+- [Quick Start (10 minutes)](#quick-start-10-minutes)
+- [Concepts (the 30-second mental model)](#concepts-the-30-second-mental-model)
+- [Core workflow](#core-workflow)
+- [Command cookbook (all commands)](#command-cookbook-all-commands)
+  - [System & info](#system--info)
+  - [Worktree lifecycle](#worktree-lifecycle)
+  - [Listing & status](#listing--status)
+  - [Git operations](#git-operations)
+  - [Bulk operations](#bulk-operations)
+  - [Laravel](#laravel)
+  - [Navigation](#navigation)
+  - [Discovery](#discovery)
+  - [Maintenance](#maintenance)
+  - [Configuration](#configuration)
+  - [Services](#services)
+  - [Self-update & version](#self-update--version)
+- [Templates](#templates)
+- [Hooks](#hooks)
+- [Automation (JSON output)](#automation-json-output)
+- [Cache control (--no-cache / --refresh)](#cache-control---no-cache----refresh)
+- [Troubleshooting recipes](#troubleshooting-recipes)
+- [Development & Testing](#development--testing)
 
 ## Quick Start (10 minutes)
 
@@ -20,11 +52,14 @@ grove doctor
 grove clone git@github.com:org/myapp.git
 
 # 4) Create a new worktree for a feature branch
+#    (or run `grove add -i` / `grove -i` for a guided wizard)
 grove add myapp feature/login
 
-# 5) Jump into it (path printed; you choose how to cd)
+# 5) Jump into it
 cd "$(grove cd myapp feature/login)"
 ```
+
+> **Why `cd "$(grove cd ...)"`?** grove runs in a subprocess and a child process cannot change your shell's current directory. So `grove cd` *prints* the path and you wrap it in `cd "$(...)"` to actually move there. To avoid typing the idiom each time, add a shell alias/function (see `README.md`).
 
 ## Concepts (the 30-second mental model)
 
@@ -32,17 +67,7 @@ cd "$(grove cd myapp feature/login)"
 - Every branch you work on gets its own folder: `~/Herd/<repo>-worktrees/<site-name>/`.
 - Main branches (staging/main/master) use the repo name as site-name, feature branches use just the feature name.
 - **One branch per worktree**: don't `git checkout` to another branch inside a worktree; use `grove add` / `grove switch` instead.
-- **Security**: All user input is validated with defense-in-depth protection against command injection, path traversal, and other attacks. See the Security section in README.md for details.
-
-## Table of Contents
-
-- [Core workflow](#core-workflow)
-- [Command cookbook (all commands)](#command-cookbook-all-commands)
-- [Templates](#templates)
-- [Hooks](#hooks)
-- [Automation (JSON output)](#automation-json-output)
-- [Troubleshooting recipes](#troubleshooting-recipes)
-- [Development & Testing](#development--testing)
+- **Security**: All user input is validated with defence-in-depth protection against command injection, path traversal, and other attacks. See the [Security section in the Advanced Guide](advanced.md#security) for details.
 
 ---
 
@@ -72,7 +97,7 @@ grove sync myapp feature/payments
 # Remove the worktree directory and git worktree entry
 grove rm myapp feature/payments
 
-# Also delete the git branch (local + remote where possible)
+# Also delete the local git branch (use with care; the remote branch is left untouched)
 grove rm myapp feature/payments --delete-branch
 ```
 
@@ -80,29 +105,37 @@ grove rm myapp feature/payments --delete-branch
 
 ## Command cookbook (all commands)
 
-Notes:
-- Commands marked “auto-detect” can infer `<repo>` / `<branch>` if you run them *inside a worktree directory*.
+One runnable recipe per command, grouped into the same families used in the source tree. Notes:
+- Commands marked “auto-detect” can infer `<repo>` / `<branch>` if you run them *inside a worktree directory* (the worktree must live under `HERD_ROOT`). Auto-detecting commands: `pull`, `sync`, `diff`, `summary`, `log`, `changes`, `fresh`, `migrate`, `tinker`, `code`, `open`, `cd`, `info`, `clean`, `share-deps`.
 - If `fzf` is installed, many commands will let you omit `<branch>` and pick interactively.
 
-### `grove doctor`
+### System & info
+
+#### `grove doctor` — check system requirements
 
 ```bash
 grove doctor
 ```
 
-### `grove repos`
+Checks that grove's environment is sane: git, Herd, MySQL, and friends.
+
+#### `grove repos` — list bare repositories
 
 ```bash
 grove repos
+grove repos --json
 ```
 
-### `grove branches` — list available branches for a repo
+#### `grove branches` — list available branches for a repo
 
 ```bash
 grove branches myapp
+grove branches myapp --json
 ```
 
-### `grove clone` — clone as a bare repo (and create a default worktree)
+### Worktree lifecycle
+
+#### `grove clone` — clone as a bare repo (and create a default worktree)
 
 ```bash
 # Uses the repo name inferred from URL ("myapp")
@@ -112,7 +145,7 @@ grove clone git@github.com:org/myapp.git
 grove clone git@github.com:org/myapp.git myapp feature/login
 ```
 
-### `grove add` — create a worktree
+#### `grove add` — create a worktree
 
 ```bash
 # Create (or check out) a branch worktree
@@ -124,8 +157,10 @@ grove add myapp feature/login origin/main
 # Preview without changing anything
 grove add myapp feature/login --dry-run
 
-# Guided interactive wizard
+# Guided interactive wizard (these three are equivalent)
 grove add --interactive
+grove add -i
+grove -i
 ```
 
 If you pass a base (the 3rd argument), `grove` stores it in the worktree’s local git config as `grove.base`. Commands like `grove summary`, `grove diff`, `grove sync`, and `grove log` will use it automatically when you don’t specify a base.
@@ -138,7 +173,7 @@ git -C /path/to/worktree config --local --get grove.base
 git -C /path/to/worktree config --local grove.base origin/main
 ```
 
-### `grove rm` — remove a worktree
+#### `grove rm` — remove a worktree
 
 ```bash
 grove rm myapp feature/login
@@ -146,17 +181,21 @@ grove rm myapp feature/login
 # Force removal of protected branches (defaults: staging, main, master)
 grove rm -f myapp staging
 
-# Also delete the branch (use with care)
+# Also delete the LOCAL branch (use with care; the remote branch is untouched)
 grove rm myapp feature/login --delete-branch
 
-# Hook-friendly flags (used by the example hooks)
+# Hook-friendly database flags (used by the example hooks)
 grove rm myapp feature/login --drop-db
 grove rm myapp feature/login --no-backup
 ```
 
-### `grove move` — rename or move a worktree
+Flag notes:
+- `--delete-branch` runs `git branch -D` on the worktree's branch — a **local** delete only. grove never pushes a deletion to the remote.
+- `--drop-db` / `--no-backup` set request flags that grove exports to your `pre-rm`/`post-rm` hooks (`GROVE_DROP_DB`, `GROVE_NO_BACKUP`). grove delegates the actual drop/backup to those hooks and cannot itself confirm the drop ran — the JSON output reports `db_drop_requested` (intent), not a verified result.
 
-Renames a worktree directory, automatically handling Herd SSL certificates.
+#### `grove move` — rename or move a worktree
+
+Renames a worktree directory, re-securing the Herd site with SSL **if the old site was already secured**.
 
 ```bash
 # Move with explicit new name
@@ -184,12 +223,11 @@ grove move myapp feature/very-long-feature-name short
 ```
 
 The command:
-- Unsecures the old site if it had SSL
 - Moves the worktree using `git worktree move`
-- Re-secures the new site with SSL
-- Cleans up old Herd nginx configs
+- Unsecures the old site (only if it was secured) and cleans up old Herd nginx configs
+- Re-secures the new site with SSL (only if the old site was secured)
 
-### `grove restructure` — migrate worktrees to the nested layout
+#### `grove restructure` — migrate worktrees to the nested layout
 
 Migrates a repo's worktrees from an older flat layout into the nested `<repo>-worktrees/` structure.
 
@@ -197,21 +235,28 @@ Migrates a repo's worktrees from an older flat layout into the nested `<repo>-wo
 grove restructure myapp
 ```
 
-### `grove ls` — list worktrees for a repo
+### Listing & status
+
+#### `grove ls` — list worktrees for a repo
 
 ```bash
 grove ls myapp
 grove ls myapp --json
 ```
 
-### `grove status` — dashboard for a single repo
+#### `grove status` — dashboard for a single repo
 
 ```bash
 grove status myapp
 grove status myapp --json
+
+# Force a fresh fetch (ignore the short-lived fetch cache)
+grove status myapp --no-cache
 ```
 
-### `grove dashboard` — overview of all repos
+`grove status` requires a `<repo>` — it does **not** auto-detect from the current directory.
+
+#### `grove dashboard` — overview of all repos
 
 ```bash
 grove dashboard
@@ -224,7 +269,9 @@ In interactive mode, select a worktree and press:
 - `p` to pull, `s` to sync, `o` to open in browser
 - `c` to open in editor, `r` to remove, `i` for info
 
-### `grove pull` (auto-detect)
+### Git operations
+
+#### `grove pull` — pull latest changes (auto-detect)
 
 ```bash
 # From inside a worktree: auto-detect repo/branch
@@ -234,7 +281,7 @@ grove pull
 grove pull myapp feature/login
 ```
 
-### `grove pull-all` — pull every worktree (parallel)
+#### `grove pull-all` — pull every worktree (parallel)
 
 ```bash
 grove pull-all myapp
@@ -243,7 +290,7 @@ grove pull-all myapp
 grove pull-all --all-repos
 ```
 
-### `grove sync` — rebase onto a base branch (auto-detect)
+#### `grove sync` — rebase onto a base branch (auto-detect)
 
 ```bash
 # From inside a worktree
@@ -253,7 +300,7 @@ grove sync
 grove sync myapp feature/login origin/main
 ```
 
-### `grove diff` — compare against base (auto-detect)
+#### `grove diff` — compare against base (auto-detect)
 
 ```bash
 # From inside a worktree
@@ -263,7 +310,7 @@ grove diff
 grove diff myapp feature/login origin/main
 ```
 
-### `grove summary` — overview vs base (auto-detect)
+#### `grove summary` — overview vs base (auto-detect)
 
 ```bash
 # From inside a worktree
@@ -279,7 +326,7 @@ grove summary myapp feature/login origin/main
 grove summary --json myapp feature/login
 ```
 
-### `grove log` — recent commits (auto-detect)
+#### `grove log` — recent commits (auto-detect)
 
 ```bash
 # From inside a worktree
@@ -287,9 +334,12 @@ grove log
 
 # Explicit
 grove log myapp feature/login
+
+# Limit the number of commits (default 5; -nN with no space also works)
+grove log myapp feature/login -n 20
 ```
 
-### `grove changes` — list uncommitted file changes (auto-detect)
+#### `grove changes` — list uncommitted file changes (auto-detect)
 
 ```bash
 # From inside a worktree
@@ -299,20 +349,29 @@ grove changes
 grove changes myapp feature/login
 ```
 
-### `grove prune` — clean up stale worktrees / references
+#### `grove prune` — clean up stale worktree references
 
 ```bash
+# Single repo (required — does NOT auto-detect)
 grove prune myapp
+
+# Across all repositories (in parallel)
+grove prune --all-repos
 ```
 
-### `grove exec` — run any command inside a worktree
+### Bulk operations
+
+#### `grove exec` — run any command inside a worktree
 
 ```bash
 grove exec myapp feature/login php artisan migrate
 grove exec myapp feature/login npm test
+
+# Use `--` to pass a command containing dashes
+grove exec myapp feature/login -- ls -la
 ```
 
-### `grove exec-all` — run a command on all worktrees
+#### `grove exec-all` — run a command on all worktrees
 
 ```bash
 grove exec-all myapp "php artisan about"
@@ -321,14 +380,18 @@ grove exec-all myapp "php artisan about"
 grove exec-all --all-repos "git status --porcelain"
 ```
 
-### `grove build-all` — `npm run build` for all worktrees
+#### `grove build-all` — `npm run build` for all worktrees
 
 ```bash
 grove build-all myapp
 grove build-all --all-repos
 ```
 
-### `grove fresh` — `migrate:fresh --seed` + npm install/build (auto-detect)
+### Laravel
+
+These commands run from inside a worktree (auto-detect) or with an explicit `<repo> <branch>`.
+
+#### `grove fresh` — `migrate:fresh --seed` + `npm ci` + `npm run build` (auto-detect)
 
 ```bash
 # From inside a worktree
@@ -337,39 +400,45 @@ grove fresh
 # Or explicit
 grove fresh myapp feature/login
 
-# Skip confirmation prompts
+# Skip the migrate:fresh confirmation prompt
 grove fresh -f myapp feature/login
 ```
 
-### `grove migrate` — run `php artisan migrate` (auto-detect)
+`grove fresh` runs `php artisan migrate:fresh --seed` (prompting for confirmation unless `-f`/`--force` is given, since it drops all tables), then `npm ci`, then `npm run build`.
+
+#### `grove migrate` — run `php artisan migrate` (auto-detect)
 
 ```bash
 grove migrate
 grove migrate myapp feature/login
 ```
 
-### `grove tinker` — run `php artisan tinker` (auto-detect)
+#### `grove tinker` — run `php artisan tinker` (auto-detect)
 
 ```bash
 grove tinker
 grove tinker myapp feature/login
 ```
 
-### `grove code` — open worktree in your editor (auto-detect)
+### Navigation
+
+#### `grove code` — open worktree in your editor (auto-detect)
 
 ```bash
 grove code
 grove code myapp feature/login
 ```
 
-### `grove open` — open worktree URL in browser (auto-detect)
+Uses the editor in `DEFAULT_EDITOR` (env override `GROVE_EDITOR`). With a repo but no branch and `fzf` installed, shows a picker; also resolves aliases, `@N` shortcuts and fuzzy branch matches.
+
+#### `grove open` — open worktree URL in browser (auto-detect)
 
 ```bash
 grove open
 grove open myapp feature/login
 ```
 
-### `grove cd` — print the worktree path (auto-detect)
+#### `grove cd` — print the worktree path (auto-detect)
 
 ```bash
 cd "$(grove cd myapp feature/login)"
@@ -378,7 +447,9 @@ cd "$(grove cd myapp feature/login)"
 cd "$(grove cd)"
 ```
 
-### `grove switch` — cd path + open editor + open browser
+`grove cd` prints a path rather than changing directory because a child process cannot move the parent shell — wrap it in `cd "$(...)"` (see the note in Quick Start).
+
+#### `grove switch` — cd path + open editor + open browser
 
 ```bash
 # With fzf installed, omit branch to pick interactively
@@ -388,42 +459,58 @@ grove switch myapp
 cd "$(grove switch myapp feature/login)"
 ```
 
-### `grove info` — detailed worktree information (auto-detect)
+`grove switch` always requires a `<repo>` (it switches *to* a different worktree, so it does not auto-detect by design).
+
+### Discovery
+
+#### `grove info` — detailed worktree information (auto-detect)
 
 ```bash
 grove info myapp feature/login
 grove info              # from inside a worktree
 ```
 
-### `grove recent` — recently accessed worktrees
+#### `grove recent` — recently accessed worktrees
 
 ```bash
 grove recent
 grove recent 10
+grove recent --json
 ```
 
-### `grove clean` — remove `node_modules/` and `vendor/` from inactive worktrees
+#### `grove clean` — remove `node_modules/` and `vendor/` from inactive worktrees
 
-Reclaim disk space by removing dependency directories from worktrees that haven't been committed to in 30+ days. These can be reinstalled with `npm install` or `composer install` when you return to the worktree.
+Reclaim disk space by removing dependency directories from worktrees that haven't been committed to in 30+ days. These can be reinstalled with `npm install` or `composer install` when you return to the worktree. The threshold defaults to 30 days; override it with the `GROVE_CLEAN_INACTIVE_DAYS` environment variable.
 
 ```bash
-# Preview what would be removed (shows sizes)
+# Preview what would be removed for one repo (shows sizes)
 grove clean myapp --dry-run
 
-# Actually remove node_modules/ and vendor/ from inactive worktrees
+# Actually remove node_modules/ and vendor/ from that repo's inactive worktrees
 grove clean myapp
 
-# Clean across all repositories
+# From inside a worktree, clean just that worktree's repo (auto-detect)
 grove clean
+
+# Preview and confirm removal across ALL repositories
+# (destructive — prompts before deleting; auto-confirms under --force)
+grove clean   # run from OUTSIDE any worktree
 ```
 
-### `grove health` — repository health checks
+> **Heads up:** bare `grove clean` run from outside a worktree previews and then, after a confirmation prompt, deletes dependency caches across **every** repository. It is not a quiet local clean.
+
+### Maintenance
+
+#### `grove health` — repository health checks
 
 ```bash
 grove health myapp
+grove health myapp --json
 ```
 
-### `grove report` — generate a markdown report
+`grove health` requires a `<repo>` — it does **not** auto-detect.
+
+#### `grove report` — generate a markdown report
 
 ```bash
 # Print to stdout
@@ -433,13 +520,15 @@ grove report myapp
 grove report myapp --output /tmp/grove-report-myapp.md
 ```
 
-### `grove cleanup-herd` — remove orphaned Herd nginx configs
+`grove report` always emits markdown — there is no `--json` mode.
+
+#### `grove cleanup-herd` — remove orphaned Herd nginx configs
 
 ```bash
 grove cleanup-herd
 ```
 
-### `grove unlock` — remove stale git lock files
+#### `grove unlock` — remove stale git lock files
 
 ```bash
 grove unlock myapp
@@ -448,21 +537,31 @@ grove unlock myapp
 grove unlock
 ```
 
-### `grove repair` — fix common issues
+#### `grove repair` — fix common issues
 
 ```bash
+# Repair all repositories (no repo given)
 grove repair
+
+# Repair a single repository
 grove repair myapp
+
+# Attempt more aggressive recovery
+grove repair myapp --recovery
 ```
 
-### `grove templates` — view available templates
+`grove repair` does not auto-detect from the current directory.
+
+### Configuration
+
+#### `grove templates` — view available templates
 
 ```bash
 grove templates
 grove templates minimal
 ```
 
-### `grove alias` — manage branch aliases
+#### `grove alias` — manage branch aliases
 
 Aliases are stored as `name=repo/branch` lines in `~/.grove/aliases`.
 
@@ -480,7 +579,7 @@ grove alias rm login
 grove alias remove staging
 ```
 
-### `grove config` — show current configuration
+#### `grove config` — show current configuration
 
 ```bash
 grove config
@@ -488,7 +587,7 @@ grove config
 
 Prints the resolved configuration (HERD_ROOT, editor, base branch, database settings, and any active `GROVE_SKIP_*` flags).
 
-### `grove setup` — first-time configuration wizard
+#### `grove setup` — first-time configuration wizard
 
 ```bash
 grove setup
@@ -496,23 +595,24 @@ grove setup
 
 Guides you through HERD_ROOT, base branch, database settings, and creates `~/.groverc`.
 
-### `grove share-deps` — share dependencies across worktrees
+#### `grove share-deps` — share dependencies across worktrees
 
 ```bash
-# Check status
+# Check status (the default action)
 grove share-deps
 
-# Enable shared deps (from within a worktree)
+# Enable shared deps (auto-detects when run inside a worktree, otherwise fzf picker)
 grove share-deps enable
 
 # Disable and restore local copies
 grove share-deps disable
 
-# Clean up unused caches
+# Global cleanup of unused shared-deps caches
+# (undocumented in `grove share-deps --help`; affects ALL repos, not just this worktree)
 grove share-deps clean
 ```
 
-### `grove group` — manage repository groups
+##### `grove group` — manage repository groups
 
 ```bash
 # Create a group
@@ -532,43 +632,59 @@ grove build-all @backend
 grove group rm frontend
 ```
 
-### `grove services` — manage app services (Supervisor, Horizon, Reverb, scheduler)
+### Services
 
-Register apps and control their background services. Run `grove services` with no arguments to see the full subcommand help.
+#### `grove services` — manage app services (Supervisor, Horizon, Reverb, scheduler)
+
+Register Laravel apps and control their background services. Configuration is lazy-loaded from `~/.grove/services/apps.conf`. Run `grove services` with no arguments to see status (if any apps are registered) or the full subcommand help. For the in-depth guide see [services.md](./services.md).
 
 ```bash
-# Register an app
-grove services add myapp --services=horizon:reverb
+# Register an app. Options:
+#   --system-name=<name>          internal/system name (defaults to the app name)
+#   --services=horizon|horizon:reverb|none   which services this app runs
+#   --domain=<domain>             domain for Horizon/links (e.g. myapp.test)
+#   --supervisor=<process>        Supervisor process name to manage
+grove services add myapp --services=horizon:reverb --domain=myapp.test
 
-# Inspect and control services
+# Inspect and control services ([app] defaults to all where applicable)
 grove services status
 grove services start all
 grove services restart myapp
 grove services stop myapp
 
-# List registered apps (supports --json)
+# List registered apps (supports --json: array of {name, system_name, services,
+# supervisor_process, domain})
 grove services apps
 grove services apps --json
 
-# Open Horizon, tail logs, check dependencies
+# Open Horizon in the browser, tail a log, check dependencies
 grove services horizon myapp
-grove services logs myapp horizon
+grove services logs myapp horizon      # type: horizon (default) | queue | reverb | scheduler
 grove services doctor
 
-# Remove an app from the registry
+# Remove an app from the registry (worktrees/configs are left untouched)
 grove services remove myapp
 ```
 
-### `grove upgrade` — self-update
+> `grove services logs <app> queue` tails the same `horizon.log` file as `horizon` (it is an alias).
+
+### Self-update & version
+
+#### `grove upgrade` — self-update
 
 ```bash
 grove upgrade
 ```
 
-### `grove --version` / `grove --version --check`
+#### `grove version` / `grove --version` — show the version
 
 ```bash
+# All three print the version string
+grove version
 grove --version
+grove -v
+
+# Check for available updates
 grove --version --check
 ```
 
@@ -576,20 +692,24 @@ grove --version --check
 
 ## Templates
 
-Templates are small `.conf` files in `~/.grove/templates/` that set `GROVE_SKIP_*` flags for your hooks.
+A template is a small `.conf` file in `GROVE_TEMPLATES_DIR` (default `~/.grove/templates/`) that sets `GROVE_SKIP_*` flags (e.g. `GROVE_SKIP_DB=true`, `GROVE_SKIP_NPM=true`, `GROVE_SKIP_BUILD=true`). grove exports those flags when it runs your hooks during `grove add`, so your hooks can skip the setup steps you don't want for that worktree.
+
+> **No templates ship enabled.** On a fresh install `~/.grove/templates/` is empty and `grove templates` shows "(no templates found)". Four examples are bundled under `examples/templates/` — copy them in (the `cp` step below) to make them available.
 
 ```bash
-# Install the example templates shipped with this repo
+# Install the example templates bundled with this repo
 mkdir -p ~/.grove/templates
 cp examples/templates/*.conf ~/.grove/templates/
 
-# List + inspect
+# List all templates, then inspect one (shows the flags it sets)
 grove templates
 grove templates laravel
 
 # Use a template when creating a worktree
 grove add myapp feature/api --template=backend
 ```
+
+The bundled examples are `laravel.conf` (MySQL, Composer, NPM, migrations), `minimal.conf` (git worktree only, no setup), `backend.conf` (PHP + database, no npm/build) and `node.conf` (npm only, no PHP/database).
 
 ---
 
@@ -614,10 +734,16 @@ Common hook points:
 - `post-switch`
 - `post-pull`, `post-sync`
 
-The hook environment includes:
-`GROVE_REPO`, `GROVE_BRANCH`, `GROVE_PATH`, `GROVE_URL`, `GROVE_DB_NAME`
+Every hook runs with these environment variables exported:
+`GROVE_REPO`, `GROVE_BRANCH`, `GROVE_BRANCH_SLUG`, `GROVE_PATH`, `GROVE_URL`, `GROVE_DB_NAME`, `GROVE_HOOK_NAME`.
 
-### Consolidated Laravel Hooks
+On `grove rm`, two further flags are exported **only when the matching flag was passed**:
+- `GROVE_DROP_DB=true` — set when `--drop-db` is used (tells your hook to drop the database).
+- `GROVE_NO_BACKUP=true` — set when `--no-backup` is used (tells your hook to skip the backup).
+
+### Consolidated Laravel Hooks (advanced, optional)
+
+> This subsection describes an opinionated multi-project setup. You can skip it entirely — the basic install above plus the hook environment contract is all most users need.
 
 For multiple Laravel projects, use the shared `_laravel/` hooks to avoid duplication:
 
@@ -644,23 +770,47 @@ Expected resource structure per repo (all optional):
 └── storage/app/            # Shared uploads (symlinked into worktrees)
 ```
 
-See [examples/hooks/README.md](../../examples/hooks/README.md#consolidated-laravel-hooks) for full documentation.
+See the [shared Laravel hooks](../../examples/hooks/README.md#shared-laravel-hooks-post-addd_laravel) and [Laravel quick-start](../../examples/hooks/README.md#laravel-quick-start-optional) sections of `examples/hooks/README.md` for full documentation.
 
 ---
 
 ## Automation (JSON output)
 
-Some commands support `--json` (and optionally `--pretty`) for scripting.
+These commands support `--json` (and optionally `--pretty`) for scripting:
+`repos`, `ls`, `status`, `summary`, `branches`, `health`, and `recent`.
+
+> The JSON output is a **stable data contract** consumed by the grove-app desktop application and other integrations. Treat the documented shapes as part of grove's public surface — they should not change without a deliberate version bump.
+
+Note: `--json` is **not** supported together with `--all-repos` (e.g. on `pull-all`, `prune`).
 
 ```bash
 grove repos --json
 grove ls myapp --json
 grove status myapp --json
 grove summary myapp feature/login --json
+grove branches myapp --json
+grove health myapp --json
+grove recent --json
 
 # Pretty-print JSON (useful for humans)
 grove ls myapp --json --pretty
 ```
+
+---
+
+## Cache control (--no-cache / --refresh)
+
+To speed up commands that fetch from the remote (e.g. `status`, `dashboard`), grove caches `git fetch` results briefly (`GROVE_FETCH_CACHE_TTL`, default 30 seconds; `0` disables it). Two global flags let you bypass that cache when you need up-to-the-second ahead/behind counts:
+
+```bash
+# Bypass the cache for this run (always fetch fresh; sets GROVE_FETCH_CACHE_TTL=0)
+grove status myapp --no-cache
+
+# Clear the cache first, then run the command
+grove dashboard --refresh
+```
+
+Reach for these if `grove status` shows ahead/behind numbers that look stale.
 
 ---
 
@@ -696,12 +846,15 @@ grove cleanup-herd
 
 ### Running the test suite
 
-The project includes 440+ comprehensive tests covering security validation, git operations, and edge cases:
+The project includes 448 tests (across 26 `.bats` files) covering security validation, git operations, and edge cases:
 
 ```bash
-# Run all tests (unit + integration)
+# Run all tests (lint + unit + integration)
 cd ~/Projects/grove-cli
 ./run-tests.sh
+
+# Run only the shellcheck static analysis
+./run-tests.sh lint
 
 # Run only unit tests
 ./run-tests.sh unit
@@ -714,6 +867,8 @@ cd ~/Projects/grove-cli
 ```
 
 ### Building from source
+
+> **Never edit the `grove` file directly.** It is a generated artifact. Edit the modular sources in `lib/`, then run `./build.sh` to regenerate `grove` — any direct edits to `grove` are overwritten by the build.
 
 After making changes to files in `lib/`:
 
@@ -738,4 +893,4 @@ All security improvements are tested:
 - Null byte filtering (config parser security)
 - Password protection (MySQL credentials never exposed)
 
-See `README.md` Security section for full details.
+See the [Security section in the Advanced Guide](advanced.md#security) for full details.

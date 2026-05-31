@@ -30,8 +30,9 @@ Documentation for [grove](../README.md), a command-line git worktree manager wri
 
 ## Internal / historical
 
-Point-in-time review artefacts and planning notes. These capture the state of a particular review or release and are **not** maintained as current documentation — treat them as historical records.
+Point-in-time review artefacts and planning notes. These capture the state of a particular review or release and are **not** maintained as current documentation — treat them as historical records. Where they disagree with the user/reference docs above, the docs above win.
 
+- **[Improvement Plan (2026-05-30)](development/improvement-plan-2026-05-30.md)** — Internal readiness audit and improvement plan (archived).
 - **[Implementation Plan](development/implementation-plan.md)** — Code review implementation plan (archived).
 - **[Review Findings](development/review-findings.md)** — Code review findings covering bugs, performance, and quality (archived).
 - **[`superpowers/`](superpowers/)** — Internal planning and design specs for past releases (e.g. release packaging). Not user- or contributor-facing.
