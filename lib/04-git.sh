@@ -315,7 +315,7 @@ list_worktree_branches() {
 
 # select_branch_fzf — Interactively select a worktree branch using fzf
 select_branch_fzf() {
-  local repo="$1" prompt="${2:-Select branch}"
+  local repo="$1" prompt_text="${2:-Select branch}"
   local git_dir; git_dir="$(git_dir_for "$repo")"
 
   if ! command -v fzf >/dev/null 2>&1; then
@@ -325,12 +325,12 @@ select_branch_fzf() {
   local branches; branches="$(list_worktree_branches "$repo")"
   [[ -n "$branches" ]] || die "No worktrees found for $repo"
 
-  print -r -- "$branches" | fzf --prompt="$prompt: " --height=40% --reverse
+  print -r -- "$branches" | fzf --prompt="$prompt_text: " --height=40% --reverse
 }
 
 # select_repo_fzf — Interactively select a repository using fzf
 select_repo_fzf() {
-  local prompt="${1:-Select repository}"
+  local prompt_text="${1:-Select repository}"
 
   if ! command -v fzf >/dev/null 2>&1; then
     die "fzf not installed. Install with: brew install fzf"
@@ -339,7 +339,7 @@ select_repo_fzf() {
   local repos; repos="$(list_repos)"
   [[ -n "$repos" ]] || die "No repositories found in $HERD_ROOT"
 
-  print -r -- "$repos" | fzf --prompt="$prompt: " --height=40% --reverse
+  print -r -- "$repos" | fzf --prompt="$prompt_text: " --height=40% --reverse
 }
 
 # get_ahead_behind — Print "ahead behind" commit counts relative to a base ref

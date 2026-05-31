@@ -977,24 +977,25 @@ lookup_worktree_path() {
 
   local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || return 0
 
-  local path="" current_branch="" line=""
+  # NB: not 'path' — in zsh that is the special array bound to $PATH.
+  local wt_path="" current_branch="" line=""
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
-      if [[ "$current_branch" == "$branch" && -n "$path" ]]; then
-        print -r -- "$path"
+      if [[ "$current_branch" == "$branch" && -n "$wt_path" ]]; then
+        print -r -- "$wt_path"
         return 0
       fi
-      path=""
+      wt_path=""
       current_branch=""
       continue
     fi
-    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
+    [[ "$line" == worktree\ * ]] && wt_path="${line#worktree }"
     [[ "$line" == branch\ refs/heads/* ]] && current_branch="${line#branch refs/heads/}"
   done <<< "$out"
 
   # Handle last entry (no trailing blank line)
-  if [[ "$current_branch" == "$branch" && -n "$path" ]]; then
-    print -r -- "$path"
+  if [[ "$current_branch" == "$branch" && -n "$wt_path" ]]; then
+    print -r -- "$wt_path"
     return 0
   fi
 
@@ -1645,7 +1646,7 @@ list_worktree_branches() {
 
 # select_branch_fzf — Interactively select a worktree branch using fzf
 select_branch_fzf() {
-  local repo="$1" prompt="${2:-Select branch}"
+  local repo="$1" prompt_text="${2:-Select branch}"
   local git_dir; git_dir="$(git_dir_for "$repo")"
 
   if ! command -v fzf >/dev/null 2>&1; then
@@ -1655,12 +1656,12 @@ select_branch_fzf() {
   local branches; branches="$(list_worktree_branches "$repo")"
   [[ -n "$branches" ]] || die "No worktrees found for $repo"
 
-  print -r -- "$branches" | fzf --prompt="$prompt: " --height=40% --reverse
+  print -r -- "$branches" | fzf --prompt="$prompt_text: " --height=40% --reverse
 }
 
 # select_repo_fzf — Interactively select a repository using fzf
 select_repo_fzf() {
-  local prompt="${1:-Select repository}"
+  local prompt_text="${1:-Select repository}"
 
   if ! command -v fzf >/dev/null 2>&1; then
     die "fzf not installed. Install with: brew install fzf"
@@ -1669,7 +1670,7 @@ select_repo_fzf() {
   local repos; repos="$(list_repos)"
   [[ -n "$repos" ]] || die "No repositories found in $HERD_ROOT"
 
-  print -r -- "$repos" | fzf --prompt="$prompt: " --height=40% --reverse
+  print -r -- "$repos" | fzf --prompt="$prompt_text: " --height=40% --reverse
 }
 
 # get_ahead_behind — Print "ahead behind" commit counts relative to a base ref
@@ -2427,10 +2428,10 @@ extract_template_desc() {
 suggest_similar() {
   local input="$1" type="$2"
   shift 2
-  local options=("$@")
+  local candidates=("$@")
   local best_match="" best_score=999
 
-  for opt in "${options[@]}"; do
+  for opt in "${candidates[@]}"; do
     # Simple similarity: count matching characters at start
     local i=0 score=0
     local input_lower="${input:l}" opt_lower="${opt:l}"
@@ -3318,7 +3319,7 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
 # Select a worktree from a repo using fzf
 select_worktree() {
   local git_dir="$1"
-  local prompt="${2:-Select worktree: }"
+  local prompt_text="${2:-Select worktree: }"
 
   if ! command -v fzf >/dev/null 2>&1; then
     return 1
@@ -3347,7 +3348,7 @@ select_worktree() {
 
   (( ${#entries[@]} == 0 )) && return 1
 
-  printf '%s\n' "${entries[@]}" | fzf --prompt="$prompt" --height=40% --reverse
+  printf '%s\n' "${entries[@]}" | fzf --prompt="$prompt_text" --height=40% --reverse
 }
 
 # 11-resilience.sh - Retry logic, transactions, disk checks, lock cleanup
@@ -3489,11 +3490,14 @@ check_index_locks() {
 
 # check_disk_space — Exit with error if available disk space is below threshold
 check_disk_space() {
-  local path="$1"
+  # NB: do not name this 'path' — in zsh `path` is the special array tied to
+  # $PATH, so `local path=...` clobbers PATH inside the function and breaks
+  # external commands (tail/awk below) in shells where they aren't pre-hashed.
+  local target_path="$1"
   local min_mb="${2:-1024}"  # Default 1GB
 
   local available_kb
-  available_kb=$(df -k "$path" 2>/dev/null | tail -1 | awk '{print $4}')
+  available_kb=$(df -k "$target_path" 2>/dev/null | tail -1 | awk '{print $4}')
   local available_mb=$((available_kb / 1024))
 
   if (( available_mb < min_mb )); then
@@ -10796,13 +10800,13 @@ cmd_services_doctor() {
       fi
       local process
       process="$(svc_get_supervisor_process "$app")"
-      local status
-      status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
-      if [[ -n "$status" ]]; then
-        if print -r -- "$status" | grep -q "RUNNING"; then
+      local proc_status
+      proc_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
+      if [[ -n "$proc_status" ]]; then
+        if print -r -- "$proc_status" | grep -q "RUNNING"; then
           ok "$app: RUNNING"
         else
-          warn "$app: $(print -r -- "$status" | awk '{print $2}')"
+          warn "$app: $(print -r -- "$proc_status" | awk '{print $2}')"
         fi
       else
         warn "$app: Not configured"

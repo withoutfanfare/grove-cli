@@ -326,7 +326,7 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
 # Select a worktree from a repo using fzf
 select_worktree() {
   local git_dir="$1"
-  local prompt="${2:-Select worktree: }"
+  local prompt_text="${2:-Select worktree: }"
 
   if ! command -v fzf >/dev/null 2>&1; then
     return 1
@@ -355,5 +355,5 @@ select_worktree() {
 
   (( ${#entries[@]} == 0 )) && return 1
 
-  printf '%s\n' "${entries[@]}" | fzf --prompt="$prompt" --height=40% --reverse
+  printf '%s\n' "${entries[@]}" | fzf --prompt="$prompt_text" --height=40% --reverse
 }
