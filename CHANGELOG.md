@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`grove version`** - The bare `version` word now works alongside `-v`/`--version`
 
 ### Changed
+- **Repo-specific hooks now interleave with global hooks** - Global `<hook>.d/*.sh` and repo-specific `<hook>.d/<repo>/*.sh` scripts run as one merged sequence ordered by script filename (numeric-aware), so a repo hook numbered `02-` runs between global `01-` and `03-` hooks; identical filenames run global first, then repo. Previously all global hooks ran before any repo-specific hooks, so env-dependent globals (migrations, email sanitisation) executed before the repo hooks that provide the real `.env` and database import. The bundled `myapp` examples are renumbered to their true sequence positions (`02-symlink-env`, `04-import-database`, `05-symlink-storage`, `08a-seed-data`)
 - **Pre-hooks are now gating** - A `pre-add`, `pre-rm`, or `pre-move` hook that exits non-zero now aborts the operation, honouring the documented veto. Post-* hooks remain advisory (warn only)
 - **Transactional `add`, `clone`, and `move`** - A failure partway through these operations now rolls back partial state instead of leaving a half-created worktree
 - **Database lifecycle is hook-delegated, not automatic** - `DB_CREATE` and `DB_BACKUP` now gate the reference helpers invoked by lifecycle hooks (see `examples/hooks/`); grove no longer touches databases out of the box on `grove add`

@@ -414,7 +414,7 @@ Hooks run custom scripts at various points in the worktree lifecycle. Create exe
 
 **Hook variables available:** `GROVE_REPO`, `GROVE_BRANCH`, `GROVE_BRANCH_SLUG`, `GROVE_PATH`, `GROVE_URL`, `GROVE_DB_NAME`, `GROVE_HOOK_NAME`
 
-**Multiple hooks:** Create a `.d` directory (e.g., `~/.grove/hooks/post-add.d/`) with numbered scripts. Repo-specific hooks go in subdirectories matching the repo name.
+**Multiple hooks:** Create a `.d` directory (e.g., `~/.grove/hooks/post-add.d/`) with numbered scripts. Repo-specific hooks go in subdirectories matching the repo name; they run interleaved with the global scripts in one sequence ordered by filename, so a repo hook numbered `02-` runs between global `01-` and `03-` hooks.
 
 The installer includes example Laravel hooks. Run `grove doctor` to verify hooks are set up correctly.
 
