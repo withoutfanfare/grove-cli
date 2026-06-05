@@ -1,7 +1,8 @@
 #!/bin/bash
 # Symlink to a pre-built .env file for this specific repo
 #
-# This runs AFTER the global 04-copy-env.sh hook, replacing the
+# Numbered 02- so it runs after the global 01-copy-env.sh and
+# 02-configure-env.sh hooks in the merged sequence, replacing the
 # copied .env.example with a symlink to your pre-configured .env.
 #
 # Benefits:

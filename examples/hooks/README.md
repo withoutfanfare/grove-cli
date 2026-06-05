@@ -87,15 +87,18 @@ grove continues to the next hook.
 
 ### Hook resolution order
 
-For a given event (e.g. `post-add`), grove looks in three places, in this order:
+For a given event (e.g. `post-add`), grove looks in three places:
 
 1. **Single hook file** — `~/.grove/hooks/<hook>` (if it exists and is
-   owner-executable).
-2. **Global hook directory** — `~/.grove/hooks/<hook>.d/*.sh`, run in **numeric
-   order** (e.g. `02-` runs before `10-`; grove sorts numerically, not
-   lexically, so multi-digit prefixes order as you expect).
-3. **Repo-specific directory** — `~/.grove/hooks/<hook>.d/<repo>/*.sh`, also run
-   in **numeric order**, after all global directory hooks.
+   owner-executable). Always runs first.
+2. **Global hook directory** — `~/.grove/hooks/<hook>.d/*.sh`.
+3. **Repo-specific directory** — `~/.grove/hooks/<hook>.d/<repo>/*.sh`.
+
+The global and repo-specific scripts run as **one merged sequence ordered by
+script filename** (numeric-aware: `02-` runs before `10-`), so a repo hook
+numbered `02-` runs between global `01-` and `03-` hooks. When a global and a
+repo hook share the same filename, the global one runs first, then the repo
+one — so a repo hook can override the global hook's work.
 
 `<repo>` is the repository name (e.g. `example-app`).
 
@@ -196,11 +199,11 @@ the Laravel workflow; you only need the hooks relevant to your projects.)
 │   │   ├── 05-symlink-storage.sh
 │   │   └── link-repo.sh
 │   │
-│   └── example-app/               # Repo-specific hooks for 'example-app' (run last)
-│       ├── 01-symlink-env.sh      # Replace .env with a symlink
-│       ├── 02-import-database.sh
-│       ├── 03-seed-data.sh
-│       └── 04-symlink-storage.sh
+│   └── example-app/               # Repo-specific hooks for 'example-app' (interleaved by number)
+│       ├── 02-symlink-env.sh      # Replace .env with a symlink
+│       ├── 04-import-database.sh
+│       ├── 05-symlink-storage.sh
+│       └── 08a-seed-data.sh
 │
 ├── pre-rm                         # Before worktree removal (can abort)
 ├── pre-rm.d/
@@ -249,25 +252,27 @@ post-add.d/00-register-project.sh         (global)
 post-add.d/01-copy-env.sh                 (global)
 post-add.d/01a-inherit-db-from-primary.sh (global)
 post-add.d/02-configure-env.sh            (global)
+post-add.d/example-app/02-symlink-env.sh      (repo-specific)
 post-add.d/03-create-database.sh          (global)
 post-add.d/04-herd-secure.sh              (global)
+post-add.d/example-app/04-import-database.sh  (repo-specific)
 post-add.d/04-laravel-scaffold.sh         (global)
 post-add.d/05-composer-install.sh         (global)
+post-add.d/example-app/05-symlink-storage.sh  (repo-specific)
 post-add.d/06-npm-install.sh              (global)
 post-add.d/07-build-assets.sh             (global)
 post-add.d/08-run-migrations.sh           (global)
+post-add.d/example-app/08a-seed-data.sh       (repo-specific)
 post-add.d/09-update-current-link.sh      (global)
 post-add.d/10-set-hooks-path.sh           (global)
-post-add.d/example-app/01-symlink-env.sh      (repo-specific)
-post-add.d/example-app/02-import-database.sh  (repo-specific)
-post-add.d/example-app/03-seed-data.sh        (repo-specific)
-post-add.d/example-app/04-symlink-storage.sh  (repo-specific)
 ```
 
-Note that the `09-`/`10-` global steps run **before** the repo-specific
-`example-app/*` hooks, because all global directory hooks precede the
-repo-specific folder. (`04-herd-secure.sh` and `04-laravel-scaffold.sh` share the
-`04` prefix; among same-prefixed files the remaining characters break the tie.)
+Global and repo-specific hooks form **one merged sequence sorted by script
+filename**, so `example-app/04-import-database.sh` runs after the database is
+created at `03-` and `example-app/08a-seed-data.sh` runs after migrations at
+`08-`. Files sharing a numeric prefix (e.g. `04-herd-secure.sh`,
+`example-app/04-import-database.sh`, `04-laravel-scaffold.sh`) order by the
+remaining characters; an exact filename tie runs the global hook first.
 
 ## Bundled example hooks
 
@@ -321,10 +326,10 @@ named after your own repo.
 
 | Hook | Purpose |
 |------|---------|
-| `01-symlink-env.sh` | Replace `.env` with a symlink to a pre-built version |
-| `02-import-database.sh` | Import a database from a gzipped SQL dump |
-| `03-seed-data.sh` | Seed the database with development data |
-| `04-symlink-storage.sh` | Symlink `storage/app` to a shared directory |
+| `02-symlink-env.sh` | Replace `.env` with a symlink to a pre-built version |
+| `04-import-database.sh` | Import a database from a gzipped SQL dump |
+| `05-symlink-storage.sh` | Symlink `storage/app` to a shared directory |
+| `08a-seed-data.sh` | Seed the database with development data (after migrations) |
 
 ### Pre-removal hooks (`pre-rm.d/`)
 
@@ -515,7 +520,7 @@ cp /path/to/configured/.env ~/Code/Worktree/example-app/example-app-env/.env
 
 # Create a repo-specific hook to symlink it
 mkdir -p ~/.grove/hooks/post-add.d/example-app
-cat > ~/.grove/hooks/post-add.d/example-app/01-symlink-env.sh << 'EOF'
+cat > ~/.grove/hooks/post-add.d/example-app/02-symlink-env.sh << 'EOF'
 #!/bin/bash
 ENV_SOURCE="$HOME/Code/Worktree/${GROVE_REPO}/${GROVE_REPO}-env/.env"
 if [[ -f "$ENV_SOURCE" ]]; then
@@ -524,7 +529,7 @@ if [[ -f "$ENV_SOURCE" ]]; then
   echo "  Linked .env → $ENV_SOURCE"
 fi
 EOF
-chmod +x ~/.grove/hooks/post-add.d/example-app/01-symlink-env.sh
+chmod +x ~/.grove/hooks/post-add.d/example-app/02-symlink-env.sh
 ```
 
 ### Shared storage directory
@@ -537,7 +542,7 @@ mkdir -p ~/Code/Worktree/example-app/storage/app/public
 
 # Create a repo-specific hook to symlink it
 mkdir -p ~/.grove/hooks/post-add.d/example-app
-cat > ~/.grove/hooks/post-add.d/example-app/04-symlink-storage.sh << 'EOF'
+cat > ~/.grove/hooks/post-add.d/example-app/05-symlink-storage.sh << 'EOF'
 #!/bin/bash
 STORAGE_APP_SOURCE="$HOME/Code/Worktree/${GROVE_REPO}/storage/app"
 if [[ -d "$STORAGE_APP_SOURCE" ]]; then
@@ -547,7 +552,7 @@ if [[ -d "$STORAGE_APP_SOURCE" ]]; then
   echo "  Linked storage/app → $STORAGE_APP_SOURCE"
 fi
 EOF
-chmod +x ~/.grove/hooks/post-add.d/example-app/04-symlink-storage.sh
+chmod +x ~/.grove/hooks/post-add.d/example-app/05-symlink-storage.sh
 ```
 
 This is useful for:
@@ -566,8 +571,8 @@ For repos that need a baseline database:
 mkdir -p ~/Code/Worktree/example-app/example-app-db
 mysqldump example_app_reference | gzip > ~/Code/Worktree/example-app/example-app-db/example-app.sql.gz
 
-# Create a repo-specific hook
-cat > ~/.grove/hooks/post-add.d/example-app/02-import-database.sh << 'EOF'
+# Create a repo-specific hook (04- so it runs after 03-create-database.sh)
+cat > ~/.grove/hooks/post-add.d/example-app/04-import-database.sh << 'EOF'
 #!/bin/bash
 DB_DUMP="$HOME/Code/Worktree/${GROVE_REPO}/${GROVE_REPO}-db/${GROVE_REPO}.sql.gz"
 if [[ -f "$DB_DUMP" ]]; then
@@ -575,7 +580,7 @@ if [[ -f "$DB_DUMP" ]]; then
   gunzip -c "$DB_DUMP" | mysql "$GROVE_DB_NAME"
 fi
 EOF
-chmod +x ~/.grove/hooks/post-add.d/example-app/02-import-database.sh
+chmod +x ~/.grove/hooks/post-add.d/example-app/04-import-database.sh
 ```
 
 ### Quick project navigation
@@ -648,9 +653,8 @@ using one of the mechanisms below.
 > `00-skip-laravel.sh` into the repo's hook directory that does
 > `export GROVE_SKIP_DB=true`. **This cannot work.** Each hook runs in its own
 > subshell, so an `export` never reaches the sibling hooks it is meant to
-> influence. And repo-specific hooks always run **after** all the global Laravel
-> hooks, so they could not pre-empt them even if the export did propagate. Use
-> one of the following instead.
+> influence — even though a repo hook numbered `00-` would run early in the
+> merged sequence. Use one of the following instead.
 
 **Per-invocation (one-off):** set the skip flag(s) on the `grove` command line
 itself, so they are present in the environment for every hook in that run (see

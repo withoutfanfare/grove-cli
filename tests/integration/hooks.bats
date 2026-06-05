@@ -223,12 +223,35 @@ HOOKEOF
   grep -q "repo-specific-hook" "$HOOK_LOG"
 }
 
-@test "hooks: repo-specific hooks run after global hooks" {
-  create_hook "$GROVE_HOOKS_DIR/post-add.d/01-global.sh" \
-    "echo 'global' >> '$HOOK_LOG'"
+@test "hooks: repo-specific hooks interleave with global hooks by filename" {
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/01-first.sh" \
+    "echo 'global-01' >> '$HOOK_LOG'"
 
-  create_hook "$GROVE_HOOKS_DIR/post-add.d/myapp/01-specific.sh" \
-    "echo 'repo-specific' >> '$HOOK_LOG'"
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/myapp/02-middle.sh" \
+    "echo 'repo-02' >> '$HOOK_LOG'"
+
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/03-last.sh" \
+    "echo 'global-03' >> '$HOOK_LOG'"
+
+  run_hooks_isolated "post-add" "myapp"
+  [ "$status" -eq 0 ]
+
+  local line1 line2 line3
+  line1="$(sed -n '1p' "$HOOK_LOG")"
+  line2="$(sed -n '2p' "$HOOK_LOG")"
+  line3="$(sed -n '3p' "$HOOK_LOG")"
+
+  [ "$line1" = "global-01" ]
+  [ "$line2" = "repo-02" ]
+  [ "$line3" = "global-03" ]
+}
+
+@test "hooks: interleaved ordering sorts numerically (repo 2 before global 10)" {
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/10-global.sh" \
+    "echo 'global-10' >> '$HOOK_LOG'"
+
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/myapp/2-repo.sh" \
+    "echo 'repo-2' >> '$HOOK_LOG'"
 
   run_hooks_isolated "post-add" "myapp"
   [ "$status" -eq 0 ]
@@ -237,8 +260,27 @@ HOOKEOF
   line1="$(sed -n '1p' "$HOOK_LOG")"
   line2="$(sed -n '2p' "$HOOK_LOG")"
 
-  [ "$line1" = "global" ]
-  [ "$line2" = "repo-specific" ]
+  [ "$line1" = "repo-2" ]
+  [ "$line2" = "global-10" ]
+}
+
+@test "hooks: identical filenames run global before repo-specific" {
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/01-setup.sh" \
+    "echo 'global-setup' >> '$HOOK_LOG'"
+
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/myapp/01-setup.sh" \
+    "echo 'repo-setup' >> '$HOOK_LOG'"
+
+  run_hooks_isolated "post-add" "myapp"
+  [ "$status" -eq 0 ]
+
+  # The repo hook runs second so it can override the global hook's work
+  local line1 line2
+  line1="$(sed -n '1p' "$HOOK_LOG")"
+  line2="$(sed -n '2p' "$HOOK_LOG")"
+
+  [ "$line1" = "global-setup" ]
+  [ "$line2" = "repo-setup" ]
 }
 
 @test "hooks: repo-specific hooks only run for matching repo" {

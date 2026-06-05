@@ -2308,9 +2308,10 @@ run_hooks() {
   local db_name="$6"
 
   # Glob qualifiers below need bare_glob_qual; no_nomatch keeps an empty .d
-  # directory from raising a "no matches found" error; numeric_glob_sort makes
-  # the default name sort numeric so 2 runs before 10 (not lexical 10 then 2).
-  setopt local_options bare_glob_qual no_nomatch numeric_glob_sort
+  # directory from raising a "no matches found" error. Script ordering is
+  # handled by the numeric-aware (on) parameter sort on the merged hook list,
+  # so 2 runs before 10 (not lexical 10 then 2).
+  setopt local_options bare_glob_qual no_nomatch
 
   # Generate branch slug for hooks that need it
   slugify_branch "$branch"
@@ -2345,43 +2346,54 @@ run_hooks() {
     dim "  Hook $hook_name exists but is not executable. Run: chmod +x $hook_file"
   fi
 
-  # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks)
+  # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks).
+  # Global hooks and repo-specific hooks (from the subdirectory matching the
+  # repo name) are merged and run in a single sequence ordered by script
+  # filename, so a repo hook numbered 02 runs between global 01 and 03.
+  # Identical filenames run global first, then repo, so the repo hook can
+  # override the global hook's work.
   local hooks_d="$GROVE_HOOKS_DIR/${hook_name}.d"
   if [[ -d "$hooks_d" ]] && verify_hook_path_security "$hooks_d" "Hook directory"; then
-    # Run global hooks (files only, not directories; follow symlinks).
-    # numeric_glob_sort (set above) orders the default sort numerically.
-    local hook_script script_name
+    local repo_hooks_d="$hooks_d/$repo"
+    local include_repo_hooks=0
+    if [[ -d "$repo_hooks_d" ]] && verify_hook_path_security "$repo_hooks_d" "Hook directory"; then
+      include_repo_hooks=1
+    fi
+
+    # Decorate each script as "<filename>\t<0|1>\t<path>" (0=global, 1=repo)
+    # so one numeric-aware sort (the (on) expansion flags) yields the merged
+    # order; the path is recovered from after the last tab. Globs match files
+    # only, follow symlinks, and require owner-execute.
+    local -a hook_entries
+    local hook_script
     for hook_script in "$hooks_d"/*(N-.x); do
+      hook_entries+=("${hook_script:t}"$'\t'0$'\t'"$hook_script")
+    done
+    if [[ $include_repo_hooks -eq 1 ]]; then
+      for hook_script in "$repo_hooks_d"/*(N-.x); do
+        hook_entries+=("${hook_script:t}"$'\t'1$'\t'"$hook_script")
+      done
+    fi
+
+    local entry script_name display_path
+    for entry in "${(on)hook_entries[@]}"; do
+      hook_script="${entry##*$'\t'}"
+
       # Security check before executing
       if ! verify_hook_security "$hook_script"; then
         continue
       fi
 
       script_name="${hook_script:t}"
-      info "Running ${C_CYAN}$hook_name.d/$script_name${C_RESET}..."
-      if ! _run_single_hook "$hook_script" "  $script_name" \
+      display_path="$script_name"
+      [[ "$hook_script" == "$repo_hooks_d/"* ]] && display_path="$repo/$script_name"
+
+      info "Running ${C_CYAN}$hook_name.d/$display_path${C_RESET}..."
+      if ! _run_single_hook "$hook_script" "  $display_path" \
         "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
         [[ $is_gating -eq 1 ]] && overall_status=1
       fi
     done
-
-    # Run repo-specific hooks (from subdirectory matching repo name; follow symlinks)
-    local repo_hooks_d="$hooks_d/$repo"
-    if [[ -d "$repo_hooks_d" ]] && verify_hook_path_security "$repo_hooks_d" "Hook directory"; then
-      for hook_script in "$repo_hooks_d"/*(N-.x); do
-        # Security check before executing
-        if ! verify_hook_security "$hook_script"; then
-          continue
-        fi
-
-        script_name="${hook_script:t}"
-        info "Running ${C_CYAN}$hook_name.d/$repo/$script_name${C_RESET}..."
-        if ! _run_single_hook "$hook_script" "  $repo/$script_name" \
-          "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
-          [[ $is_gating -eq 1 ]] && overall_status=1
-        fi
-      done
-    fi
   fi
 
   return $overall_status
