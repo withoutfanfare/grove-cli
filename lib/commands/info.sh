@@ -992,8 +992,8 @@ cmd_health() {
     if [[ -n "$issues" && "$issues" != "" ]]; then
       severity="warning"
       (( score < 60 )) && severity="critical"
-      local IFS=','
-      for issue in $issues; do
+      # zsh does not word-split unquoted parameters; split explicitly on commas
+      for issue in ${(s:,:)issues}; do
         all_issues+=("$severity|$branch|$issue")
       done
     fi
@@ -1058,8 +1058,8 @@ cmd_health() {
       # Convert issues to array
       local first_wt_issue=true
       if [[ -n "$wt_issues" ]]; then
-        local IFS=','
-        for issue in $wt_issues; do
+        # zsh does not word-split unquoted parameters; split explicitly on commas
+        for issue in ${(s:,:)wt_issues}; do
           [[ "$first_wt_issue" == true ]] || json+=", "
           json_escape "$issue"; json+="\"$REPLY\""
           first_wt_issue=false
