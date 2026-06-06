@@ -156,3 +156,84 @@ setup_grove_repo() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"issue(s) found"* ]]
 }
+
+# ============================================================================
+# cmd_repair --json — RepairResult contract for the Grove desktop app
+# ============================================================================
+
+# Create a bare repo in HERD_ROOT with two healthy worktrees. Two are needed
+# to regression-test the zsh `local var;` re-declaration leak inside the
+# integrity loop (it only fires from the second iteration onward).
+setup_repair_repo() {
+  local src="$TEST_TEMP_DIR/repair-src"
+  git init -q -b main "$src"
+  git -C "$src" config user.email t@t.t
+  git -C "$src" config user.name 'Test'
+  git -C "$src" commit -q --allow-empty -m init
+  git clone -q --bare "$src" "$HERD_ROOT/myrepo.git"
+  git --git-dir="$HERD_ROOT/myrepo.git" worktree add -q "$TEST_TEMP_DIR/wt-main" main
+  git --git-dir="$HERD_ROOT/myrepo.git" worktree add -q -b feature "$TEST_TEMP_DIR/wt-feature" main
+}
+
+# Like run_zsh but with stubs for the cross-module helpers cmd_repair needs.
+run_repair_zsh() {
+  run zsh -c "source '$MAINT_FNS'
+validate_name() { :; }
+git_dir_for() { print -r -- \"\$HERD_ROOT/\$1.git\"; }
+ensure_bare_repo() { :; }
+check_index_locks() { print -r -- 0; }
+json_escape() { REPLY=\"\$1\"; }
+format_json() { print -r -- \"\$1\"; }
+$1"
+}
+
+@test "cmd_repair: --json emits a pure RepairResult object on stdout" {
+  setup_repair_repo
+  # stderr discarded: stdout must be EXACTLY one valid JSON object — any
+  # banner, blank line or gitdir_content='...' typeset leak fails the parse.
+  run_repair_zsh "JSON_OUTPUT=true cmd_repair myrepo 2>/dev/null"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['success'] is True, d
+assert d['repo'] == 'myrepo', d
+assert d['issues_found'] == 0, d
+assert d['issues_fixed'] == 0, d
+assert d['message'], d
+"
+}
+
+@test "cmd_repair: human output is unchanged without --json and has no typeset leak" {
+  setup_repair_repo
+  run_repair_zsh "cmd_repair myrepo 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Repairing:"*"myrepo"* ]]
+  [[ "$output" == *"No issues found in myrepo"* ]]
+  [[ "$output" != *"gitdir_content="* ]]
+}
+
+@test "cmd_repair: --json with no repo (repair-all) is rejected" {
+  setup_repair_repo
+  run_repair_zsh "JSON_OUTPUT=true cmd_repair 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"JSON output"* ]]
+}
+
+@test "cmd_repair: --json counts an integrity issue on the LAST worktree (loop off-by-one)" {
+  setup_repair_repo
+  # Corrupt the final worktree listed by porcelain output: the old loop
+  # never processed the last entry (here-string drops the trailing blank
+  # line), so this issue went undetected.
+  echo "garbage" > "$TEST_TEMP_DIR/wt-feature/.git"
+  run_repair_zsh "JSON_OUTPUT=true cmd_repair myrepo 2>/dev/null"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['success'] is False, d
+assert d['issues_found'] == 1, d
+assert d['issues_fixed'] == 0, d
+assert 'recovery' in d['message'], d
+"
+}

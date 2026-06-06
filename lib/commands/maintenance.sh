@@ -399,13 +399,14 @@ cmd_repair() {
   local repo="${1:-}"
   local recovery_mode="${RECOVERY_MODE:-false}"
 
-  if [[ "$recovery_mode" == true ]]; then
+  if [[ "$recovery_mode" == true && "$JSON_OUTPUT" != true ]]; then
     info "Running in ${C_YELLOW}recovery mode${C_RESET} - aggressive recovery enabled"
     print -r -- ""
   fi
 
   if [[ -z "$repo" ]]; then
-    # Repair all repos
+    # Repair all repos (single-object JSON contract: repo required)
+    [[ "$JSON_OUTPUT" == true ]] && error_exit "INVALID_INPUT" "JSON output not supported when repairing all repositories" 2
     info "Scanning all repositories for issues..."
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
@@ -433,42 +434,58 @@ _repair_repo() {
   local repo="$1"
   local git_dir="$2"
   local recovery_mode="${3:-false}"
+  # In JSON mode all human output is suppressed and a single RepairResult
+  # object is emitted on stdout (consumed by the Grove desktop app).
+  local json_mode=false
+  [[ "$JSON_OUTPUT" == true ]] && json_mode=true
 
-  print -r -- ""
-  print -r -- "${C_BOLD}Repairing: ${C_CYAN}$repo${C_RESET}"
-  print -r -- ""
+  if [[ "$json_mode" != true ]]; then
+    print -r -- ""
+    print -r -- "${C_BOLD}Repairing: ${C_CYAN}$repo${C_RESET}"
+    print -r -- ""
+  fi
 
-  local fixed=0
+  local found=0 fixed=0
 
   # 1. Prune orphaned worktrees
-  info "Checking for orphaned worktrees..."
+  [[ "$json_mode" == true ]] || info "Checking for orphaned worktrees..."
   local pruned; pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
   if [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
-    print -r -- "$pruned" | while read -r line; do
-      ok "  Pruned: $line"
-    done
+    if [[ "$json_mode" != true ]]; then
+      print -r -- "$pruned" | while read -r line; do
+        ok "  Pruned: $line"
+      done
+    fi
+    found=$((found + 1))
     fixed=$((fixed + 1))
   else
-    dim "  No orphaned worktrees"
+    [[ "$json_mode" == true ]] || dim "  No orphaned worktrees"
   fi
 
   # 2. Clean stale index locks
-  info "Checking for stale index locks..."
+  [[ "$json_mode" == true ]] || info "Checking for stale index locks..."
   # check_index_locks prints the lock count on STDOUT (exit status is always 0 on
   # success); capture it rather than relying on the old exit-status-as-count.
   local locks_cleaned
   locks_cleaned="$(check_index_locks "$git_dir" "--auto-clean")"
   if (( locks_cleaned > 0 )); then
+    found=$((found + 1))
     fixed=$((fixed + 1))
   else
-    dim "  No stale locks"
+    [[ "$json_mode" == true ]] || dim "  No stale locks"
   fi
 
   # 3. Check for missing .git files in worktrees
-  info "Checking worktree integrity..."
+  [[ "$json_mode" == true ]] || info "Checking worktree integrity..."
   local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
   local wt_path="" branch="" corrupted_worktrees=()
+  # Declared OUTSIDE the loop: `local var;` re-declared inside a loop makes
+  # zsh print "var='...'" to stdout from the second iteration onward, which
+  # corrupts JSON output (see CLAUDE.md, JSON output data contract).
+  local gitdir_content=""
 
+  # The trailing $'\n' preserves the blank line after the final porcelain
+  # entry (command substitution strips it), so the last worktree is checked.
   while IFS= read -r line; do
     if [[ "$line" == worktree\ * ]]; then
       wt_path="${line#worktree }"
@@ -482,7 +499,7 @@ _repair_repo() {
           issue="missing .git file"
         # Check for broken gitdir reference
         elif [[ -f "$wt_path/.git" ]]; then
-          local gitdir_content; gitdir_content="$(cat "$wt_path/.git" 2>/dev/null)"
+          gitdir_content="$(cat "$wt_path/.git" 2>/dev/null)"
           if [[ "$gitdir_content" == gitdir:\ * ]]; then
             local ref_path="${gitdir_content#gitdir: }"
             if [[ ! -d "$ref_path" ]]; then
@@ -501,20 +518,23 @@ _repair_repo() {
         fi
 
         if [[ -n "$issue" ]]; then
-          warn "  ${C_YELLOW}$worktree_name${C_RESET}: $issue"
+          found=$((found + 1))
+          [[ "$json_mode" == true ]] || warn "  ${C_YELLOW}$worktree_name${C_RESET}: $issue"
           [[ -n "$branch" ]] && corrupted_worktrees+=("$wt_path|$branch|$issue")
         fi
       fi
       wt_path=""
       branch=""
     fi
-  done <<< "$out"
+  done <<< "$out"$'\n'
 
   # Recovery mode: attempt to fix corrupted worktrees
   if [[ "$recovery_mode" == true && ${#corrupted_worktrees[@]} -gt 0 ]]; then
-    print -r -- ""
-    info "Attempting recovery of ${C_BOLD}${#corrupted_worktrees[@]}${C_RESET} corrupted worktree(s)..."
-    print -r -- ""
+    if [[ "$json_mode" != true ]]; then
+      print -r -- ""
+      info "Attempting recovery of ${C_BOLD}${#corrupted_worktrees[@]}${C_RESET} corrupted worktree(s)..."
+      print -r -- ""
+    fi
 
     for entry in "${corrupted_worktrees[@]}"; do
       local corrupt_path="${entry%%|*}"
@@ -523,19 +543,37 @@ _repair_repo() {
       local corrupt_issue="${rest#*|}"
       local folder="${corrupt_path:t}"
 
-      info "  Recovering: ${C_CYAN}$folder${C_RESET} (${corrupt_branch})"
+      [[ "$json_mode" == true ]] || info "  Recovering: ${C_CYAN}$folder${C_RESET} (${corrupt_branch})"
 
       if _attempt_worktree_recovery "$repo" "$git_dir" "$corrupt_path" "$corrupt_branch" "$corrupt_issue"; then
-        ok "    Recovered successfully"
+        [[ "$json_mode" == true ]] || ok "    Recovered successfully"
         fixed=$((fixed + 1))
-      else
+      elif [[ "$json_mode" != true ]]; then
         warn "    Recovery failed - may need manual intervention"
         dim "    Try: grove rm $repo $corrupt_branch && grove add $repo $corrupt_branch"
       fi
     done
-  elif (( ${#corrupted_worktrees[@]} > 0 )); then
+  elif (( ${#corrupted_worktrees[@]} > 0 )) && [[ "$json_mode" != true ]]; then
     print -r -- ""
     dim "  Use ${C_YELLOW}--recovery${C_RESET} flag to attempt automatic recovery"
+  fi
+
+  if [[ "$json_mode" == true ]]; then
+    # RepairResult contract: {success, repo, issues_found, issues_fixed, message}.
+    # success is false when issues remain unfixed so consumers surface the message.
+    local success=true message
+    if (( found == 0 )); then
+      message="No issues found in $repo"
+    elif (( fixed >= found )); then
+      message="Fixed $fixed issue(s) in $repo"
+    else
+      success=false
+      message="Found $found issue(s) in $repo, fixed $fixed - run repair with --recovery to attempt automatic recovery"
+    fi
+    json_escape "$repo"; local _je_repo="$REPLY"
+    json_escape "$message"; local _je_msg="$REPLY"
+    format_json "{\"success\": $success, \"repo\": \"$_je_repo\", \"issues_found\": $found, \"issues_fixed\": $fixed, \"message\": \"$_je_msg\"}"
+    return 0
   fi
 
   print -r -- ""

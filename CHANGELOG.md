@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`grove repair <repo> --json`** - The repair command now honours `--json`, emitting a single RepairResult object (`success`, `repo`, `issues_found`, `issues_fixed`, `message`) for the Grove desktop app; `success` is false when issues were found but not fixed, and repairing all repositories with `--json` is rejected as unsupported
 - **Usable aliases and groups** - Aliases and groups now resolve at the point of use. `grove code/open/cd/switch <alias>` resolves an alias to its repo (a real repository of the same name always wins), and `grove build-all @group` / `grove exec-all @group <cmd>` expand a group to its member repos
 - **`grove report <repo> [--output <file>]` from the CLI** - The markdown status report now renders real multi-line output to stdout, or writes to a file with `--output`
 - **`grove version`** - The bare `version` word now works alongside `-v`/`--version`
@@ -21,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`services apps --json` honours `--pretty`** - The command now routes through the shared JSON formatter like every other JSON command
 
 ### Fixed
+- **Repair integrity check covered every worktree but the last** - The porcelain parsing loop dropped the trailing blank line, so the final worktree of each repository was never integrity-checked; it is now included
+- **Repair no longer leaks `gitdir_content='...'` onto stdout** - A `local` re-declaration inside the integrity loop made zsh print the variable's previous value from the second worktree onward, corrupting machine-readable output
 - **`grove rm --json` reports outcomes, not requests** - The `db_dropped` field is renamed `db_drop_requested` (database drops are hook-delegated, so grove reports only the request), and `branch_deleted` now reflects the real deletion result rather than the request flag
 - **`grove config --json` always emits bare booleans** - Config values such as `DB_CREATE` and `HERD_ENABLED` are normalised to strict `true`/`false`, preventing invalid JSON in downstream consumers
 - **`grove dashboard --json` rejected** - The interactive dashboard no longer emits terminal escape sequences when `--json` is passed
