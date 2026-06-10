@@ -683,14 +683,14 @@ cmd_services_doctor() {
 
   if svc_has_apps; then
     # Check -current symlinks
+    # Declare loop-assigned vars once, up front: re-running `local var` on an
+    # existing variable inside a loop makes zsh print "var=value" to stdout.
     info "Symlinks:"
-    local app
+    local app system_name symlink target
     for app in $(svc_get_app_list); do
-      local system_name
       system_name="$(svc_get_system_name "$app")"
-      local symlink="$HERD_ROOT/${system_name}-current"
+      symlink="$HERD_ROOT/${system_name}-current"
       if [[ -L "$symlink" ]]; then
-        local target
         target="$(readlink "$symlink")"
         if [[ -d "$target" ]]; then
           ok "${system_name}-current -> ${target:t}"
@@ -706,13 +706,12 @@ cmd_services_doctor() {
 
     # Check supervisor processes
     info "Supervisor Processes:"
+    local process proc_status
     for app in $(svc_get_app_list); do
       if [[ "${SVC_SERVICES[$app]}" == "none" ]]; then
         continue
       fi
-      local process
       process="$(svc_get_supervisor_process "$app")"
-      local proc_status
       proc_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
       if [[ -n "$proc_status" ]]; then
         if print -r -- "$proc_status" | grep -q "RUNNING"; then
@@ -722,6 +721,25 @@ cmd_services_doctor() {
         fi
       else
         warn "$app: Not configured"
+      fi
+    done
+
+    # Check scheduler LaunchAgents
+    info "Scheduler LaunchAgents:"
+    local plist scheduler_status
+    for app in $(svc_get_app_list); do
+      plist="$GROVE_LAUNCH_AGENTS/com.${app}.scheduler.plist"
+      if [[ -f "$plist" ]]; then
+        # Capture with plain grep rather than grep -q: under pipefail, -q's early
+        # exit sends launchctl a SIGPIPE and fails the pipeline on a real match.
+        scheduler_status="$(launchctl list 2>/dev/null | grep "com.${app}.scheduler" || true)"
+        if [[ -n "$scheduler_status" ]]; then
+          ok "$app: Loaded"
+        else
+          warn "$app: Not loaded"
+        fi
+      else
+        dim "$app: No plist (no scheduler configured)"
       fi
     done
   else

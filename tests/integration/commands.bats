@@ -152,6 +152,14 @@ run_grove() {
   [[ "$output" == *"empty"* ]]
 }
 
+@test "flag parsing: services add options pass through to subcommand" {
+  GROVE_SERVICES_DIR="$TEST_TEMP_DIR/.grove/services" \
+    run_grove services add testapp --system-name=testsys --services=horizon:reverb --domain=testapp.test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Registered app: testapp"* ]]
+  grep -q "^testapp|testsys|horizon:reverb|testsys:\*|testapp.test$" "$TEST_TEMP_DIR/.grove/services/apps.conf"
+}
+
 # ============================================================================
 # Validation - error cases
 # ============================================================================

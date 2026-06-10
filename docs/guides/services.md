@@ -272,6 +272,7 @@ Doctor checks the following and flags anything that needs attention:
 | Supervisor configs | `/opt/homebrew/etc/supervisor.d/` exists and lists config count |
 | Symlinks | Each registered app has a valid `-current` symlink in `~/Herd` |
 | Supervisor processes | Each app's named process is RUNNING in `supervisorctl` |
+| Scheduler LaunchAgents | Each app's `com.<app>.scheduler.plist` is loaded in `launchctl`; apps without a plist are noted as having no scheduler configured |
 
 For each failed check, doctor shows a fix command. Run `grove services doctor` after any infrastructure change -- it's the fastest way to find out why a service stopped working.
 
