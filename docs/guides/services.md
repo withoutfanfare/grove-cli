@@ -208,6 +208,36 @@ The status view shows:
 
 Running `grove services` with no subcommand is a shortcut to `grove services status` when at least one app is registered.
 
+For machine-readable status (consumed by the grove desktop app):
+
+```bash
+grove services status --json
+grove services status myapp --json    # single app
+```
+
+Returns one object with daemon health and a per-app array:
+
+```json
+{
+  "supervisor_running": true,
+  "redis_running": true,
+  "apps": [
+    {
+      "name": "myapp",
+      "system_name": "myapp",
+      "services": "horizon",
+      "supervisor_process": "myapp-horizon",
+      "domain": "myapp.test",
+      "current_worktree": "feature-login",
+      "supervisor_status": "RUNNING",
+      "scheduler_loaded": true
+    }
+  ]
+}
+```
+
+Notes on the JSON shape: `current_worktree` is `null` when the `-current` symlink is missing; `supervisor_status` is the raw `supervisorctl` state word (`RUNNING`, `STOPPED`, `FATAL`, ...), `NOT_CONFIGURED` when no matching process exists, or `null` for `services=none` apps; the per-app Horizon artisan check is deliberately skipped in JSON mode (it would spawn PHP per app — the Supervisor state already covers the worker).
+
 ### Starting Services
 
 ```bash

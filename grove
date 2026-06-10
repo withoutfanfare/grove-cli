@@ -10354,8 +10354,92 @@ svc_show_app_status() {
   print -r -- ""
 }
 
+# cmd_services_status_json — Machine-readable status for the Grove desktop app.
+# Emits one object: daemon health plus a per-app array. supervisorctl and
+# launchctl are queried once and matched in-process, so cost does not grow
+# with the number of registered apps. The Horizon artisan check is skipped:
+# it spawns php per app and the supervisor state already covers the worker.
+cmd_services_status_json() {
+  local app_filter="${1:-}"
+  if [[ -n "$app_filter" && "$app_filter" != "all" ]]; then
+    svc_validate_app "$app_filter"
+  fi
+
+  # Daemon checks. Capture grep output instead of grep -q: under pipefail an
+  # early -q exit can SIGPIPE the producer and fail the pipeline on a match.
+  local supervisor_running=false redis_running=false matched
+  matched="$(brew services list 2>/dev/null | grep "supervisor.*started" || true)"
+  [[ -n "$matched" ]] && supervisor_running=true
+  if redis-cli ping > /dev/null 2>&1; then
+    redis_running=true
+  fi
+
+  local supervisor_snapshot launchctl_snapshot
+  supervisor_snapshot="$(supervisorctl status 2>/dev/null || true)"
+  launchctl_snapshot="$(launchctl list 2>/dev/null || true)"
+
+  # json_escape sets $REPLY — declare everything outside the loop to avoid the
+  # zsh `local` re-declaration debug-output pitfall.
+  local json_items=()
+  local app_name system_name services process domain symlink current
+  local proc_line proc_state scheduler_loaded current_json supervisor_status_json
+  local je_name je_system je_services je_process je_domain je_current je_state
+  for app_name in $(svc_get_app_list); do
+    if [[ -n "$app_filter" && "$app_filter" != "all" && "$app_name" != "$app_filter" ]]; then
+      continue
+    fi
+    system_name="${SVC_SYSTEM_NAMES[$app_name]}"
+    services="${SVC_SERVICES[$app_name]}"
+    process="${SVC_SUPERVISOR_PROCESSES[$app_name]}"
+    domain="${SVC_DOMAINS[$app_name]}"
+
+    symlink="$HERD_ROOT/${system_name}-current"
+    if [[ -L "$symlink" ]]; then
+      current="${symlink:A:t}"
+      json_escape "$current"; je_current="$REPLY"
+      current_json="\"$je_current\""
+    else
+      current_json="null"
+    fi
+
+    if [[ "$services" == "none" || -z "$process" ]]; then
+      supervisor_status_json="null"
+    else
+      proc_line="$(print -r -- "$supervisor_snapshot" | grep -E "^${process%:*}[: ]" | head -1 || true)"
+      if [[ -n "$proc_line" ]]; then
+        proc_state="$(print -r -- "$proc_line" | awk '{print $2}')"
+      else
+        proc_state="NOT_CONFIGURED"
+      fi
+      json_escape "$proc_state"; je_state="$REPLY"
+      supervisor_status_json="\"$je_state\""
+    fi
+
+    scheduler_loaded=false
+    if [[ "$launchctl_snapshot" == *"com.${app_name}.scheduler"* ]]; then
+      scheduler_loaded=true
+    fi
+
+    json_escape "$app_name";    je_name="$REPLY"
+    json_escape "$system_name"; je_system="$REPLY"
+    json_escape "$services";    je_services="$REPLY"
+    json_escape "$process";     je_process="$REPLY"
+    json_escape "$domain";      je_domain="$REPLY"
+    json_items+=("$(printf '{"name":"%s","system_name":"%s","services":"%s","supervisor_process":"%s","domain":"%s","current_worktree":%s,"supervisor_status":%s,"scheduler_loaded":%s}' \
+      "$je_name" "$je_system" "$je_services" "$je_process" "$je_domain" \
+      "$current_json" "$supervisor_status_json" "$scheduler_loaded")")
+  done
+
+  format_json "{\"supervisor_running\":$supervisor_running,\"redis_running\":$redis_running,\"apps\":[${(j:,:)json_items}]}"
+}
+
 cmd_services_status() {
   local app="${1:-}"
+
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    cmd_services_status_json "$app"
+    return $?
+  fi
 
   print -r -- ""
   print -r -- "${C_BOLD}Service Status${C_RESET}"

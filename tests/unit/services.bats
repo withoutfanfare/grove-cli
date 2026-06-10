@@ -331,6 +331,79 @@ EOF
   [[ "$output" == *$'\n'*'"name"'* ]]
 }
 
+@test "services status --json emits valid JSON with expected shape" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp-repo|horizon|myapp-horizon|myapp.test
+noneapp|noneapp|none||noneapp.test
+EOF
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    PRETTY_JSON=false
+    cmd_services_status_json
+  '
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+assert isinstance(data['supervisor_running'], bool)
+assert isinstance(data['redis_running'], bool)
+apps = {a['name']: a for a in data['apps']}
+assert set(apps) == {'myapp', 'noneapp'}
+# No -current symlink in the test HERD_ROOT
+assert apps['myapp']['current_worktree'] is None
+# supervisorctl is absent/empty in tests, so the named process is unmatched
+assert apps['myapp']['supervisor_status'] == 'NOT_CONFIGURED'
+# services=none apps have no supervisor process to report
+assert apps['noneapp']['supervisor_status'] is None
+assert isinstance(apps['myapp']['scheduler_loaded'], bool)
+"
+}
+
+@test "services status --json filters to a single app" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp-repo|horizon|myapp-horizon|myapp.test
+otherapp|otherapp|horizon|otherapp-horizon|otherapp.test
+EOF
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    PRETTY_JSON=false
+    cmd_services_status_json myapp
+  '
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+assert [a['name'] for a in data['apps']] == ['myapp']
+"
+}
+
+@test "services status --json rejects an unknown app" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp-repo|horizon|myapp-horizon|myapp.test
+EOF
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    PRETTY_JSON=false
+    cmd_services_status_json nosuchapp
+  '
+  [ "$status" -ne 0 ]
+}
+
 # --- Field Validation (registry integrity) ---
 
 @test "services add rejects a system name containing a pipe" {
