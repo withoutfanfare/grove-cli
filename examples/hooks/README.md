@@ -230,7 +230,7 @@ the Laravel workflow; you only need the hooks relevant to your projects.)
 │
 ├── post-switch.d/                 # After grove switch succeeds
 │   ├── 01-update-current-link.sh  # Update {repo}-current symlink
-│   ├── 02-devctl-restart.sh       # Restart grove services (Supervisor/Horizon)
+│   ├── 02-services-restart.sh       # Restart grove services (Supervisor/Horizon)
 │   └── example-app/
 │       └── 01-configure-env.sh    # Set APP_URL, SESSION_DOMAIN, DB_DATABASE
 │
@@ -351,7 +351,7 @@ named after your own repo.
 | Hook | Purpose | Skip flag |
 |------|---------|-----------|
 | `01-update-current-link.sh` | Update the `{repo}-current` symlink to point at the active worktree | `GROVE_SKIP_CURRENT_LINK` |
-| `02-devctl-restart.sh` | Restart grove services (Supervisor/Horizon/Reverb) so they pick up the new worktree; exits silently if the repo has no registered service app | `GROVE_SKIP_SERVICES` |
+| `02-services-restart.sh` | Restart grove services (Supervisor/Horizon/Reverb) so they pick up the new worktree; exits silently if the repo has no registered service app | `GROVE_SKIP_SERVICES` |
 | `example-app/01-configure-env.sh` | Set `APP_URL`, `SESSION_DOMAIN`, and (only when `DB_CREATE=true`) `DB_DATABASE` in `.env` | — |
 
 ## Configuration for hooks
@@ -454,7 +454,7 @@ The bundled hooks honour these skip flags:
 | `GROVE_SKIP_MIGRATE` | `08-run-migrations.sh` |
 | `GROVE_SKIP_CURRENT_LINK` | `09-update-current-link.sh` and `post-switch.d/01-update-current-link.sh` |
 | `GROVE_SKIP_HOOKS_PATH` | `10-set-hooks-path.sh` |
-| `GROVE_SKIP_SERVICES` | `post-switch.d/02-devctl-restart.sh` |
+| `GROVE_SKIP_SERVICES` | `post-switch.d/02-services-restart.sh` |
 
 To disable database behaviour **permanently** for a repo, prefer configuration
 over a per-run flag:

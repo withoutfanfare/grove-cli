@@ -395,7 +395,7 @@ When you run `grove switch` to change the active worktree for a repo, a post-swi
 Two example hooks work together, and **filename order matters** -- post-switch hooks run in lexical order:
 
 1. `examples/hooks/post-switch.d/01-update-current-link.sh` -- repoints the `~/Herd/<system-name>-current` symlink at the newly switched-to worktree.
-2. `examples/hooks/post-switch.d/02-devctl-restart.sh` -- restarts that app's services:
+2. `examples/hooks/post-switch.d/02-services-restart.sh` -- restarts that app's services:
    ```zsh
    grove services restart "$GROVE_REPO"
    ```
@@ -412,9 +412,9 @@ Copy **both** example hooks to your global hooks directory so the symlink is upd
 
 ```bash
 cp examples/hooks/post-switch.d/01-update-current-link.sh ~/.grove/hooks/post-switch.d/
-cp examples/hooks/post-switch.d/02-devctl-restart.sh ~/.grove/hooks/post-switch.d/
+cp examples/hooks/post-switch.d/02-services-restart.sh ~/.grove/hooks/post-switch.d/
 chmod +x ~/.grove/hooks/post-switch.d/01-update-current-link.sh
-chmod +x ~/.grove/hooks/post-switch.d/02-devctl-restart.sh
+chmod +x ~/.grove/hooks/post-switch.d/02-services-restart.sh
 ```
 
 Or install them for a specific repo only:
@@ -422,9 +422,9 @@ Or install them for a specific repo only:
 ```bash
 mkdir -p ~/.grove/hooks/post-switch.d/myrepo
 cp examples/hooks/post-switch.d/01-update-current-link.sh ~/.grove/hooks/post-switch.d/myrepo/
-cp examples/hooks/post-switch.d/02-devctl-restart.sh ~/.grove/hooks/post-switch.d/myrepo/
+cp examples/hooks/post-switch.d/02-services-restart.sh ~/.grove/hooks/post-switch.d/myrepo/
 chmod +x ~/.grove/hooks/post-switch.d/myrepo/01-update-current-link.sh
-chmod +x ~/.grove/hooks/post-switch.d/myrepo/02-devctl-restart.sh
+chmod +x ~/.grove/hooks/post-switch.d/myrepo/02-services-restart.sh
 ```
 
 ### Skipping the Restart
