@@ -94,7 +94,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Worktree discovery** (recent, clean, info) → `lib/commands/discovery.sh`
 - **Configuration** (setup, templates, alias, group) → `lib/commands/config.sh`
 - **Laravel-specific** → `lib/commands/laravel.sh`
-- **Service management** (services: status/start/stop/restart/add/remove/apps/horizon/logs/doctor — Supervisor, Horizon, Reverb, scheduler) → `lib/commands/services.sh` *(also emits the `services apps --json` data contract)*
+- **Service management** (services: status/start/stop/restart/add/remove/apps/horizon/logs/doctor — Supervisor, Horizon, Reverb, scheduler) → `lib/commands/services.sh` *(also emits the `services apps --json` and `services status --json` data contracts)*
 
 ## Development Commands
 
