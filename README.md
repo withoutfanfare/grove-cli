@@ -240,6 +240,7 @@ grove services status                   # check all services
 grove services start myapp              # start services
 grove services stop myapp               # stop services
 grove services restart all              # restart everything
+grove services switch myapp feat-x      # point -current at another worktree
 grove services apps                     # list registered apps
 grove services horizon myapp            # open Horizon dashboard
 grove services logs myapp               # tail Horizon logs
