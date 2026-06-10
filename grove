@@ -10150,7 +10150,22 @@ cmd_tinker() {
 GROVE_SERVICES_DIR="${GROVE_SERVICES_DIR:-$HOME/.grove/services}"
 GROVE_SERVICES_CONF="$GROVE_SERVICES_DIR/apps.conf"
 GROVE_SUPERVISOR_D="/opt/homebrew/etc/supervisor.d"
-GROVE_LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+GROVE_LAUNCH_AGENTS="${GROVE_LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
+
+# svc_ensure_tool_path — Append Homebrew bin dirs to PATH when missing.
+# GUI/minimal environments (the Grove desktop app's sidecar, cron, launchd)
+# start with a bare PATH, so brew/supervisorctl/redis-cli would be "not found"
+# and every daemon check would falsely report Not running. Appending (not
+# prepending) preserves any user-chosen tool versions already on PATH.
+svc_ensure_tool_path() {
+  local p
+  for p in /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /usr/local/sbin; do
+    if [[ -d "$p" && ":$PATH:" != *":$p:"* ]]; then
+      PATH="$PATH:$p"
+    fi
+  done
+  export PATH
+}
 
 # Associative arrays for app registry (populated by svc_load_config)
 typeset -A SVC_APPS=()
@@ -10790,6 +10805,57 @@ cmd_services_remove() {
   dim "Note: This only removes from registry. Worktrees and configs are not deleted."
 }
 
+# cmd_services_switch — Point an app's -current symlink at a different worktree.
+# Ported from devctl switch: stop services, repoint the symlink, clear the
+# Laravel config cache, start services — so Horizon/scheduler pick up the new
+# worktree immediately.
+cmd_services_switch() {
+  local app="${1:-}"
+  local worktree="${2:-}"
+
+  if [[ -z "$app" || -z "$worktree" ]]; then
+    die "Usage: grove services switch <app> <worktree>"
+  fi
+
+  svc_validate_app "$app"
+  # Worktree directory names are branch slugs — same whitelist as repo names
+  # (blocks path traversal and flag injection before the path is built).
+  validate_name "$worktree" "worktree"
+
+  local system_name
+  system_name="$(svc_get_system_name "$app")"
+  local worktree_path="$HERD_ROOT/${system_name}-worktrees/$worktree"
+  local symlink="$HERD_ROOT/${system_name}-current"
+
+  if [[ ! -d "$worktree_path" ]]; then
+    die "Worktree '$worktree' does not exist for $app (looked in $HERD_ROOT/${system_name}-worktrees)"
+  fi
+
+  # Never clobber a real directory: ln -sfn into an existing dir would create
+  # the link INSIDE it instead of replacing it.
+  if [[ -e "$symlink" && ! -L "$symlink" ]]; then
+    die "$symlink exists but is not a symlink — refusing to replace it"
+  fi
+
+  info "Switching ${(C)app} to $worktree..."
+
+  svc_stop_app "$app"
+
+  ln -sfn "$worktree_path" "$symlink"
+  ok "Updated ${system_name}-current -> $worktree"
+
+  # Clear the config cache so the app doesn't serve paths cached from the
+  # previous worktree (Laravel apps only; skip silently otherwise).
+  if [[ -f "$worktree_path/artisan" ]] && command -v php &> /dev/null; then
+    (cd "$worktree_path" && php artisan config:clear) > /dev/null 2>&1 || true
+    ok "Config cache cleared"
+  fi
+
+  svc_start_app "$app"
+
+  ok "Switched ${(C)app} to $worktree"
+}
+
 cmd_services_horizon() {
   local app="${1:-}"
 
@@ -10995,6 +11061,7 @@ svc_show_help() {
   print -r -- "    grove services start <app|all>    Start services"
   print -r -- "    grove services stop <app|all>     Stop services"
   print -r -- "    grove services restart <app|all>  Restart services"
+  print -r -- "    grove services switch <app> <wt>  Point -current at another worktree"
   print -r -- ""
   print -r -- "  ${C_GREEN}Utilities:${C_RESET}"
   print -r -- "    grove services apps               List registered apps"
@@ -11007,6 +11074,10 @@ cmd_services() {
   # Lazy-load config only when services is actually invoked
   svc_load_config
 
+  # Minimal environments (GUI sidecar, cron) lack the Homebrew paths that
+  # brew/supervisorctl/redis-cli live in — repair PATH before any check runs.
+  svc_ensure_tool_path
+
   local subcmd="${1:-}"
   shift 2>/dev/null || true
 
@@ -11015,6 +11086,7 @@ cmd_services() {
     start)    cmd_services_start "$@" ;;
     stop)     cmd_services_stop "$@" ;;
     restart)  cmd_services_restart "$@" ;;
+    switch)   cmd_services_switch "$@" ;;
     add)      cmd_services_add "$@" ;;
     remove)   cmd_services_remove "$@" ;;
     apps)     cmd_services_apps "$@" ;;

@@ -238,6 +238,16 @@ Returns one object with daemon health and a per-app array:
 
 Notes on the JSON shape: `current_worktree` is `null` when the `-current` symlink is missing; `supervisor_status` is the raw `supervisorctl` state word (`RUNNING`, `STOPPED`, `FATAL`, ...), `NOT_CONFIGURED` when no matching process exists, or `null` for `services=none` apps; the per-app Horizon artisan check is deliberately skipped in JSON mode (it would spawn PHP per app — the Supervisor state already covers the worker).
 
+### Switching the Active Worktree
+
+```bash
+grove services switch myapp feature-login
+```
+
+Points the app's `~/Herd/<system_name>-current` symlink at a different worktree and cycles services around the change: stop (Supervisor worker + scheduler) → repoint the symlink → `php artisan config:clear` in the new worktree → start. Horizon and the scheduler pick up the new code immediately.
+
+The worktree argument is the directory name under `~/Herd/<system_name>-worktrees/` (the branch slug). The command refuses to run if the worktree doesn't exist, or if something other than a symlink occupies the `-current` path.
+
 ### Starting Services
 
 ```bash

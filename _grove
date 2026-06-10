@@ -246,6 +246,7 @@ _grove() {
             'start:Start supervisor processes and scheduler'
             'stop:Stop supervisor processes and scheduler'
             'restart:Restart supervisor processes'
+            'switch:Point -current symlink at another worktree'
             'add:Register a new app'
             'remove:Remove an app from registry'
             'apps:List all registered apps'

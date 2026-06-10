@@ -404,6 +404,83 @@ EOF
   [ "$status" -ne 0 ]
 }
 
+@test "services switch repoints the -current symlink" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp|none||myapp.test
+EOF
+  mkdir -p "$HERD_ROOT/myapp-worktrees/feature-login"
+  mkdir -p "$HERD_ROOT/myapp-worktrees/main"
+  ln -s "$HERD_ROOT/myapp-worktrees/main" "$HERD_ROOT/myapp-current"
+  export GROVE_LAUNCH_AGENTS="$TEST_TMPDIR/agents"
+  mkdir -p "$GROVE_LAUNCH_AGENTS"
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_switch myapp feature-login
+  '
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$HERD_ROOT/myapp-current")" = "$HERD_ROOT/myapp-worktrees/feature-login" ]
+}
+
+@test "services switch rejects a missing worktree" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp|none||myapp.test
+EOF
+  mkdir -p "$HERD_ROOT/myapp-worktrees"
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_switch myapp nosuchworktree
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not exist"* ]]
+}
+
+@test "services switch rejects a path-traversal worktree name" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp|none||myapp.test
+EOF
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_switch myapp "../etc"
+  '
+  [ "$status" -ne 0 ]
+}
+
+@test "services switch refuses to replace a real directory at -current" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF'
+myapp|myapp|none||myapp.test
+EOF
+  mkdir -p "$HERD_ROOT/myapp-worktrees/feature-login"
+  mkdir -p "$HERD_ROOT/myapp-current"   # real directory, not a symlink
+
+  run zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_switch myapp feature-login
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a symlink"* ]]
+  [ -d "$HERD_ROOT/myapp-current" ]
+  [ ! -L "$HERD_ROOT/myapp-current" ]
+}
+
 # --- Field Validation (registry integrity) ---
 
 @test "services add rejects a system name containing a pipe" {
