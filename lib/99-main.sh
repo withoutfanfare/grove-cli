@@ -235,6 +235,10 @@ parse_flags() {
           REMAINING_ARGS+=("$1")
         fi
         ;;
+      --system-name=*|--services=*|--supervisor=*|--domain=*)
+        # grove services add options — pass through to the subcommand
+        REMAINING_ARGS+=("$1")
+        ;;
       --)
         # End-of-options sentinel: everything after a literal -- passes
         # through verbatim (lets exec/exec-all run commands containing dashes).
