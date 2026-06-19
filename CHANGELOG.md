@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`services apps --json` honours `--pretty`** - The command now routes through the shared JSON formatter like every other JSON command
 
 ### Fixed
+- **`grove rm -f` removes worktrees locked by other tools** - A worktree locked with `git worktree lock` (as the Supacode CLI/app does on every worktree it creates) refuses a single `--force`, so `grove rm -f` aborted with `cannot remove a locked working tree`. With `-f` the user has asked for removal regardless, so grove now unlocks and retries automatically; this also unblocks the Grove desktop app, which shells out to the same `grove rm`
 - **Repair integrity check covered every worktree but the last** - The porcelain parsing loop dropped the trailing blank line, so the final worktree of each repository was never integrity-checked; it is now included
 - **Repair no longer leaks `gitdir_content='...'` onto stdout** - A `local` re-declaration inside the integrity loop made zsh print the variable's previous value from the second worktree onward, corrupting machine-readable output
 - **`grove rm --json` reports outcomes, not requests** - The `db_dropped` field is renamed `db_drop_requested` (database drops are hook-delegated, so grove reports only the request), and `branch_deleted` now reflects the real deletion result rather than the request flag
