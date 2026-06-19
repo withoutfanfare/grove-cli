@@ -4403,9 +4403,21 @@ cmd_rm() {
   fi
 
   info "Removing worktree ${C_CYAN}$wt_path${C_RESET}"
-  local remove_output
+  local remove_output remove_status
   if [[ "$FORCE" == true ]]; then
-    remove_output="$(git --git-dir="$git_dir" worktree remove --force "$wt_path" 2>&1)" || {
+    # Capture status with '|| remove_status=$?' so a failing command substitution
+    # does not abort the script under 'set -e' (a plain assignment would).
+    remove_status=0
+    remove_output="$(git --git-dir="$git_dir" worktree remove --force "$wt_path" 2>&1)" || remove_status=$?
+    # A worktree locked by another tool (e.g. Supacode) refuses a single --force.
+    # With -f the user has asked to remove it regardless, so unlock and retry.
+    if (( remove_status != 0 )) && [[ "$remove_output" == *"locked working tree"* ]]; then
+      warn "Worktree is locked - unlocking and retrying..."
+      git --git-dir="$git_dir" worktree unlock "$wt_path" 2>/dev/null || true
+      remove_status=0
+      remove_output="$(git --git-dir="$git_dir" worktree remove --force "$wt_path" 2>&1)" || remove_status=$?
+    fi
+    if (( remove_status != 0 )); then
       # Handle "Directory not empty" caused by untracked files left in the worktree directory
       if [[ "$remove_output" == *"Directory not empty"* && -d "$wt_path" ]]; then
         warn "Directory contains untracked files - cleaning up..."
@@ -4420,7 +4432,7 @@ cmd_rm() {
       else
         error_exit "GIT_ERROR" "failed to remove worktree: $remove_output" 4
       fi
-    }
+    fi
   else
     remove_output="$(git --git-dir="$git_dir" worktree remove "$wt_path" 2>&1)" || {
       if [[ "$remove_output" == *"Directory not empty"* && -d "$wt_path" ]]; then
