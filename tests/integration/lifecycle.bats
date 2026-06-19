@@ -221,3 +221,30 @@ make_bare_with_worktree() {
   [ "$status" -eq 0 ]
   [[ "$output" == *'"branch_deleted": false'* ]]
 }
+
+# A worktree locked by another tool (e.g. Supacode) refuses a single --force.
+# With -f, cmd_rm must unlock and retry rather than abort.
+@test "cmd_rm: -f unlocks and removes a locked worktree" {
+  local git_dir="$TEST_TEMP_DIR/app4.git"
+  local wt_path="$TEST_TEMP_DIR/Herd/app4-worktrees/feature-locked"
+  make_bare_with_worktree "$git_dir" "$wt_path" "feature/locked"
+  # Simulate Supacode's lock with a JSON reason, matching the real-world case.
+  git --git-dir="$git_dir" worktree lock --reason '{"owner":"supacode"}' "$wt_path"
+  [ -d "$wt_path" ]
+
+  # Run under 'set -euo pipefail' to match the real grove runtime (00-header.sh):
+  # a plain 'var=\$(failing-cmd)' aborts the script under errexit, which previously
+  # skipped the unlock-and-retry path entirely.
+  run_zsh "
+    set -euo pipefail
+    git_dir_for() { print -r -- '$git_dir'; }
+    resolve_worktree_path() { print -r -- '$wt_path'; }
+    url_for() { print -r -- 'https://feature-locked.test'; }
+    db_name_for() { print -r -- 'app4__feature_locked'; }
+    is_protected_branch() { return 1; }
+    FORCE=true DELETE_BRANCH=false DROP_DB=false
+    cmd_rm 'app4' 'feature/locked'
+  "
+  [ "$status" -eq 0 ]
+  [ ! -d "$wt_path" ]
+}
