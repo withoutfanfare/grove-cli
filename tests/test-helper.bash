@@ -141,7 +141,18 @@ db_name_for() {
 site_name_for() {
   local repo="$1"
   local branch="$2"
-  local max_length="${3:-59}"
+
+  # Budget = full-hostname ceiling minus the parts that are NOT the label
+  # (".test", a safety buffer, and "<subdomain>." when set). Mirrors lib/03-paths.sh.
+  local max_hostname="${GROVE_MAX_HOSTNAME:-60}"
+  local safety_buffer=4
+  local reserved=$(( 5 + safety_buffer ))
+  if [[ -n "${GROVE_URL_SUBDOMAIN:-}" ]]; then
+    reserved=$(( reserved + ${#GROVE_URL_SUBDOMAIN} + 1 ))
+  fi
+  local computed_max=$(( max_hostname - reserved ))
+  (( computed_max < 10 )) && computed_max=10
+  local max_length="${3:-$computed_max}"
 
   local site_name
 
