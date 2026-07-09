@@ -164,6 +164,50 @@ teardown() {
 }
 
 # ============================================================================
+# Hostname length budget (subdomain + .test must fit Herd's limit)
+# ============================================================================
+
+@test "site_name_for: short branch with subdomain is not truncated" {
+  export GROVE_URL_SUBDOMAIN="charity-meals"
+  result="$(site_name_for "scooda" "scooda-1799")"
+  [ "$result" = "scooda-1799" ]
+}
+
+@test "url_for: long branch with subdomain keeps full hostname within budget" {
+  export GROVE_URL_SUBDOMAIN="charity-meals"
+  url="$(url_for "scooda" "danielharding/scooda-1799-some-very-long-descriptive-branch-name")"
+  host="${url#https://}"
+  # Full hostname must stay safely under Herd's ~60-char limit (buffer included).
+  [ "${#host}" -le 56 ]
+}
+
+@test "site_name_for: long branch with subdomain still ends in uniqueness hash" {
+  export GROVE_URL_SUBDOMAIN="charity-meals"
+  result="$(site_name_for "scooda" "danielharding/scooda-1799-some-very-long-descriptive-branch-name")"
+  [[ "$result" =~ -[0-9a-f]{6}$ ]]
+}
+
+@test "site_name_for: tighter budget when subdomain is set than when not" {
+  branch="feature/a-fairly-long-branch-name-that-exceeds-the-tighter-budget-easily"
+  without="$(site_name_for "myapp" "$branch")"
+  export GROVE_URL_SUBDOMAIN="charity-meals"
+  with="$(site_name_for "myapp" "$branch")"
+  # The subdomain eats into the label budget, so the label must be shorter.
+  [ "${#with}" -lt "${#without}" ]
+}
+
+@test "folder name and url label match for a long subdomain branch" {
+  export GROVE_URL_SUBDOMAIN="charity-meals"
+  branch="danielharding/scooda-1799-some-very-long-descriptive-branch-name"
+  path="$(worktree_path_for "scooda" "$branch")"
+  url="$(url_for "scooda" "$branch")"
+  path_site="${path##*/}"
+  url_site="${url#https://charity-meals.}"
+  url_site="${url_site%.test}"
+  [ "$path_site" = "$url_site" ]
+}
+
+# ============================================================================
 # url_for() tests - with subdomain
 # ============================================================================
 

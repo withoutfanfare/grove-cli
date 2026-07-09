@@ -23,11 +23,30 @@ slugify_branch() {
   slugify_string "$1"
 }
 
-# site_name_for — Generate SSL-safe site name (≤59 chars) for a worktree domain
+# site_name_for — Generate an SSL-safe site label for a worktree domain.
+#
+# The label is used BOTH as the worktree folder name AND as the host label in
+# the Herd URL: [<subdomain>.]<label>.test. It must therefore be short enough
+# that the *entire* hostname — including any GROVE_URL_SUBDOMAIN prefix and the
+# ".test" suffix — stays within Herd's length limit. Herd's exact ceiling is
+# unconfirmed (reportedly ~60, and it is unclear whether ".test" counts), so we
+# default conservatively and keep a safety buffer. The budget subtracts every
+# part of the hostname that is NOT the label.
 site_name_for() {
   local repo="$1"
   local branch="$2"
-  local max_length="${3:-59}"  # Default 59 for SSL compatibility
+
+  local max_hostname="${GROVE_MAX_HOSTNAME:-60}"   # full-hostname ceiling
+  local safety_buffer=4                            # headroom while the exact limit is unconfirmed
+  local reserved=$(( 5 + safety_buffer ))          # ".test" (5) + buffer
+  if [[ -n "${GROVE_URL_SUBDOMAIN:-}" ]]; then
+    reserved=$(( reserved + ${#GROVE_URL_SUBDOMAIN} + 1 ))   # "<subdomain>."
+  fi
+  local computed_max=$(( max_hostname - reserved ))
+  # Floor: a very long subdomain must not drive the budget to nonsense; always
+  # leave room for the "wt-" fallback plus the 6-char uniqueness hash.
+  (( computed_max < 10 )) && computed_max=10
+  local max_length="${3:-$computed_max}"  # explicit caller arg still wins
 
   local site_name
 

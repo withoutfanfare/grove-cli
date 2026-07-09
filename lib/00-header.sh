@@ -15,6 +15,7 @@ readonly _GROVE_UID="$(id -u)"
 
 # URL generation defaults
 GROVE_URL_SUBDOMAIN="${GROVE_URL_SUBDOMAIN:-}"  # Optional subdomain prefix (e.g., "api" -> api.feature-name.test)
+GROVE_MAX_HOSTNAME="${GROVE_MAX_HOSTNAME:-60}"  # Max length of the full Herd hostname [<subdomain>.]<label>.test
 
 # Database defaults
 DB_HOST="${GROVE_DB_HOST:-127.0.0.1}"
