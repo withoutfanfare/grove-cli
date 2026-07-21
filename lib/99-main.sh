@@ -11,6 +11,7 @@ usage() {
   print -r -- "${C_BOLD}CORE COMMANDS${C_RESET}"
   print -r -- "  ${C_GREEN}add${C_RESET}      ${C_DIM}<repo> <branch> [base]${C_RESET}     Create worktree"
   print -r -- "           ${C_DIM}--template=<name>, -t <name>${C_RESET}  Use template"
+  print -r -- "           ${C_DIM}--dir <name> (alias --as)${C_RESET}     Custom short folder/URL/DB name"
   print -r -- "           ${C_DIM}--dry-run${C_RESET}                     Preview without creating"
   print -r -- "           ${C_DIM}--interactive, -i${C_RESET}             Guided creation wizard"
   print -r -- "  ${C_GREEN}rm${C_RESET}       ${C_DIM}<repo> [branch]${C_RESET}            Remove worktree"
@@ -212,6 +213,21 @@ parse_flags() {
           die "Template name required after -t flag"
         fi
         GROVE_TEMPLATE="$1"
+        ;;
+      --dir=*|--as=*)
+        GROVE_DIR="${1#*=}"
+        if [[ -z "$GROVE_DIR" ]]; then
+          setup_colors
+          die "Worktree dir name cannot be empty"
+        fi
+        ;;
+      --dir|--as)
+        shift
+        if [[ -z "${1:-}" || "$1" == -* ]]; then
+          setup_colors
+          die "Worktree dir name required after --dir/--as flag"
+        fi
+        GROVE_DIR="$1"
         ;;
       -v|--version) show_version=true ;;
       -h|--help|help) setup_colors; usage; exit 0 ;;

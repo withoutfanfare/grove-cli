@@ -142,6 +142,8 @@ _grove() {
     '--no-backup[Skip database backup when removing worktree]'
     '--all-repos[Apply operation to all repositories]'
     '--template=[Use worktree template]:template:'
+    '--dir[Custom worktree folder/URL/DB name (alias --as)]:name:'
+    '--as[Custom worktree folder/URL/DB name (alias --dir)]:name:'
     '--check[Check for updates (with version command)]'
     '(-v --version)'{-v,--version}'[Show version]'
     '(-h --help)'{-h,--help}'[Show help]'

@@ -117,19 +117,36 @@ cmd_add() {
     warn "Note: 'origin/' prefix will be stripped from branch name"
   fi
 
-  local wt_path; wt_path="$(worktree_path_for "$repo" "$branch")"
-  local app_url; app_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+  # The folder / URL / DB derive from the branch name, UNLESS --dir/--as gives a
+  # custom name. That lets an existing long-named branch (e.g. user/very-long-…)
+  # live in a short folder so the Herd '.test' domain stays within the SSL cap,
+  # while the checked-out git branch is still the real branch.
+  local derive_name="$branch"
+  if [[ -n "$GROVE_DIR" ]]; then
+    slugify_branch "$GROVE_DIR"
+    if [[ -z "$REPLY" ]]; then
+      error_exit "INVALID_INPUT" "--dir/--as value '$GROVE_DIR' slugifies to empty" 2
+    fi
+    derive_name="$REPLY"
+  fi
 
-  # Check if site name was shortened for SSL compatibility
-  slugify_branch "$branch"
-  local full_slug="$REPLY"
-  local full_site_name="${repo}--${full_slug}"
-  local actual_site_name="${wt_path:t}"
-  if [[ "$full_site_name" != "$actual_site_name" ]]; then
-    dim "Site name shortened for SSL compatibility"
-    dim "  Full: $full_site_name (${#full_site_name} chars)"
-    dim "  Used: $actual_site_name (${#actual_site_name} chars)"
+  local wt_path; wt_path="$(worktree_path_for "$repo" "$derive_name")"
+  local app_url; app_url="$(url_for "$repo" "$derive_name")"
+  local db_name; db_name="$(db_name_for "$repo" "$derive_name")"
+
+  if [[ -n "$GROVE_DIR" ]]; then
+    dim "Using custom worktree dir: ${wt_path:t} (branch: $branch)"
+  else
+    # Check if site name was shortened for SSL compatibility
+    slugify_branch "$branch"
+    local full_slug="$REPLY"
+    local full_site_name="${repo}--${full_slug}"
+    local actual_site_name="${wt_path:t}"
+    if [[ "$full_site_name" != "$actual_site_name" ]]; then
+      dim "Site name shortened for SSL compatibility"
+      dim "  Full: $full_site_name (${#full_site_name} chars)"
+      dim "  Used: $actual_site_name (${#actual_site_name} chars)"
+    fi
   fi
 
   # Dry-run mode - show what would happen without executing
@@ -157,8 +174,14 @@ cmd_add() {
     fi
     print -r -- "${C_BOLD}Actions:${C_RESET}"
     print -r -- "  1. Fetch latest branches from remote"
+    # Match the real add: an existing branch (local OR remote) is checked out
+    # with tracking and is NOT pushed. Only a genuinely new branch is created
+    # from base and pushed. Checking the remote here (not just refs/heads) keeps
+    # the preview honest for remote-only branches.
     if git --git-dir="$git_dir" show-ref --quiet "refs/heads/$branch" 2>/dev/null; then
-      print -r -- "  2. Create worktree from existing branch: $branch"
+      print -r -- "  2. Create worktree from existing local branch: $branch"
+    elif remote_branch_exists "$git_dir" "$branch"; then
+      print -r -- "  2. Create worktree from existing remote branch: origin/$branch (tracking, no push)"
     else
       print -r -- "  2. Create new branch '$branch' from '$base'"
       print -r -- "  3. Push branch to remote and set up tracking"

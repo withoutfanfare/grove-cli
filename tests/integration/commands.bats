@@ -90,6 +90,7 @@ run_grove() {
   [[ "$output" == *"--dry-run"* ]]
   [[ "$output" == *"--pretty"* ]]
   [[ "$output" == *"--template"* ]]
+  [[ "$output" == *"--dir"* ]]
 }
 
 @test "grove --help: lists summary command" {
@@ -158,6 +159,28 @@ run_grove() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Registered app: testapp"* ]]
   grep -q "^testapp|testsys|horizon:reverb|testsys:\*|testapp.test$" "$TEST_TEMP_DIR/.grove/services/apps.conf"
+}
+
+# ============================================================================
+# --dir / --as flag (custom worktree folder name)
+# ============================================================================
+
+@test "add --dir: rejects empty value (--dir=)" {
+  run_grove add testrepo somebranch --dir=
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot be empty"* ]]
+}
+
+@test "add --as: rejects empty value (--as=)" {
+  run_grove add testrepo somebranch --as=
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot be empty"* ]]
+}
+
+@test "add --dir: requires a value when given as a bare flag at end" {
+  run_grove add testrepo somebranch --dir
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"required after --dir/--as"* ]]
 }
 
 # ============================================================================
