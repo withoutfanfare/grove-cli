@@ -183,6 +183,28 @@ run_grove() {
   [[ "$output" == *"required after --dir/--as"* ]]
 }
 
+@test "add --dir: uses alias for path URL and database while keeping branch" {
+  local seed="$TEST_TEMP_DIR/seed"
+  local branch="danielharding/scooda-pci-mfa-password-hardening"
+  mkdir -p "$TEST_TEMP_DIR/home"
+  git init -q -b main "$seed"
+  git -C "$seed" config user.email test@example.invalid
+  git -C "$seed" config user.name Grove-Test
+  git -C "$seed" commit -q --allow-empty -m init
+  git -C "$seed" branch "$branch"
+  git clone -q --bare "$seed" "$HERD_ROOT/testrepo.git"
+
+  HOME="$TEST_TEMP_DIR/home" PATH="/usr/bin:/bin" run_grove \
+    add testrepo "$branch" --dir pci-auth --json
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"path\": \"$HERD_ROOT/testrepo-worktrees/pci-auth\""* ]]
+  [[ "$output" == *'"url": "https://pci-auth.test"'* ]]
+  [[ "$output" == *'"database": "testrepo__pci_auth"'* ]]
+  [[ "$output" == *"\"branch\": \"$branch\""* ]]
+  [ "$(git -C "$HERD_ROOT/testrepo-worktrees/pci-auth" branch --show-current)" = "$branch" ]
+}
+
 # ============================================================================
 # Validation - error cases
 # ============================================================================

@@ -14,22 +14,14 @@ GROVE_SERVICES_CONF="$GROVE_SERVICES_DIR/apps.conf"
 GROVE_SUPERVISOR_D="/opt/homebrew/etc/supervisor.d"
 GROVE_LAUNCH_AGENTS="${GROVE_LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
 
-# svc_ensure_tool_path — Append Homebrew and Herd bin dirs to PATH when missing.
+# svc_ensure_tool_path — Normalise PATH and configure Herd PHP when missing.
 # GUI/minimal environments (the Grove desktop app's sidecar, cron, launchd)
 # start with a bare PATH, so brew/supervisorctl/redis-cli would be "not found"
 # and every daemon check would falsely report Not running. Herd's bin dir is
 # included for machines with no Homebrew PHP, where the Horizon check would
-# otherwise report "Unknown (php not installed)". Appending (not prepending)
-# preserves any user-chosen tool versions already on PATH.
+# otherwise report "Unknown (php not installed)".
 svc_ensure_tool_path() {
-  local p
-  for p in /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /usr/local/sbin \
-           "$HOME/Library/Application Support/Herd/bin"; do
-    if [[ -d "$p" && ":$PATH:" != *":$p:"* ]]; then
-      PATH="$PATH:$p"
-    fi
-  done
-  export PATH
+  ensure_tool_path
 
   # Herd's PHP binaries locate php.ini via HERD_PHP_<ver>_INI_SCAN_DIR, which
   # Herd's shell rc sets but minimal environments lack. Without it Herd PHP
