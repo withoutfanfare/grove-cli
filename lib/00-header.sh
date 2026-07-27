@@ -35,6 +35,11 @@ GROVE_TEMPLATES_DIR="${GROVE_TEMPLATES_DIR:-$HOME/.grove/templates}"
 # Active template (set via --template flag)
 GROVE_TEMPLATE=""
 
+# Custom worktree directory/site name (set via --dir/--as flag). When set, the
+# worktree folder, Herd URL and database derive from this instead of the branch
+# name — lets an existing long-named branch live in a short, SSL-valid folder.
+GROVE_DIR=""
+
 # Global flags
 QUIET=false
 FORCE=false

@@ -23,6 +23,21 @@ _get_now() {
   print -r -- "$_GROVE_NOW"
 }
 
+# ensure_tool_path — Append standard package-manager, Herd, and system tool
+# directories when missing. Existing entries stay first so callers retain
+# their intentionally selected tool versions.
+ensure_tool_path() {
+  local p
+  for p in /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /usr/local/sbin \
+           "$HOME/Library/Application Support/Herd/bin" \
+           /usr/bin /bin /usr/sbin /sbin; do
+    if [[ -d "$p" && ":${PATH:-}:" != *":$p:"* ]]; then
+      PATH="${PATH:+$PATH:}$p"
+    fi
+  done
+  export PATH
+}
+
 # Read a config file and call a handler function for each valid key/value pair
 # Usage: _read_config_pairs <file> <handler_function>
 # The handler receives two arguments: clean key and clean value

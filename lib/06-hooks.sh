@@ -69,6 +69,7 @@ _run_single_hook() {
   # The subshell's exit status (and therefore this function's return value) is
   # the hook's own exit status, so callers can gate on pre-* hook failures.
   (
+    ensure_tool_path
     export GROVE_REPO="$repo"
     export GROVE_BRANCH="$branch"
     export GROVE_BRANCH_SLUG="$branch_slug"

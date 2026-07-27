@@ -40,6 +40,7 @@ run_hooks_isolated() {
   NO_COLOR=1 \
   run zsh -c "
     # Minimal environment to source hook functions
+    source '$GROVE_ROOT/lib/01-core.sh'
     C_CYAN='' C_RESET='' C_GREEN='' C_YELLOW='' C_DIM=''
     NO_BACKUP=false DROP_DB=false
     info() { echo \"\$*\"; }
@@ -196,6 +197,30 @@ HOOKEOF
   run_hooks_isolated "post-add"
   [ "$status" -eq 0 ]
   grep -q "GROVE_HOOK_NAME=post-add" "$HOOK_LOG"
+}
+
+@test "hooks: normalise minimal PATH without replacing caller entries" {
+  local fake_home="$TEST_TEMP_DIR/home"
+  local custom_bin="$TEST_TEMP_DIR/custom-bin"
+  local herd_bin="$fake_home/Library/Application Support/Herd/bin"
+  mkdir -p "$custom_bin"
+  create_hook "$herd_bin/composer" "exit 0"
+  create_hook "$herd_bin/grove-path-probe" "exit 0"
+  create_hook "$GROVE_HOOKS_DIR/post-add.d/01-path.sh" \
+    "printf '%s\\n' \"\$PATH\" > '$HOOK_LOG'
+command -v composer >> '$HOOK_LOG'
+command -v grove-path-probe >> '$HOOK_LOG'"
+
+  HOME="$fake_home" PATH="$custom_bin:/usr/bin:/bin" run_hooks_isolated "post-add"
+  [ "$status" -eq 0 ]
+
+  local hook_path composer_path herd_probe_path
+  hook_path="$(sed -n '1p' "$HOOK_LOG")"
+  composer_path="$(sed -n '2p' "$HOOK_LOG")"
+  herd_probe_path="$(sed -n '3p' "$HOOK_LOG")"
+  [[ "$hook_path" == "$custom_bin:/usr/bin:/bin:"* ]]
+  [[ "$composer_path" == */composer ]]
+  [ "$herd_probe_path" = "$herd_bin/grove-path-probe" ]
 }
 
 @test "hooks: all environment variables set in single hook file" {
@@ -500,6 +525,7 @@ EOF
   GROVE_HOOKS_DIR="$GROVE_HOOKS_DIR" \
   NO_COLOR=1 \
   run zsh -c "
+    source '$GROVE_ROOT/lib/01-core.sh'
     C_CYAN='' C_RESET='' C_GREEN='' C_YELLOW='' C_DIM=''
     NO_BACKUP=true DROP_DB=false
     info() { echo \"\$*\"; }
@@ -522,6 +548,7 @@ EOF
   GROVE_HOOKS_DIR="$GROVE_HOOKS_DIR" \
   NO_COLOR=1 \
   run zsh -c "
+    source '$GROVE_ROOT/lib/01-core.sh'
     C_CYAN='' C_RESET='' C_GREEN='' C_YELLOW='' C_DIM=''
     NO_BACKUP=false DROP_DB=true
     info() { echo \"\$*\"; }
