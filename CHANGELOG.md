@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`services apps --json` honours `--pretty`** - The command now routes through the shared JSON formatter like every other JSON command
 
 ### Fixed
+- **Bulk-ops danger guard covers more block devices** - The destructive-command check before `exec-all`/`build-all` now also prompts for redirection to `/dev/vd*`, `/dev/xvd*`, `/dev/md*`, `/dev/mapper/*`, and `/dev/dm-*` devices, not just macOS/SCSI/NVMe names
+- **Storage guard refuses dirty `.gitignore` sentinels** - The `02a-guard-local-storage.sh` pre-removal hook now blocks removal when a tracked `storage/app` `.gitignore` has staged or unstaged changes, so local edits cannot be silently discarded
+- **Composer hook reads quoted and commented `APP_KEY` values correctly** - Values such as `APP_KEY="" # comment` are now parsed like the config loader (closing quote ends the value, unquoted values lose a trailing ` # comment`), so an effectively empty key triggers `key:generate` and a real key with a trailing comment is preserved
 - **`grove rm -f` removes worktrees locked by other tools** - A worktree locked with `git worktree lock` (as the Supacode CLI/app does on every worktree it creates) refuses a single `--force`, so `grove rm -f` aborted with `cannot remove a locked working tree`. With `-f` the user has asked for removal regardless, so grove now unlocks and retries automatically; this also unblocks the Grove desktop app, which shells out to the same `grove rm`
 - **Repair integrity check covered every worktree but the last** - The porcelain parsing loop dropped the trailing blank line, so the final worktree of each repository was never integrity-checked; it is now included
 - **Repair no longer leaks `gitdir_content='...'` onto stdout** - A `local` re-declaration inside the integrity loop made zsh print the variable's previous value from the second worktree onward, corrupting machine-readable output

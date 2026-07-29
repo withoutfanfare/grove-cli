@@ -341,7 +341,7 @@ named after your own repo.
 |------|---------|
 | `01-backup-database.sh` | Back up the database before removal; stop removal if a required backup cannot be made (respects `DB_BACKUP`) |
 | `02-backup-env.sh` | Back up a real `.env` as `0600`; stop removal if its private backup cannot be made |
-| `02a-guard-local-storage.sh` | Stop removal unless a real `storage/app` contains only directories and Git-tracked `.gitignore` sentinels; symlinks are allowed only when they resolve outside the worktree |
+| `02a-guard-local-storage.sh` | Stop removal unless a real `storage/app` contains only directories and Git-tracked `.gitignore` sentinels with no uncommitted changes; symlinks are allowed only when they resolve outside the worktree |
 
 ### Post-removal hooks (`post-rm.d/`)
 
