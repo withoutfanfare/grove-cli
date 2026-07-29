@@ -10,8 +10,27 @@ echo "  Worktree removed: ${GROVE_PATH##*/}"
 PROJECTS_FILE="$HOME/.projects"
 PROJECT_KEY="${GROVE_PATH##*/}"
 
-if [[ -f "$PROJECTS_FILE" ]] && grep -q "^${PROJECT_KEY}=" "$PROJECTS_FILE" 2>/dev/null; then
-  grep -v "^${PROJECT_KEY}=" "$PROJECTS_FILE" > "${PROJECTS_FILE}.tmp"
-  mv "${PROJECTS_FILE}.tmp" "$PROJECTS_FILE"
+if [[ -L "$PROJECTS_FILE" ]]; then
+  echo "  Refusing to replace symlinked project registry: $PROJECTS_FILE"
+  exit 1
+fi
+
+if [[ -f "$PROJECTS_FILE" ]]; then
+  projects_tmp="$(mktemp "${PROJECTS_FILE}.tmp.XXXXXX")" || exit 1
+  found=false
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$PROJECT_KEY="* ]]; then
+      found=true
+    else
+      printf '%s\n' "$line" >> "$projects_tmp"
+    fi
+  done < "$PROJECTS_FILE"
+
+  if [[ "$found" != "true" ]]; then
+    rm -f "$projects_tmp"
+    exit 0
+  fi
+
+  mv "$projects_tmp" "$PROJECTS_FILE"
   echo "  Unregistered project: ${PROJECT_KEY}"
 fi

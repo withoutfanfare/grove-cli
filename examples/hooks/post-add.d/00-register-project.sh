@@ -16,10 +16,11 @@
 PROJECTS_FILE="$HOME/.projects"
 PROJECT_KEY="${GROVE_PATH##*/}"
 
-# Add or update the entry
-if grep -q "^${PROJECT_KEY}=" "$PROJECTS_FILE" 2>/dev/null; then
-  # Already registered
-  exit 0
+# Add the entry unless its literal key is already present.
+if [[ -f "$PROJECTS_FILE" ]]; then
+  while IFS='=' read -r key _; do
+    [[ "$key" == "$PROJECT_KEY" ]] && exit 0
+  done < "$PROJECTS_FILE"
 fi
 
 echo "${PROJECT_KEY}=${GROVE_PATH}" >> "$PROJECTS_FILE"

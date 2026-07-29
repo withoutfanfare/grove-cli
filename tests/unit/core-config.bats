@@ -140,6 +140,22 @@ _core() {
   [[ "$output" == *"VAL=pass#word"* ]]
 }
 
+@test "quoted config value preserves # before a trailing comment" {
+  local cfg="$TEST_TEMP_DIR/.groverc"
+  printf 'DB_PASSWORD="placeholder#fragment" # local credential\n' > "$cfg"
+  _core "_apply() { [[ \"\$1\" == DB_PASSWORD ]] && print -r -- \"VAL=\$2\"; }; _read_config_pairs '$cfg' _apply"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VAL=placeholder#fragment"* ]]
+}
+
+@test "quoted config value does not stop at an escaped quote" {
+  local cfg="$TEST_TEMP_DIR/.groverc"
+  printf '%s\n' 'DB_PASSWORD="pa\"ss#word" # local credential' > "$cfg"
+  _core "_apply() { [[ \"\$1\" == DB_PASSWORD ]] && print -r -- \"VAL=\$2\"; }; _read_config_pairs '$cfg' _apply"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'VAL=pa\"ss#word'* ]]
+}
+
 @test "config value with trailing ' # comment' strips only the comment" {
   local cfg="$TEST_TEMP_DIR/.groverc"
   printf 'DB_HOST=localhost   # primary host\n' > "$cfg"

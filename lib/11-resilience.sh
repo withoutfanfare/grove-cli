@@ -145,7 +145,14 @@ check_disk_space() {
   local min_mb="${2:-1024}"  # Default 1GB
 
   local available_kb
-  available_kb=$(df -k "$target_path" 2>/dev/null | tail -1 | awk '{print $4}')
+  if ! available_kb=$(df -Pk "$target_path" 2>/dev/null | awk 'NR == 2 { print $4 }'); then
+    warn "Could not determine available disk space for '$target_path'"
+    return 0
+  fi
+  if [[ ! "$available_kb" =~ ^[0-9]+$ ]]; then
+    warn "Could not determine available disk space for '$target_path'"
+    return 0
+  fi
   local available_mb=$((available_kb / 1024))
 
   if (( available_mb < min_mb )); then

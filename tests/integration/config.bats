@@ -115,6 +115,29 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "cmd_alias add/rm: handles a sole entry under set -e" {
+  mkdir -p "$TEST_TEMP_DIR/.grove"
+  printf 'only=repo/old\n' > "$TEST_TEMP_DIR/.grove/aliases"
+
+  run_cfg "set -e; cmd_alias add only repo/new"
+  [ "$status" -eq 0 ]
+  [ "$(<"$TEST_TEMP_DIR/.grove/aliases")" = "only=repo/new" ]
+
+  run_cfg "set -e; cmd_alias rm only"
+  [ "$status" -eq 0 ]
+  [ ! -s "$TEST_TEMP_DIR/.grove/aliases" ]
+}
+
+@test "cmd_alias rm: rejects regex input without changing aliases" {
+  mkdir -p "$TEST_TEMP_DIR/.grove"
+  printf 'one=repo/a\ntwo=repo/b\n' > "$TEST_TEMP_DIR/.grove/aliases"
+
+  run_cfg "cmd_alias rm '.*'"
+
+  [ "$status" -eq 2 ]
+  [ "$(cat "$TEST_TEMP_DIR/.grove/aliases")" = $'one=repo/a\ntwo=repo/b' ]
+}
+
 # ============================================================================
 # #13 / P3 — alias target validation rejects '=' and leading dash
 # ============================================================================
@@ -150,6 +173,29 @@ EOF
   # Nothing should have been written for the group.
   run grep -q '^mygroup=' "$TEST_TEMP_DIR/.grove/groups"
   [ "$status" -ne 0 ]
+}
+
+@test "cmd_group add/rm: handles a sole entry under set -e" {
+  mkdir -p "$TEST_TEMP_DIR/.grove" "$TEST_TEMP_DIR/repos/repo/.git"
+  printf 'only=repo\n' > "$TEST_TEMP_DIR/.grove/groups"
+
+  run_cfg "set -e; cmd_group add only repo"
+  [ "$status" -eq 0 ]
+  [ "$(<"$TEST_TEMP_DIR/.grove/groups")" = "only=repo" ]
+
+  run_cfg "set -e; cmd_group rm only"
+  [ "$status" -eq 0 ]
+  [ ! -s "$TEST_TEMP_DIR/.grove/groups" ]
+}
+
+@test "cmd_group rm: rejects regex input without changing groups" {
+  mkdir -p "$TEST_TEMP_DIR/.grove"
+  printf 'one=repo-a\ntwo=repo-b\n' > "$TEST_TEMP_DIR/.grove/groups"
+
+  run_cfg "cmd_group rm '.*'"
+
+  [ "$status" -eq 2 ]
+  [ "$(cat "$TEST_TEMP_DIR/.grove/groups")" = $'one=repo-a\ntwo=repo-b' ]
 }
 
 # ============================================================================

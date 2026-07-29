@@ -230,7 +230,7 @@ parse_flags() {
         GROVE_DIR="$1"
         ;;
       -v|--version) show_version=true ;;
-      -h|--help|help) setup_colors; usage; exit 0 ;;
+      -h|--help) setup_colors; usage; exit 0 ;;
       -n)
         # -n is used by grove log for limiting commit count - pass through to command
         REMAINING_ARGS+=("$1")
@@ -352,6 +352,7 @@ main() {
     group)        cmd_group "$@" ;;
     share-deps)   cmd_share_deps "$@" ;;
     services)     cmd_services "$@" ;;
+    help)         usage ;;
     "")           usage ;;
     *)            die "Unknown command: $cmd (try: grove --help)" ;;
   esac

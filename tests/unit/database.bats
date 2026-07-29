@@ -130,3 +130,120 @@ db_name_for() {
   result="$(db_name_for "myapp" "main")"
   [ "$result" = "myapp__main" ]
 }
+
+@test "database helpers reject unsafe names before invoking mysql" {
+  run zsh -c '
+    warn() { print -r -- "$*"; }
+    source "$1/lib/05-database.sh"
+    DB_CREATE=true DB_BACKUP=true
+    _validate_database_name "app\`; SELECT 1; --"
+  ' _ "$GROVE_ROOT"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid database name"* ]]
+}
+
+@test "backup_database fails closed when mysqldump is unavailable" {
+  mkdir -p "$TEST_TEMP_DIR/bin"
+  cat > "$TEST_TEMP_DIR/bin/mysql" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "$TEST_TEMP_DIR/bin/mysql"
+
+  run env PATH="$TEST_TEMP_DIR/bin:/usr/bin:/bin" zsh -c '
+    warn() { print -r -- "$*"; }
+    dim() { :; }
+    source "$1/lib/05-database.sh"
+    DB_BACKUP=true DB_HOST=localhost DB_USER=root DB_BACKUP_DIR="$2/backups"
+    backup_database app__feature app
+  ' _ "$GROVE_ROOT" "$TEST_TEMP_DIR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"mysqldump not found"* ]]
+}
+
+@test "backup_database fails closed when the existence query fails" {
+  mkdir -p "$TEST_TEMP_DIR/bin"
+  cat > "$TEST_TEMP_DIR/bin/mysql" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *information_schema*) exit 42 ;;
+esac
+exit 0
+EOF
+  cat > "$TEST_TEMP_DIR/bin/mysqldump" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "$TEST_TEMP_DIR/bin/mysql" "$TEST_TEMP_DIR/bin/mysqldump"
+
+  run env PATH="$TEST_TEMP_DIR/bin:/usr/bin:/bin" zsh -c '
+    warn() { print -r -- "$*"; }
+    dim() { :; }
+    source "$1/lib/05-database.sh"
+    DB_BACKUP=true DB_HOST=localhost DB_USER=root DB_BACKUP_DIR="$2/backups"
+    backup_database app__feature app
+  ' _ "$GROVE_ROOT" "$TEST_TEMP_DIR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Could not check whether database"* ]]
+}
+
+@test "backup_database writes private dump files without changing the caller umask" {
+  mkdir -p "$TEST_TEMP_DIR/bin"
+  cat > "$TEST_TEMP_DIR/bin/mysql" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *information_schema*) printf '1\n' ;;
+esac
+exit 0
+EOF
+  cat > "$TEST_TEMP_DIR/bin/mysqldump" <<'EOF'
+#!/bin/sh
+printf '%s\n' '-- disposable dump'
+EOF
+  chmod +x "$TEST_TEMP_DIR/bin/mysql" "$TEST_TEMP_DIR/bin/mysqldump"
+
+  run env PATH="$TEST_TEMP_DIR/bin:/usr/bin:/bin" zsh -c '
+    warn() { print -r -- "$*"; }
+    dim() { :; }
+    info() { :; }
+    ok() { :; }
+    source "$1/lib/05-database.sh"
+    DB_BACKUP=true DB_HOST=localhost DB_USER=root DB_BACKUP_DIR="$2/backups"
+    umask 022
+    backup_database app__feature app || exit
+    print -r -- "umask=$(umask)"
+  ' _ "$GROVE_ROOT" "$TEST_TEMP_DIR"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"umask=0022"* || "$output" == *"umask=022"* ]]
+  dump_file="$(find "$TEST_TEMP_DIR/backups" -type f -name '*.sql' -print -quit)"
+  [ -n "$dump_file" ]
+  mode="$(stat -f '%Lp' "$dump_file" 2>/dev/null || stat -c '%a' "$dump_file")"
+  [ "$mode" = "600" ]
+}
+
+@test "drop_database fails when the existence query fails" {
+  mkdir -p "$TEST_TEMP_DIR/bin"
+  cat > "$TEST_TEMP_DIR/bin/mysql" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *information_schema*) exit 42 ;;
+esac
+exit 0
+EOF
+  chmod +x "$TEST_TEMP_DIR/bin/mysql"
+
+  run env PATH="$TEST_TEMP_DIR/bin:/usr/bin:/bin" zsh -c '
+    warn() { print -r -- "$*"; }
+    dim() { :; }
+    source "$1/lib/05-database.sh"
+    DB_HOST=localhost DB_USER=root
+    drop_database app__feature
+  ' _ "$GROVE_ROOT"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"database was not dropped"* ]]
+}

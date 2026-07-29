@@ -7,6 +7,7 @@
 load '../test-helper'
 
 setup() {
+  bats_require_minimum_version 1.5.0
   setup_test_environment
 
   # Export grove script path for testing
@@ -73,6 +74,12 @@ run_grove() {
   run_grove help
   [ "$status" -eq 0 ]
   [[ "$output" == *"USAGE"* ]]
+}
+
+@test "bare help is passed through when it is a command argument" {
+  run_grove exec-all definitelymissing echo help
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"CORE COMMANDS"* ]]
 }
 
 @test "grove --help: lists available templates" {
@@ -161,6 +168,36 @@ run_grove() {
   grep -q "^testapp|testsys|horizon:reverb|testsys:\*|testapp.test$" "$TEST_TEMP_DIR/.grove/services/apps.conf"
 }
 
+@test "interactive add: cancelling fzf exits with a clear message under set -e" {
+  run zsh -c '
+    set -e
+    C_BOLD="" C_RESET="" HERD_ROOT="/tmp"
+    fzf(){ return 130; }
+    list_repos(){ print -r -- app; }
+    die(){ print -r -- "$*"; exit 1; }
+    source "$1/lib/10-interactive.sh"
+    interactive_add
+  ' _ "$GROVE_ROOT"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No repository selected"* ]]
+}
+
+@test "interactive add: reports operational fzf failures" {
+  run zsh -c '
+    C_BOLD="" C_RESET="" C_RED="" HERD_ROOT="/tmp"
+    fzf(){ return 2; }
+    list_repos(){ print -r -- app; }
+    die(){ print -r -- "$*" >&2; exit 1; }
+    source "$1/lib/10-interactive.sh"
+    interactive_add
+  ' _ "$GROVE_ROOT"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"fzf failed with exit status 2"* ]]
+  [[ "$output" != *"No repository selected"* ]]
+}
+
 # ============================================================================
 # --dir / --as flag (custom worktree folder name)
 # ============================================================================
@@ -194,15 +231,41 @@ run_grove() {
   git -C "$seed" branch "$branch"
   git clone -q --bare "$seed" "$HERD_ROOT/testrepo.git"
 
-  HOME="$TEST_TEMP_DIR/home" PATH="/usr/bin:/bin" run_grove \
-    add testrepo "$branch" --dir pci-auth --json
+  mkdir -p "$GROVE_HOOKS_DIR/post-add.d" "$GROVE_HOOKS_DIR/post-rm.d"
+  printf '#!/bin/sh\necho post-add-hook-output\n' > "$GROVE_HOOKS_DIR/post-add.d/01-chatty.sh"
+  printf '#!/bin/sh\necho post-rm-hook-output\n' > "$GROVE_HOOKS_DIR/post-rm.d/01-chatty.sh"
+  chmod +x "$GROVE_HOOKS_DIR/post-add.d/01-chatty.sh" "$GROVE_HOOKS_DIR/post-rm.d/01-chatty.sh"
+
+  run --separate-stderr env \
+    HOME="$TEST_TEMP_DIR/home" \
+    PATH="/usr/bin:/bin" \
+    HERD_ROOT="$HERD_ROOT" \
+    GROVE_HOOKS_DIR="$GROVE_HOOKS_DIR" \
+    GROVE_TEMPLATES_DIR="$TEST_TEMP_DIR/.grove/templates" \
+    NO_COLOR=1 \
+    zsh "$GROVE_SCRIPT" add testrepo "$branch" --dir pci-auth --json
 
   [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c 'import json, os; json.loads(os.environ["OUTPUT"])'
+  [[ "$stderr" == *"post-add-hook-output"* ]]
   [[ "$output" == *"\"path\": \"$HERD_ROOT/testrepo-worktrees/pci-auth\""* ]]
   [[ "$output" == *'"url": "https://pci-auth.test"'* ]]
   [[ "$output" == *'"database": "testrepo__pci_auth"'* ]]
   [[ "$output" == *"\"branch\": \"$branch\""* ]]
   [ "$(git -C "$HERD_ROOT/testrepo-worktrees/pci-auth" branch --show-current)" = "$branch" ]
+
+  run --separate-stderr env \
+    HOME="$TEST_TEMP_DIR/home" \
+    PATH="/usr/bin:/bin" \
+    HERD_ROOT="$HERD_ROOT" \
+    GROVE_HOOKS_DIR="$GROVE_HOOKS_DIR" \
+    GROVE_TEMPLATES_DIR="$TEST_TEMP_DIR/.grove/templates" \
+    NO_COLOR=1 \
+    zsh "$GROVE_SCRIPT" rm testrepo "$branch" --force --delete-branch --json
+
+  [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c 'import json, os; json.loads(os.environ["OUTPUT"])'
+  [[ "$stderr" == *"post-rm-hook-output"* ]]
 }
 
 # ============================================================================

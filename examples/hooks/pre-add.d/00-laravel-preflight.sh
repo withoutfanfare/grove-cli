@@ -3,15 +3,10 @@
 #
 # Runs for every `grove add`. Detects setup gaps that would cause first-boot
 # failures (missing Laravel hook link, missing env template, missing primary
-# worktree). Prints guidance but does not abort — creation still proceeds,
-# and the defensive post-add hooks (04-laravel-scaffold.sh,
-# 01a-inherit-db-from-primary.sh) will paper over most issues.
+# worktree). Setup gaps only warn, but an existing local storage/app blocks
+# creation when the shared-storage hook is linked so data cannot be stranded.
 #
-# Set GROVE_SKIP_PREFLIGHT=true to silence.
-
-if [[ "${GROVE_SKIP_PREFLIGHT:-}" == "true" ]]; then
-  exit 0
-fi
+# Set GROVE_SKIP_PREFLIGHT=true to silence warnings. Safety checks still run.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$SCRIPT_DIR/../_lib/load-config.sh" ]]; then
@@ -37,6 +32,26 @@ if [[ "$is_laravel" != "true" ]]; then
   exit 0
 fi
 
+storage_hook="${HOOKS_DIR}/${GROVE_REPO}/05-symlink-storage.sh"
+bundled_storage_hook="${HOOKS_DIR}/_laravel/05-symlink-storage.sh"
+storage_target="${primary}/storage/app"
+if [[ -e "$bundled_storage_hook" && "$storage_hook" -ef "$bundled_storage_hook" ]] &&
+   [[ -d "$storage_target" ]] && [[ ! -L "$storage_target" ]]; then
+  if ! storage_entry="$(find "$storage_target" -mindepth 1 -print -quit 2>/dev/null)"; then
+    echo "Error: Cannot inspect ${storage_target}; refusing to create another worktree while shared storage is enabled." >&2
+    exit 1
+  fi
+  if [[ -n "$storage_entry" ]]; then
+    echo "Error: ${storage_target} contains local files, but ${GROVE_REPO} is linked to the shared-storage hook." >&2
+    echo "Move or back up those files and link storage/app safely, or remove the repo's 05-symlink-storage.sh hook and configure an external storage root in the application." >&2
+    exit 1
+  fi
+fi
+
+if [[ "${GROVE_SKIP_PREFLIGHT:-}" == "true" ]]; then
+  exit 0
+fi
+
 warnings=()
 fixes=()
 
@@ -51,7 +66,7 @@ template_env="${TEMPLATE_ROOT}/${GROVE_REPO}/${GROVE_REPO}-env/.env"
 if [[ ! -f "$template_env" ]]; then
   if [[ -f "${primary}/.env" ]]; then
     warnings+=("No env template at ${template_env} — new worktree will copy .env.example (may have stale DB name).")
-    fixes+=("mkdir -p $(dirname "$template_env") && cp ${primary}/.env ${primary}/.env.example $(dirname "$template_env")/")
+    fixes+=("install -d -m 700 '$(dirname "$template_env")' && install -m 600 '${primary}/.env' '${template_env}'")
   fi
 fi
 

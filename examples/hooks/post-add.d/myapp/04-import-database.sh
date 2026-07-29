@@ -11,6 +11,8 @@
 #
 # The import runs AFTER the database is created by the global hook.
 
+set -o pipefail
+
 # Define the source path
 DB_DUMP="$HOME/Code/Worktree/${GROVE_REPO}/${GROVE_REPO}-db/${GROVE_REPO}.sql.gz"
 
@@ -21,30 +23,49 @@ if [[ ! -f "$DB_DUMP" ]]; then
 fi
 
 # Load grove config for database settings
-if [[ -f "$HOME/.groverc" ]]; then
-  DB_HOST="${DB_HOST:-$(grep '^DB_HOST=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
-  DB_USER="${DB_USER:-$(grep '^DB_USER=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
-  DB_PASSWORD="${DB_PASSWORD:-$(grep '^DB_PASSWORD=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ -f "$SCRIPT_DIR/../../_lib/load-config.sh" ]]; then
+  source "$SCRIPT_DIR/../../_lib/load-config.sh"
+else
+  echo "  Config loader not found - cannot safely import database"
+  exit 1
 fi
 
-DB_HOST="${DB_HOST:-127.0.0.1}"
-DB_USER="${DB_USER:-root}"
-DB_PASSWORD="${DB_PASSWORD:-}"
+if [[ "$DB_CREATE" != "true" || "${GROVE_SKIP_DB:-}" == "true" ]]; then
+  echo "  Skipping database import (DB_CREATE=$DB_CREATE)"
+  exit 0
+fi
+
+grove_validate_database_name "${GROVE_DB_NAME:-}" || exit 1
 
 if ! command -v mysql >/dev/null 2>&1; then
   echo "  MySQL client not found - cannot import database"
   exit 0
 fi
 
+if [[ "${GROVE_FORCE_DB_IMPORT:-}" != "true" ]]; then
+  if ! table_count=$(MYSQL_PWD="${DB_PASSWORD:-}" mysql -h "$DB_HOST" -u "$DB_USER" -N -B \
+      -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='${GROVE_DB_NAME}';" 2>/dev/null); then
+    echo "  Could not inspect database - refusing seed import"
+    exit 1
+  fi
+  if [[ ! "$table_count" =~ ^[0-9]+$ ]]; then
+    echo "  Unexpected database inspection result - refusing seed import"
+    exit 1
+  fi
+  if (( table_count > 0 )); then
+    echo "  Database already contains tables - skipping seed import"
+    exit 0
+  fi
+fi
+
 # Build mysql command
 mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
-# Use MYSQL_PWD env var instead of -p to keep the password out of 'ps' output
-[[ -n "$DB_PASSWORD" ]] && export MYSQL_PWD="$DB_PASSWORD"
 
 echo "  Importing database from $DB_DUMP..."
 
 # Decompress and import
-if gunzip -c "$DB_DUMP" | "${mysql_cmd[@]}" "$GROVE_DB_NAME" 2>/dev/null; then
+if gunzip -c "$DB_DUMP" | MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" "$GROVE_DB_NAME" 2>/dev/null; then
   echo "  Database imported successfully"
   exit 0
 else

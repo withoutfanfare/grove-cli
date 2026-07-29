@@ -22,11 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$SCRIPT_DIR/../_lib/load-config.sh" ]]; then
   source "$SCRIPT_DIR/../_lib/load-config.sh"
 else
-  echo "  Warning: Config loader not found, using defaults"
-  DB_CREATE="${DB_CREATE:-true}"
-  DB_HOST="${DB_HOST:-127.0.0.1}"
-  DB_USER="${DB_USER:-root}"
-  DB_PASSWORD="${DB_PASSWORD:-}"
+  echo "  Config loader not found - cannot safely create database"
+  exit 1
 fi
 
 # Check if database creation is enabled
@@ -34,6 +31,8 @@ if [[ "$DB_CREATE" != "true" ]]; then
   echo "  Skipping database creation (DB_CREATE=$DB_CREATE)"
   exit 0
 fi
+
+grove_validate_database_name "${GROVE_DB_NAME:-}" || exit 1
 
 # Check for MySQL client
 if ! command -v mysql >/dev/null 2>&1; then
@@ -43,18 +42,22 @@ if ! command -v mysql >/dev/null 2>&1; then
 fi
 
 # Build mysql command
-mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
-# Use MYSQL_PWD env var instead of -p to keep the password out of 'ps' output
-[[ -n "$DB_PASSWORD" ]] && export MYSQL_PWD="$DB_PASSWORD"
+mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
 
 # Check if database already exists
-if "${mysql_cmd[@]}" -e "USE \`${GROVE_DB_NAME}\`;" 2>/dev/null; then
+if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+    -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='${GROVE_DB_NAME}';" 2>/dev/null); then
+  echo "  Could not check database - check MySQL connection"
+  exit 1
+fi
+if [[ "$database_exists" == "1" ]]; then
   echo "  Database already exists: ${GROVE_DB_NAME}"
   exit 0
 fi
 
 # Create database
-if "${mysql_cmd[@]}" -e "CREATE DATABASE IF NOT EXISTS \`${GROVE_DB_NAME}\`;" 2>/dev/null; then
+if MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+    -e "CREATE DATABASE IF NOT EXISTS \`${GROVE_DB_NAME}\`;" 2>/dev/null; then
   echo "  Created database: ${GROVE_DB_NAME}"
   exit 0
 else

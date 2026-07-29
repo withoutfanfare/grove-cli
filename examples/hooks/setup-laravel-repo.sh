@@ -75,7 +75,8 @@ fi
 mkdir -p "$TEMPLATE_DIR"
 env_copied=false
 if [[ -f "${PRIMARY}/.env" ]]; then
-  cp "${PRIMARY}/.env" "${TEMPLATE_DIR}/.env"
+  (umask 077; cp "${PRIMARY}/.env" "${TEMPLATE_DIR}/.env")
+  chmod 600 "${TEMPLATE_DIR}/.env"
   env_copied=true
 fi
 if [[ -f "${PRIMARY}/.env.example" ]]; then

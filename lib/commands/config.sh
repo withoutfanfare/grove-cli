@@ -163,6 +163,7 @@ cmd_alias() {
   local action="${1:-}"
   local alias_name="${2:-}"
   local target="${3:-}"
+  local rewrite_status=0
 
   # Ensure aliases file exists
   [[ -d "${GROVE_ALIASES_FILE:h}" ]] || mkdir -p "${GROVE_ALIASES_FILE:h}"
@@ -212,8 +213,9 @@ cmd_alias() {
         local temp_file; temp_file="$(mktemp)"
         # grep returns 1 when no lines match (file now empty) — that is fine.
         # Only overwrite the original when grep did not hit a real error (rc>=2).
-        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_ALIASES_FILE"
         else
           rm -f "$temp_file"
@@ -229,11 +231,16 @@ cmd_alias() {
     rm|remove|delete)
       [[ -n "$alias_name" ]] || error_exit "INVALID_INPUT" "Usage: grove alias rm <name>" 2
 
+      if [[ ! "$alias_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        error_exit "INVALID_INPUT" "invalid alias name '$alias_name', use alphanumeric, dash, or underscore" 2
+      fi
+
       # Anchor to line start so removing 'foo' never deletes 'myfoo=...'.
       if grep -q "^${alias_name}=" "$GROVE_ALIASES_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
-        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_ALIASES_FILE"
           ok "Alias removed: ${C_YELLOW}$alias_name${C_RESET}"
         else
@@ -568,6 +575,7 @@ cmd_group() {
   local group_name="${2:-}"
   shift 2 2>/dev/null || true
   local repos=("$@")
+  local rewrite_status=0
 
   # Ensure groups file exists
   [[ -d "${GROVE_GROUPS_FILE:h}" ]] || mkdir -p "${GROVE_GROUPS_FILE:h}"
@@ -617,8 +625,9 @@ cmd_group() {
       if grep -q "^${group_name}=" "$GROVE_GROUPS_FILE" 2>/dev/null; then
         local temp_file="$(mktemp)"
         # grep rc 1 means no remaining lines (fine); only rc>=2 is a real error.
-        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_GROUPS_FILE"
         else
           rm -f "$temp_file"
@@ -635,10 +644,15 @@ cmd_group() {
     rm|remove|delete)
       [[ -n "$group_name" ]] || error_exit "INVALID_INPUT" "Usage: grove group rm <name>" 2
 
+      if [[ ! "$group_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        error_exit "INVALID_INPUT" "invalid group name '$group_name', use alphanumeric, dash, or underscore" 2
+      fi
+
       if grep -q "^${group_name}=" "$GROVE_GROUPS_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
-        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_GROUPS_FILE"
           ok "Group removed: ${C_YELLOW}@$group_name${C_RESET}"
         else
@@ -718,4 +732,3 @@ resolve_group() {
   fi
   return 1
 }
-

@@ -48,8 +48,28 @@ done
 
 echo "  Importing AI files from $SOURCE_DIR..."
 
-# Execute rsync
-rsync -a --human-readable "${EXCLUDE_ARGS[@]}" "$SOURCE_DIR/" "$TARGET_DIR/"
+# Refuse receiver symlinks and type collisions before rsync; --ignore-existing
+# alone can still replace a directory symlink or alter directory metadata.
+while IFS= read -r -d '' source_entry; do
+  relative="${source_entry#"$SOURCE_DIR"/}"
+  target_entry="$TARGET_DIR/$relative"
+  if [[ -L "$target_entry" ]]; then
+    echo "  Refusing AI import over symlink: $relative"
+    exit 1
+  fi
+  if [[ -e "$target_entry" ]]; then
+    if [[ -L "$source_entry" ]] ||
+        { [[ -d "$source_entry" ]] && [[ ! -d "$target_entry" ]]; } ||
+        { [[ ! -d "$source_entry" ]] && [[ -d "$target_entry" ]]; }; then
+      echo "  Refusing AI import over type collision: $relative"
+      exit 1
+    fi
+  fi
+done < <(find "$SOURCE_DIR" -mindepth 1 -print0)
+
+# Install missing entries only; preserve all existing files and directories.
+rsync -rlt --links --ignore-existing --omit-dir-times --human-readable \
+  "${EXCLUDE_ARGS[@]}" "$SOURCE_DIR/" "$TARGET_DIR/"
 
 echo "  AI resources imported successfully"
 
