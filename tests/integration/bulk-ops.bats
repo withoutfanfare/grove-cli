@@ -48,6 +48,49 @@ seed_group() {
   printf '%s=%s\n' "$name" "$*" >> "$TEST_HOME/.grove/groups"
 }
 
+@test "danger guard does not prompt for harmless substring matches" {
+  run zsh -c '
+    warn() { :; }
+    confirm() { print -r -- prompted; return 1; }
+    error_exit() { exit "${3:-1}"; }
+    source "$1/lib/commands/bulk-ops.sh"
+    _check_dangerous_command "git add ."
+    _check_dangerous_command "echo ok >/dev/null"
+  ' _ "$GROVE_ROOT"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"prompted"* ]]
+}
+
+@test "danger guard still blocks a real dd command" {
+  run zsh -c '
+    warn() { print -r -- "$*"; }
+    confirm() { return 1; }
+    error_exit() { exit "${3:-1}"; }
+    source "$1/lib/commands/bulk-ops.sh"
+    _check_dangerous_command "dd if=/dev/zero of=/dev/disk9"
+  ' _ "$GROVE_ROOT"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"could be destructive"* ]]
+}
+
+@test "danger guard blocks redirection to common block devices" {
+  local dev
+  for dev in /dev/disk2 /dev/sda1 /dev/nvme0n1 /dev/vda /dev/xvda2 /dev/md0 /dev/mapper/vg0-root /dev/dm-0; do
+    run zsh -c '
+      warn() { print -r -- "$*"; }
+      confirm() { return 1; }
+      error_exit() { exit "${3:-1}"; }
+      source "$1/lib/commands/bulk-ops.sh"
+      _check_dangerous_command "cat image.img > $2"
+    ' _ "$GROVE_ROOT" "$dev"
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"could be destructive"* ]]
+  done
+}
+
 # ============================================================================
 # #10 - @group expansion
 # ============================================================================
@@ -104,6 +147,14 @@ seed_group() {
   run_grove exec-all definitelymissing true
   [ "$status" -ne 0 ]
   [[ "$output" != *"group not found"* ]]
+}
+
+@test "exec-all: executes the requested command in each worktree" {
+  seed_repo_with_worktree apphome main
+
+  run_grove exec-all apphome "touch .grove-exec-ran"
+  [ "$status" -eq 0 ]
+  [ -f "$HERD_ROOT/apphome-worktrees/main/.grove-exec-ran" ]
 }
 
 # ============================================================================

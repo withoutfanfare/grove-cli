@@ -21,21 +21,23 @@ fi
 
 ENV_TEMPLATE_DIR="$HOME/Code/Worktree/${GROVE_REPO}/${GROVE_REPO}-env"
 
-# Only backup if the template directory exists (repo uses this pattern)
-if [[ ! -d "$ENV_TEMPLATE_DIR" ]]; then
-  exit 0
-fi
+# A real .env is worktree-specific data. Create its private backup directory
+# rather than allowing removal merely because the repo was not preconfigured.
+umask 077
+mkdir -p "$ENV_TEMPLATE_DIR" || { echo "  Failed to create .env backup directory - refusing removal"; exit 1; }
 
 # Create backup filename with branch slug and timestamp
 BRANCH_SLUG="${GROVE_BRANCH//\//-}"  # Replace / with -
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_FILE="${ENV_TEMPLATE_DIR}/.env.backup.${BRANCH_SLUG}.${TIMESTAMP}"
 
-if cp "${GROVE_PATH}/.env" "$BACKUP_FILE"; then
+if cp "${GROVE_PATH}/.env" "$BACKUP_FILE" && chmod 600 "$BACKUP_FILE"; then
   echo "  Backed up .env → ${BACKUP_FILE##*/}"
   echo "  Compare with: diff ${ENV_TEMPLATE_DIR}/.env $BACKUP_FILE"
 else
-  echo "  Warning: Failed to backup .env"
+  echo "  Failed to backup .env - refusing removal"
+  rm -f "$BACKUP_FILE"
+  exit 1
 fi
 
 exit 0

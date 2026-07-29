@@ -119,7 +119,7 @@ _read_config_pairs() {
   local handler="$2"
   [[ -f "$file" ]] || return 0
 
-  local key value was_quoted
+  local key value quote char parsed escaped
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     # Skip lines with null bytes (potential injection attempt)
     [[ "$key" == *$'\0'* || "$value" == *$'\0'* ]] && continue
@@ -132,22 +132,38 @@ _read_config_pairs() {
     key="${key#"${key%%[![:space:]]*}"}"
     key="${key%"${key##*[![:space:]]}"}"
 
-    # Clean value inline (avoid subprocess from function call)
-    was_quoted=false
-    if [[ "$value" == \"*\" ]] || [[ "$value" == \'*\' ]]; then
-      was_quoted=true
-    fi
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    # Only strip inline comments if value was not quoted
-    # (quoted values like "my#password" should keep the #).
-    # Strip a trailing " #..." comment (whitespace then #) only — never a bare
-    # mid-value '#', so unquoted secrets like DB_PASSWORD=pass#word survive intact.
-    if [[ "$was_quoted" == false && "$value" == *[[:space:]]#* ]]; then
-      value="${value%%[[:space:]]#*}"
-    fi
+    # Clean value inline (avoid subprocess from function call). A closing quote
+    # ends a quoted value, so a later " # comment" is ignored without losing a
+    # literal # inside the quotes.
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"*|\'*)
+        quote="${value:0:1}"
+        value="${value:1}"
+        parsed=""
+        escaped=false
+        # ponytail: config values are short; use an indexed parser if long
+        # quoted values ever become supported input.
+        while [[ -n "$value" ]]; do
+          char="${value:0:1}"
+          value="${value:1}"
+          if [[ "$char" == "$quote" && "$escaped" != "true" ]]; then
+            break
+          fi
+          parsed+="$char"
+          if [[ "$char" == \\ && "$escaped" != "true" ]]; then
+            escaped=true
+          else
+            escaped=false
+          fi
+        done
+        value="$parsed"
+        ;;
+      *)
+        # Strip only whitespace-prefixed comments; pass#word remains literal.
+        [[ "$value" == *[[:space:]]#* ]] && value="${value%%[[:space:]]#*}"
+        ;;
+    esac
     value="${value%"${value##*[![:space:]]}"}"
 
     # Expand $HOME and a leading ~ for path-typed keys only, so path values like
@@ -299,13 +315,13 @@ die() {
   exit 1
 }
 # info — Print informational message (suppressed in quiet mode)
-info() { [[ "$QUIET" == true ]] || print -r -- "${C_BLUE}→${C_RESET} $*"; }
+info() { [[ "$QUIET" == true ]] || print -r -- "${C_BLUE}→${C_RESET} $*" >&2; }
 # ok — Print success message (suppressed in quiet mode)
-ok()   { [[ "$QUIET" == true ]] || print -r -- "${C_GREEN}✔${C_RESET} $*"; }
+ok()   { [[ "$QUIET" == true ]] || print -r -- "${C_GREEN}✔${C_RESET} $*" >&2; }
 # warn — Print warning message (always shown, even in quiet mode)
-warn() { print -r -- "${C_YELLOW}⚠${C_RESET} $*"; }
+warn() { print -r -- "${C_YELLOW}⚠${C_RESET} $*" >&2; }
 # dim — Print dimmed/secondary message (suppressed in quiet mode)
-dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}"; }
+dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}" >&2; }
 
 # Output structured error JSON and exit
 # Usage: die_json "ERROR_CODE" "Human readable message" [exit_code]
@@ -2032,6 +2048,16 @@ db_name_for() {
   print -r -- "$db_name"
 }
 
+# _validate_database_name — Reject unsafe MySQL identifiers supplied by hooks
+_validate_database_name() {
+  local db_name="${1:-}"
+
+  if [[ -z "$db_name" || ${#db_name} -gt 64 || ! "$db_name" =~ ^[a-zA-Z0-9_.]+$ ]]; then
+    warn "Refusing database operation for invalid database name: '$db_name'"
+    return 1
+  fi
+}
+
 # create_database — Create a MySQL database (respects DB_CREATE config)
 create_database() {
   local db_name="$1"
@@ -2040,6 +2066,8 @@ create_database() {
     dim "  Database creation disabled (GROVE_DB_CREATE=false)"
     return 0
   fi
+
+  _validate_database_name "$db_name" || return 1
 
   if ! command -v mysql >/dev/null 2>&1; then
     warn "MySQL client not found - skipping database creation"
@@ -2072,9 +2100,11 @@ backup_database() {
     return 0
   fi
 
+  _validate_database_name "$db_name" || return 1
+
   if ! command -v mysqldump >/dev/null 2>&1; then
-    warn "mysqldump not found - skipping database backup"
-    return 0
+    warn "mysqldump not found - refusing removal without a database backup"
+    return 1
   fi
 
   # Probe connectivity FIRST so a connection/auth failure is never mistaken for
@@ -2091,38 +2121,49 @@ backup_database() {
 
   # Connection is good — now decide existence via information_schema (a failed
   # USE could mean connection loss, so it is unsafe as an existence test).
-  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
-      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null | grep -q 1; then
+  local database_exists
+  if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null); then
+    warn "Could not check whether database $db_name exists - refusing removal without a backup"
+    return 1
+  fi
+  if [[ "$database_exists" != "1" ]]; then
     dim "  Database $db_name does not exist - skipping backup"
     return 0
   fi
 
-  # Create backup directory
-  local backup_dir="$DB_BACKUP_DIR/$repo"
-  mkdir -p "$backup_dir" || { warn "Could not create backup directory: $backup_dir"; return 1; }
+  (
+    umask 077
 
-  # Generate backup filename with timestamp
-  local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
-  local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
+    # Create backup directory
+    local backup_dir="$DB_BACKUP_DIR/$repo"
+    mkdir -p "$backup_dir" || { warn "Could not create backup directory: $backup_dir"; return 1; }
 
-  local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
+    # Generate backup filename with timestamp
+    local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
+    local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
 
-  info "Backing up database ${C_CYAN}$db_name${C_RESET}"
+    local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
 
-  # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-  if MYSQL_PWD="${DB_PASSWORD:-}" "${mysqldump_cmd[@]}" "$db_name" > "$backup_file" 2>/dev/null; then
-    ok "Database backed up: ${C_DIM}$backup_file${C_RESET}"
-    return 0
-  else
-    warn "Could not backup database"
-    rm -f "$backup_file" 2>/dev/null
-    return 1
-  fi
+    info "Backing up database ${C_CYAN}$db_name${C_RESET}"
+
+    # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
+    if MYSQL_PWD="${DB_PASSWORD:-}" "${mysqldump_cmd[@]}" "$db_name" > "$backup_file" 2>/dev/null; then
+      ok "Database backed up: ${C_DIM}$backup_file${C_RESET}"
+      return 0
+    else
+      warn "Could not backup database"
+      rm -f "$backup_file" 2>/dev/null
+      return 1
+    fi
+  )
 }
 
 # drop_database — Drop a MySQL database by name
 drop_database() {
   local db_name="$1"
+
+  _validate_database_name "$db_name" || return 1
 
   if ! command -v mysql >/dev/null 2>&1; then
     # Consistent with create_database: a missing client is a non-fatal skip, not
@@ -2144,8 +2185,13 @@ drop_database() {
 
   # Decide existence via information_schema (a failed USE could mean a lost
   # connection, so it is unsafe as an existence test).
-  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
-      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null | grep -q 1; then
+  local database_exists
+  if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null); then
+    warn "Could not check whether database $db_name exists - database was not dropped"
+    return 1
+  fi
+  if [[ "$database_exists" != "1" ]]; then
     dim "  Database $db_name does not exist"
     return 0
   fi
@@ -2233,7 +2279,7 @@ verify_hook_path_security() {
   local current_uid="${_GROVE_UID:-$(id -u)}"
 
   # Check ownership (macOS stat format, with Linux fallback)
-  local owner; owner="$(stat -f %u "$target" 2>/dev/null || stat -c %u "$target" 2>/dev/null)"
+  local owner; owner="$(stat -Lf %u "$target" 2>/dev/null || stat -Lc %u "$target" 2>/dev/null)"
   if [[ "$owner" != "$current_uid" ]]; then
     warn "$kind '$target' is not owned by current user - skipping for security"
     return 1
@@ -2241,7 +2287,7 @@ verify_hook_path_security() {
 
   # Check for group- or world-writable (macOS octal perms, with Linux fallback).
   # Octal write bit (2) is set when the digit is one of 2,3,6,7.
-  local perms; perms="$(stat -f %Lp "$target" 2>/dev/null || stat -c %a "$target" 2>/dev/null)"
+  local perms; perms="$(stat -Lf %Lp "$target" 2>/dev/null || stat -Lc %a "$target" 2>/dev/null)"
   # Normalise to a 3-digit owner/group/other string.
   perms="${perms: -3}"
   local group_digit="${perms:1:1}"
@@ -2307,7 +2353,7 @@ _run_single_hook() {
     # Redirect stdin from /dev/null so hooks cannot deadlock by waiting on
     # input (e.g. during bulk or JSON flows).
     local hook_status=0
-    "$hook_script" </dev/null || hook_status=$?
+    "$hook_script" </dev/null >&2 || hook_status=$?
 
     if [[ $hook_status -eq 0 ]]; then
       ok "$display_label completed"
@@ -2346,6 +2392,7 @@ run_hooks() {
 
   # Check if hooks directory exists
   [[ -d "$GROVE_HOOKS_DIR" ]] || return 0
+  verify_hook_path_security "$GROVE_HOOKS_DIR" "Hook directory" || return $is_gating
 
   local hook_file="$GROVE_HOOKS_DIR/$hook_name"
 
@@ -2355,16 +2402,17 @@ run_hooks() {
   if [[ -x "$hook_file" ]]; then
     # Security check before executing
     if ! verify_hook_security "$hook_file"; then
-      return 0
-    fi
-
-    info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
-    if ! _run_single_hook "$hook_file" "Hook ${C_CYAN}$hook_name${C_RESET}" \
-      "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
       [[ $is_gating -eq 1 ]] && overall_status=1
+    else
+      info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
+      if ! _run_single_hook "$hook_file" "Hook ${C_CYAN}$hook_name${C_RESET}" \
+        "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
+        [[ $is_gating -eq 1 ]] && overall_status=1
+      fi
     fi
   elif [[ -f "$hook_file" ]]; then
     dim "  Hook $hook_name exists but is not executable. Run: chmod +x $hook_file"
+    [[ $is_gating -eq 1 ]] && overall_status=1
   fi
 
   # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks).
@@ -2374,24 +2422,36 @@ run_hooks() {
   # Identical filenames run global first, then repo, so the repo hook can
   # override the global hook's work.
   local hooks_d="$GROVE_HOOKS_DIR/${hook_name}.d"
-  if [[ -d "$hooks_d" ]] && verify_hook_path_security "$hooks_d" "Hook directory"; then
-    local repo_hooks_d="$hooks_d/$repo"
-    local include_repo_hooks=0
-    if [[ -d "$repo_hooks_d" ]] && verify_hook_path_security "$repo_hooks_d" "Hook directory"; then
-      include_repo_hooks=1
+  if [[ -d "$hooks_d" ]]; then
+    if ! verify_hook_path_security "$hooks_d" "Hook directory"; then
+      [[ $is_gating -eq 1 ]] && overall_status=1
+      return $overall_status
     fi
 
-    # Decorate each script as "<filename>\t<0|1>\t<path>" (0=global, 1=repo)
+    local repo_hooks_d="$hooks_d/$repo"
+    local include_repo_hooks=0
+    if [[ -d "$repo_hooks_d" ]]; then
+      if verify_hook_path_security "$repo_hooks_d" "Hook directory"; then
+        include_repo_hooks=1
+      else
+        [[ $is_gating -eq 1 ]] && overall_status=1
+      fi
+    fi
+
+    # Decorate each hook as "<filename>\t<0|1>\t<path>" (0=global, 1=repo)
     # so one numeric-aware sort (the (on) expansion flags) yields the merged
-    # order; the path is recovered from after the last tab. Globs match files
-    # only, follow symlinks, and require owner-execute.
+    # order; the path is recovered from after the last tab. Executable files
+    # retain extensionless-hook support, while non-executable *.sh files remain
+    # candidates so a pre-* hook fails closed instead of disappearing silently.
     local -a hook_entries
     local hook_script
-    for hook_script in "$hooks_d"/*(N-.x); do
+    for hook_script in "$hooks_d"/*(N-.); do
+      [[ -x "$hook_script" || "$hook_script" == *.sh ]] || continue
       hook_entries+=("${hook_script:t}"$'\t'0$'\t'"$hook_script")
     done
     if [[ $include_repo_hooks -eq 1 ]]; then
-      for hook_script in "$repo_hooks_d"/*(N-.x); do
+      for hook_script in "$repo_hooks_d"/*(N-.); do
+        [[ -x "$hook_script" || "$hook_script" == *.sh ]] || continue
         hook_entries+=("${hook_script:t}"$'\t'1$'\t'"$hook_script")
       done
     fi
@@ -2400,8 +2460,15 @@ run_hooks() {
     for entry in "${(on)hook_entries[@]}"; do
       hook_script="${entry##*$'\t'}"
 
+      if [[ ! -x "$hook_script" ]]; then
+        dim "  Hook ${hook_script:t} exists but is not executable. Run: chmod +x $hook_script"
+        [[ $is_gating -eq 1 ]] && overall_status=1
+        continue
+      fi
+
       # Security check before executing
       if ! verify_hook_security "$hook_script"; then
+        [[ $is_gating -eq 1 ]] && overall_status=1
         continue
       fi
 
@@ -2858,17 +2925,49 @@ step_complete() {
   printf "\r\033[K" >&2
 }
 
-# Ensure spinner is stopped on interrupts (INT/TERM only).
+# Ensure spinner is stopped on interrupts (INT/TERM only), then exit with the
+# conventional signal status. Using exit here also preserves the transaction
+# rollback performed by TRAPEXIT in 11-resilience.sh.
 # We intentionally avoid trapping EXIT here because the transaction system
 # in 11-resilience.sh uses EXIT for rollback, and Zsh's trap replacement
 # would cause the spinner cleanup to overwrite transaction rollback.
 # The spinner is always explicitly stopped via spinner_stop or with_spinner,
 # so EXIT coverage is not needed for normal operation.
-trap 'spinner_stop 2>/dev/null' INT TERM
+trap 'if (( $+functions[parallel_stop] )); then parallel_stop 2>/dev/null; fi; spinner_stop 2>/dev/null; exit 130' INT
+trap 'if (( $+functions[parallel_stop] )); then parallel_stop 2>/dev/null; fi; spinner_stop 2>/dev/null; exit 143' TERM
 
 # 09-parallel.sh - Parallel execution framework
 
 autoload -Uz is-at-least
+
+typeset -ga PARALLEL_PIDS=()
+typeset -g PARALLEL_TMPDIR=""
+typeset -g PARALLEL_USES_PROCESS_GROUPS=false
+
+# Stop active workers before an interrupt exits Grove. When session support is
+# available, signalling -PID reaches each command's children as well as its
+# result wrapper; the fallback signals the wrapper PID directly.
+parallel_stop() {
+  local pid
+
+  for pid in "${PARALLEL_PIDS[@]}"; do
+    [[ "$PARALLEL_USES_PROCESS_GROUPS" == "true" ]] && kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  (( ${#PARALLEL_PIDS[@]} > 0 )) && sleep 0.05
+  for pid in "${PARALLEL_PIDS[@]}"; do
+    [[ "$PARALLEL_USES_PROCESS_GROUPS" == "true" ]] && kill -KILL -- "-$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  PARALLEL_PIDS=()
+  PARALLEL_USES_PROCESS_GROUPS=false
+
+  if [[ -n "$PARALLEL_TMPDIR" && -d "$PARALLEL_TMPDIR" ]]; then
+    rm -rf "$PARALLEL_TMPDIR"
+  fi
+  PARALLEL_TMPDIR=""
+}
 
 # report_results — Display success/failure summary after parallel operations
 report_results() {
@@ -2895,7 +2994,7 @@ report_results() {
 #
 # Only the first two '|' separate the fields; any further '|' belong to the
 # command. The path and command are passed as SEPARATE argv to a fixed wrapper
-# (`sh -c 'cd "$1" && shift && exec sh -c "$@"' _ "$path" sh "$command"`), so the
+# (`sh -c 'cd "$1" && exec sh -c "$2"' _ "$path" "$command"`), so the
 # path is never interpolated into a shell string — this is the security boundary
 # replacing the old `cd '$path' && ...` quoting (see improvement plan #16).
 #
@@ -2915,11 +3014,28 @@ parallel_run() {
   if [[ -z "$tmpdir" || ! -d "$tmpdir" ]]; then
     error_exit "IO_ERROR" "Failed to create temporary directory for parallel run" 5
   fi
+  PARALLEL_TMPDIR="$tmpdir"
+  PARALLEL_PIDS=()
+
+  # Prefer a process group so Ctrl-C can stop the shell command and its children.
+  # macOS has POSIX::setsid in system Perl; Linux normally provides setsid.
+  local -a session_runner
+  PARALLEL_USES_PROCESS_GROUPS=false
+  if command -v setsid >/dev/null 2>&1; then
+    session_runner=(setsid)
+    PARALLEL_USES_PROCESS_GROUPS=true
+  elif command -v perl >/dev/null 2>&1 && perl -MPOSIX -e 'exit(defined(&POSIX::setsid) ? 0 : 1)' 2>/dev/null; then
+    session_runner=(perl -MPOSIX -e 'my $sid = POSIX::setsid(); defined($sid) or die "setsid failed"; exec @ARGV; die "exec failed"')
+    PARALLEL_USES_PROCESS_GROUPS=true
+  else
+    # ponytail: direct-PID cancellation may leave grandchildren; require a
+    # session tool only if that becomes an observed problem on these systems.
+    session_runner=()
+  fi
   # NOTE: Don't use EXIT trap - cleanup manually after wait completes
   # to avoid race condition where trap fires before background jobs finish
 
   # Job tracking
-  local pids=()
   local running=0
 
   info "Running $total operation(s) in parallel (max $GROVE_MAX_PARALLEL concurrent)..."
@@ -2945,7 +3061,7 @@ parallel_run() {
     # Wait if at max parallel
     while (( running >= GROVE_MAX_PARALLEL )); do
       local new_pids=()
-      for pid in "${pids[@]}"; do
+      for pid in "${PARALLEL_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
           new_pids+=("$pid")
         else
@@ -2953,7 +3069,7 @@ parallel_run() {
           running=$((running - 1))
         fi
       done
-      pids=("${new_pids[@]}")
+      PARALLEL_PIDS=("${new_pids[@]}")
       if (( running >= GROVE_MAX_PARALLEL )); then
         if is-at-least 5.9 "${ZSH_VERSION:-0}"; then
           wait -n 2>/dev/null || sleep 0.1
@@ -2969,21 +3085,23 @@ parallel_run() {
     # stdin from /dev/null: parallel jobs are inherently non-interactive, and a
     # job inheriting the parent's stdin can block/contend on it (which also hangs
     # `wait` below, e.g. under bats or when grove is driven via a pipe).
-    (
-      if sh -c 'cd "$1" && shift && exec sh -c "$@"' _ "$wt_path" sh "$cmd" </dev/null >/dev/null 2>&1; then
-        echo "ok|$label" > "$tmpdir/$i"
-      else
-        echo "fail|$label" > "$tmpdir/$i"
+    "${session_runner[@]}" sh -c '
+      op_status=fail
+      if cd "$1" && sh -c "$2" </dev/null >/dev/null 2>&1; then
+        op_status=ok
       fi
-    ) &
-    pids+=($!)
+      printf "%s|%s\n" "$op_status" "$4" > "$3"
+    ' _ "$wt_path" "$cmd" "$tmpdir/$i" "$label" &
+    PARALLEL_PIDS+=($!)
     running=$((running + 1))
   done
 
   # Wait for ALL remaining jobs to complete before processing results
-  for pid in "${pids[@]}"; do
+  for pid in "${PARALLEL_PIDS[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
+  PARALLEL_PIDS=()
+  PARALLEL_USES_PROCESS_GROUPS=false
 
   # NOW it's safe to collect and report results (all background jobs finished)
   local success=0 failed=0
@@ -3018,6 +3136,7 @@ parallel_run() {
 
   # Clean up temp directory now that all results are collected
   rm -rf "$tmpdir"
+  PARALLEL_TMPDIR=""
 
   # Call result handler
   "$result_handler" "$success" "$failed" "$total"
@@ -3026,6 +3145,17 @@ parallel_run() {
 }
 
 # 10-interactive.sh - Interactive worktree creation wizard
+
+# Treat fzf's no-match and interrupt statuses as cancellation, but surface real
+# operational failures instead of silently selecting a fallback.
+_fzf_select() {
+  local fzf_status=0
+  fzf "$@" || fzf_status=$?
+  case "$fzf_status" in
+    0|1|130) return 0 ;;
+    *) die "fzf failed with exit status $fzf_status" ;;
+  esac
+}
 
 # Interactive worktree creation
 # Usage: interactive_add [repo]
@@ -3048,7 +3178,7 @@ interactive_add() {
     local repos; repos="$(list_repos)"
     [[ -n "$repos" ]] || die "No repositories found in $HERD_ROOT"
 
-    repo="$(echo "$repos" | fzf --prompt="Repository: " --height=40% --reverse)"
+    repo="$(echo "$repos" | _fzf_select --prompt="Repository: " --height=40% --reverse)" || return $?
     [[ -n "$repo" ]] || die "No repository selected"
   fi
 
@@ -3070,7 +3200,7 @@ interactive_add() {
   local branches; branches="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null | grep -v HEAD)"
 
   local base
-  base="$(echo "$branches" | fzf --prompt="Base branch: " --height=40% --reverse --query="origin/staging")"
+  base="$(echo "$branches" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="origin/staging")" || return $?
   [[ -n "$base" ]] || base="$DEFAULT_BASE"
 
   ok "Base: ${C_DIM}$base${C_RESET}"
@@ -3129,7 +3259,7 @@ interactive_add() {
     templates="(none)
 $templates"
 
-    template="$(echo "$templates" | fzf --prompt="Template: " --height=40% --reverse)"
+    template="$(echo "$templates" | _fzf_select --prompt="Template: " --height=40% --reverse)" || return $?
 
     if [[ "$template" != "(none)" && -n "$template" ]]; then
       GROVE_TEMPLATE="$template"
@@ -3268,7 +3398,7 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
     fzf_opts+=(--height=80%)
   fi
 
-  selection="$(printf '%s\n' "${entries[@]%%|*}" | fzf "${fzf_opts[@]}")"
+  selection="$(printf '%s\n' "${entries[@]%%|*}" | _fzf_select "${fzf_opts[@]}")" || return $?
 
   [[ -n "$selection" ]] || { dim "No selection made"; return 0; }
 
@@ -3530,7 +3660,14 @@ check_disk_space() {
   local min_mb="${2:-1024}"  # Default 1GB
 
   local available_kb
-  available_kb=$(df -k "$target_path" 2>/dev/null | tail -1 | awk '{print $4}')
+  if ! available_kb=$(df -Pk "$target_path" 2>/dev/null | awk 'NR == 2 { print $4 }'); then
+    warn "Could not determine available disk space for '$target_path'"
+    return 0
+  fi
+  if [[ ! "$available_kb" =~ ^[0-9]+$ ]]; then
+    warn "Could not determine available disk space for '$target_path'"
+    return 0
+  fi
   local available_mb=$((available_kb / 1024))
 
   if (( available_mb < min_mb )); then
@@ -4331,15 +4468,15 @@ cmd_add() {
   local created_from_base=false
   if [[ "$branch_local" == true ]]; then
     info "Creating worktree from existing branch: ${C_MAGENTA}$branch${C_RESET}"
-    git --git-dir="$git_dir" worktree add "$wt_path" "$branch"
+    git --git-dir="$git_dir" worktree add "$wt_path" "$branch" >&2
   elif [[ "$branch_on_remote" == true ]]; then
     # Branch exists on remote but fetch to local failed - try worktree add with remote tracking
     info "Creating worktree tracking remote branch: ${C_MAGENTA}origin/$branch${C_RESET}"
-    git --git-dir="$git_dir" worktree add --track -b "$branch" "$wt_path" "origin/$branch"
+    git --git-dir="$git_dir" worktree add --track -b "$branch" "$wt_path" "origin/$branch" >&2
   else
     created_from_base=true
     info "Creating NEW branch ${C_MAGENTA}$branch${C_RESET} from ${C_DIM}$base${C_RESET}"
-    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base"
+    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base" >&2
   fi
   # Worktree now exists on disk — register its removal (and any Herd site set up
   # by post-add hooks) so a later failure tears down the partial state.
@@ -4353,7 +4490,7 @@ cmd_add() {
   if [[ "$branch_on_remote" == true ]]; then
     # Branch already exists on remote, just set up tracking
     dim "  Branch already exists on remote - setting up tracking"
-    /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" 2>/dev/null || true
+    /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1 || true
   else
     # New branch - push to remote
     info "Pushing new branch to remote..."
@@ -4494,7 +4631,7 @@ cmd_rm() {
   local branch_deleted=false
   if [[ "$DELETE_BRANCH" == true ]]; then
     info "Deleting branch ${C_MAGENTA}$branch${C_RESET}"
-    if git --git-dir="$git_dir" branch -D "$branch" 2>/dev/null; then
+    if git --git-dir="$git_dir" branch -D "$branch" >&2; then
       branch_deleted=true
     else
       warn "Could not delete branch (may not exist locally)"
@@ -8569,8 +8706,8 @@ _check_dangerous_command() {
   local cmd_str="$1"
 
   if [[ "$cmd_str" == *"rm -rf"* ]] || [[ "$cmd_str" == *"mkfs"* ]] || \
-     [[ "$cmd_str" == *"dd "* ]] || [[ "$cmd_str" == *":()"* ]] || \
-     [[ "$cmd_str" == *">/dev/"* ]] || [[ "$cmd_str" == *"shutdown"* ]] || \
+     [[ "$cmd_str" =~ '(^|[[:space:];|&])dd([[:space:]]|$)' ]] || [[ "$cmd_str" == *":()"* ]] || \
+     [[ "$cmd_str" =~ '>[[:space:]]*/dev/(disk|rdisk|sd|nvme|mmcblk|vd|xvd|md|mapper/|dm-)' ]] || [[ "$cmd_str" == *"shutdown"* ]] || \
      [[ "$cmd_str" == *"reboot"* ]] || [[ "$cmd_str" == *"init 0"* ]]; then
     warn "This looks like it could be destructive: $cmd_str"
     print -r -- ""
@@ -8775,7 +8912,6 @@ _exec_all_for_repo() {
 # ============================================================================
 # New commands: upgrade, info, recent, clean, alias
 # ============================================================================
-
 
 
 # discovery.sh - Worktree discovery and filtering commands
@@ -9124,7 +9260,7 @@ cmd_recent() {
   # Sort by access time (newest first) using Zsh
   # We still need sort for numerical sorting, but avoid head subprocess
   local sorted_all
-  sorted_all=($(printf '%s\n' "${worktrees[@]}" | sort -t'|' -k1 -rn))
+  sorted_all=("${(f)$(printf '%s\n' "${worktrees[@]}" | sort -t'|' -k1 -rn)}")
   # Take first N entries using Zsh array slicing
   local sorted=("${sorted_all[@]:0:$limit}")
 
@@ -9414,7 +9550,6 @@ cmd_clean() {
 readonly GROVE_ALIASES_FILE="$HOME/.grove/aliases"
 
 
-
 # config.sh - Configuration and customisation commands
 
 # cmd_config — Show current grove configuration
@@ -9579,6 +9714,7 @@ cmd_alias() {
   local action="${1:-}"
   local alias_name="${2:-}"
   local target="${3:-}"
+  local rewrite_status=0
 
   # Ensure aliases file exists
   [[ -d "${GROVE_ALIASES_FILE:h}" ]] || mkdir -p "${GROVE_ALIASES_FILE:h}"
@@ -9628,8 +9764,9 @@ cmd_alias() {
         local temp_file; temp_file="$(mktemp)"
         # grep returns 1 when no lines match (file now empty) — that is fine.
         # Only overwrite the original when grep did not hit a real error (rc>=2).
-        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_ALIASES_FILE"
         else
           rm -f "$temp_file"
@@ -9645,11 +9782,16 @@ cmd_alias() {
     rm|remove|delete)
       [[ -n "$alias_name" ]] || error_exit "INVALID_INPUT" "Usage: grove alias rm <name>" 2
 
+      if [[ ! "$alias_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        error_exit "INVALID_INPUT" "invalid alias name '$alias_name', use alphanumeric, dash, or underscore" 2
+      fi
+
       # Anchor to line start so removing 'foo' never deletes 'myfoo=...'.
       if grep -q "^${alias_name}=" "$GROVE_ALIASES_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
-        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_ALIASES_FILE"
           ok "Alias removed: ${C_YELLOW}$alias_name${C_RESET}"
         else
@@ -9984,6 +10126,7 @@ cmd_group() {
   local group_name="${2:-}"
   shift 2 2>/dev/null || true
   local repos=("$@")
+  local rewrite_status=0
 
   # Ensure groups file exists
   [[ -d "${GROVE_GROUPS_FILE:h}" ]] || mkdir -p "${GROVE_GROUPS_FILE:h}"
@@ -10033,8 +10176,9 @@ cmd_group() {
       if grep -q "^${group_name}=" "$GROVE_GROUPS_FILE" 2>/dev/null; then
         local temp_file="$(mktemp)"
         # grep rc 1 means no remaining lines (fine); only rc>=2 is a real error.
-        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_GROUPS_FILE"
         else
           rm -f "$temp_file"
@@ -10051,10 +10195,15 @@ cmd_group() {
     rm|remove|delete)
       [[ -n "$group_name" ]] || error_exit "INVALID_INPUT" "Usage: grove group rm <name>" 2
 
+      if [[ ! "$group_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        error_exit "INVALID_INPUT" "invalid group name '$group_name', use alphanumeric, dash, or underscore" 2
+      fi
+
       if grep -q "^${group_name}=" "$GROVE_GROUPS_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
-        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_GROUPS_FILE"
           ok "Group removed: ${C_YELLOW}@$group_name${C_RESET}"
         else
@@ -10134,7 +10283,6 @@ resolve_group() {
   fi
   return 1
 }
-
 
 # laravel.sh - Laravel-specific commands
 
@@ -11405,7 +11553,7 @@ parse_flags() {
         GROVE_DIR="$1"
         ;;
       -v|--version) show_version=true ;;
-      -h|--help|help) setup_colors; usage; exit 0 ;;
+      -h|--help) setup_colors; usage; exit 0 ;;
       -n)
         # -n is used by grove log for limiting commit count - pass through to command
         REMAINING_ARGS+=("$1")
@@ -11527,6 +11675,7 @@ main() {
     group)        cmd_group "$@" ;;
     share-deps)   cmd_share_deps "$@" ;;
     services)     cmd_services "$@" ;;
+    help)         usage ;;
     "")           usage ;;
     *)            die "Unknown command: $cmd (try: grove --help)" ;;
   esac

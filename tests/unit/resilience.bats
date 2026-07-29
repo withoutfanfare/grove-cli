@@ -28,6 +28,80 @@ STUBS='
   _get_now(){ date +%s; }
 '
 
+@test "spinner interrupt trap exits and preserves transaction cleanup" {
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/08-spinner.sh"
+    spinner_stop(){ print -r -- stopped; }
+    TRAPEXIT(){ print -r -- rolled-back; }
+    kill -INT $$
+    print -r -- continued
+  '
+  [ "$status" -eq 130 ]
+  [[ "$output" == *"stopped"* ]]
+  [[ "$output" == *"rolled-back"* ]]
+  [[ "$output" != *"continued"* ]]
+}
+
+@test "parallel workers stop with the parent on INT and TERM" {
+  local runner="$TEST_TMPDIR/parallel-interrupt.zsh"
+  cat > "$runner" <<'EOF'
+source "$PROJECT_ROOT/lib/08-spinner.sh"
+source "$PROJECT_ROOT/lib/09-parallel.sh"
+QUIET=true
+GROVE_MAX_PARALLEL=1
+info(){ :; }
+ok(){ print -r -- "OK:$*"; }
+warn(){ print -r -- "WARN:$*"; }
+error_exit(){ exit "${3:-1}"; }
+parallel_run report_results "job|$TEST_TMPDIR|touch '$TEST_TMPDIR/started-$TEST_SIGNAL'; sleep 1.2; touch '$TEST_TMPDIR/marker-$TEST_SIGNAL'"
+print -r -- parent-finished
+EOF
+
+  local signal expected parent rc log
+  for signal in INT TERM; do
+    [[ "$signal" == "INT" ]] && expected=130 || expected=143
+    log="$TEST_TMPDIR/$signal.log"
+    TEST_SIGNAL="$signal" zsh "$runner" > "$log" 2>&1 &
+    parent=$!
+    for _ in {1..100}; do
+      [[ -e "$TEST_TMPDIR/started-$signal" ]] && break
+      sleep 0.02
+    done
+    [ -e "$TEST_TMPDIR/started-$signal" ]
+    kill -s "$signal" "$parent"
+    if wait "$parent"; then rc=0; else rc=$?; fi
+    sleep 1.3
+
+    [ "$rc" -eq "$expected" ]
+    [ ! -e "$TEST_TMPDIR/marker-$signal" ]
+    ! grep -q 'All 1 operation(s) completed successfully' "$log"
+    ! grep -q 'parent-finished' "$log"
+  done
+}
+
+@test "parallel operations run without setsid or Perl" {
+  local minimal_bin="$TEST_TMPDIR/minimal-bin"
+  local zsh_bin
+  zsh_bin="$(command -v zsh)"
+  mkdir -p "$minimal_bin"
+  ln -s "$(command -v mktemp)" "$minimal_bin/mktemp"
+  ln -s "$(command -v rm)" "$minimal_bin/rm"
+  ln -s "$(command -v sh)" "$minimal_bin/sh"
+
+  run env PATH="$minimal_bin" "$zsh_bin" -c '
+    source "$PROJECT_ROOT/lib/09-parallel.sh"
+    GROVE_MAX_PARALLEL=1
+    info(){ :; }
+    ok(){ :; }
+    warn(){ :; }
+    result(){ print -r -- "$1|$2|$3"; }
+    parallel_run result "job|$TEST_TMPDIR|:"
+  '
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1|0|1"* ]]
+}
+
 # --- with_retry ---
 
 @test "with_retry succeeds after N transient failures" {
@@ -94,6 +168,28 @@ STUBS='
   "
   [ "$status" -ne 0 ]
   [[ "$output" == *"Insufficient disk space"* ]]
+}
+
+@test "check_disk_space warns but does not abort when df fails" {
+  mkdir -p "$TEST_TMPDIR/bin"
+  cat > "$TEST_TMPDIR/bin/df" <<'EOF'
+#!/bin/sh
+exit 42
+EOF
+  chmod +x "$TEST_TMPDIR/bin/df"
+
+  run zsh -c "
+    $STUBS
+    export PATH=\"\$TEST_TMPDIR/bin:/usr/bin:/bin\"
+    warn(){ print -r -- \"\$*\"; }
+    source \"\$PROJECT_ROOT/lib/11-resilience.sh\"
+    check_disk_space \"\$TEST_TMPDIR\" 1
+    print -r -- continued
+  "
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Could not determine available disk space"* ]]
+  [[ "$output" == *"continued"* ]]
 }
 
 # --- transactions: rollback ordering ---
@@ -202,6 +298,8 @@ STUBS='
   : > "$TEST_TMPDIR/worktrees/wt/index.lock"
   run zsh -c "
     $STUBS
+    QUIET=false C_DIM='' C_RESET=''
+    source \"\$PROJECT_ROOT/lib/01-core.sh\"
     source \"\$PROJECT_ROOT/lib/11-resilience.sh\"
     lock=\"\$TEST_TMPDIR/worktrees/wt/index.lock\"
     mtime=\$(stat -f %m \"\$lock\" 2>/dev/null || stat -c %Y \"\$lock\")

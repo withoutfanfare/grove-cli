@@ -14,6 +14,7 @@
 load '../test-helper'
 
 setup() {
+  bats_require_minimum_version 1.5.0
   setup_test_environment
 
   # Build a sourceable zsh file that pulls in the REAL helpers we exercise, with
@@ -127,7 +128,7 @@ _setup_conflict_repo() {
   _setup_conflict_repo "$root"
 
   # Run the real _pull_all_for_repo in JSON mode against the conflicting worktree.
-  run zsh -c "source '$GIT_OPS_FNS'; JSON_OUTPUT=true; _pull_all_for_repo 'repo' '$root/repo.git'"
+  run --separate-stderr -- zsh -c "source '$GIT_OPS_FNS'; JSON_OUTPUT=true; _pull_all_for_repo 'repo' '$root/repo.git'"
   [ "$status" -eq 0 ]
 
   # The single line of stdout must be valid JSON (the critical data contract).
@@ -160,7 +161,7 @@ assert "\n" in w["message"], w["message"]
   mkdir -p "$root"
   _setup_conflict_repo "$root"
 
-  run zsh -c "source '$GIT_OPS_FNS'; JSON_OUTPUT=true; _pull_all_for_repo 'repo' '$root/repo.git'"
+  run --separate-stderr -- zsh -c "source '$GIT_OPS_FNS'; JSON_OUTPUT=true; _pull_all_for_repo 'repo' '$root/repo.git'"
   [ "$status" -eq 0 ]
   # stdout must begin with '{' — a leaked `local var=...` would print `var=...` first.
   [[ "${output:0:1}" == "{" ]]

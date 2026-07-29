@@ -277,15 +277,15 @@ cmd_add() {
   local created_from_base=false
   if [[ "$branch_local" == true ]]; then
     info "Creating worktree from existing branch: ${C_MAGENTA}$branch${C_RESET}"
-    git --git-dir="$git_dir" worktree add "$wt_path" "$branch"
+    git --git-dir="$git_dir" worktree add "$wt_path" "$branch" >&2
   elif [[ "$branch_on_remote" == true ]]; then
     # Branch exists on remote but fetch to local failed - try worktree add with remote tracking
     info "Creating worktree tracking remote branch: ${C_MAGENTA}origin/$branch${C_RESET}"
-    git --git-dir="$git_dir" worktree add --track -b "$branch" "$wt_path" "origin/$branch"
+    git --git-dir="$git_dir" worktree add --track -b "$branch" "$wt_path" "origin/$branch" >&2
   else
     created_from_base=true
     info "Creating NEW branch ${C_MAGENTA}$branch${C_RESET} from ${C_DIM}$base${C_RESET}"
-    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base"
+    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base" >&2
   fi
   # Worktree now exists on disk — register its removal (and any Herd site set up
   # by post-add hooks) so a later failure tears down the partial state.
@@ -299,7 +299,7 @@ cmd_add() {
   if [[ "$branch_on_remote" == true ]]; then
     # Branch already exists on remote, just set up tracking
     dim "  Branch already exists on remote - setting up tracking"
-    /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" 2>/dev/null || true
+    /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1 || true
   else
     # New branch - push to remote
     info "Pushing new branch to remote..."
@@ -440,7 +440,7 @@ cmd_rm() {
   local branch_deleted=false
   if [[ "$DELETE_BRANCH" == true ]]; then
     info "Deleting branch ${C_MAGENTA}$branch${C_RESET}"
-    if git --git-dir="$git_dir" branch -D "$branch" 2>/dev/null; then
+    if git --git-dir="$git_dir" branch -D "$branch" >&2; then
       branch_deleted=true
     else
       warn "Could not delete branch (may not exist locally)"

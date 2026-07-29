@@ -150,6 +150,20 @@ make_repo_worktree() {
   echo "$output" | python3 -c 'import json,sys; json.load(sys.stdin)'
 }
 
+@test "grove recent --json: preserves worktree paths containing spaces" {
+  HERD_ROOT="$TEST_TEMP_DIR/Herd Root"
+  mkdir -p "$HERD_ROOT"
+  make_repo_worktree "alpha" "feature/x" "alpha worktree" new
+
+  run_grove recent --json
+  [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c '
+import json, os
+data = json.loads(os.environ["OUTPUT"])
+assert data[0]["path"].endswith("alpha worktree"), data
+'
+}
+
 @test "grove recent --json: resolves url per-entry from each repo's own config" {
   # Two repos: only alpha sets a URL subdomain. The per-entry fix must give each
   # worktree its OWN url; the old bug applied the last-loaded subdomain to all.

@@ -50,6 +50,16 @@ db_name_for() {
   print -r -- "$db_name"
 }
 
+# _validate_database_name — Reject unsafe MySQL identifiers supplied by hooks
+_validate_database_name() {
+  local db_name="${1:-}"
+
+  if [[ -z "$db_name" || ${#db_name} -gt 64 || ! "$db_name" =~ ^[a-zA-Z0-9_.]+$ ]]; then
+    warn "Refusing database operation for invalid database name: '$db_name'"
+    return 1
+  fi
+}
+
 # create_database — Create a MySQL database (respects DB_CREATE config)
 create_database() {
   local db_name="$1"
@@ -58,6 +68,8 @@ create_database() {
     dim "  Database creation disabled (GROVE_DB_CREATE=false)"
     return 0
   fi
+
+  _validate_database_name "$db_name" || return 1
 
   if ! command -v mysql >/dev/null 2>&1; then
     warn "MySQL client not found - skipping database creation"
@@ -90,9 +102,11 @@ backup_database() {
     return 0
   fi
 
+  _validate_database_name "$db_name" || return 1
+
   if ! command -v mysqldump >/dev/null 2>&1; then
-    warn "mysqldump not found - skipping database backup"
-    return 0
+    warn "mysqldump not found - refusing removal without a database backup"
+    return 1
   fi
 
   # Probe connectivity FIRST so a connection/auth failure is never mistaken for
@@ -109,38 +123,49 @@ backup_database() {
 
   # Connection is good — now decide existence via information_schema (a failed
   # USE could mean connection loss, so it is unsafe as an existence test).
-  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
-      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null | grep -q 1; then
+  local database_exists
+  if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null); then
+    warn "Could not check whether database $db_name exists - refusing removal without a backup"
+    return 1
+  fi
+  if [[ "$database_exists" != "1" ]]; then
     dim "  Database $db_name does not exist - skipping backup"
     return 0
   fi
 
-  # Create backup directory
-  local backup_dir="$DB_BACKUP_DIR/$repo"
-  mkdir -p "$backup_dir" || { warn "Could not create backup directory: $backup_dir"; return 1; }
+  (
+    umask 077
 
-  # Generate backup filename with timestamp
-  local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
-  local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
+    # Create backup directory
+    local backup_dir="$DB_BACKUP_DIR/$repo"
+    mkdir -p "$backup_dir" || { warn "Could not create backup directory: $backup_dir"; return 1; }
 
-  local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
+    # Generate backup filename with timestamp
+    local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
+    local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
 
-  info "Backing up database ${C_CYAN}$db_name${C_RESET}"
+    local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
 
-  # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-  if MYSQL_PWD="${DB_PASSWORD:-}" "${mysqldump_cmd[@]}" "$db_name" > "$backup_file" 2>/dev/null; then
-    ok "Database backed up: ${C_DIM}$backup_file${C_RESET}"
-    return 0
-  else
-    warn "Could not backup database"
-    rm -f "$backup_file" 2>/dev/null
-    return 1
-  fi
+    info "Backing up database ${C_CYAN}$db_name${C_RESET}"
+
+    # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
+    if MYSQL_PWD="${DB_PASSWORD:-}" "${mysqldump_cmd[@]}" "$db_name" > "$backup_file" 2>/dev/null; then
+      ok "Database backed up: ${C_DIM}$backup_file${C_RESET}"
+      return 0
+    else
+      warn "Could not backup database"
+      rm -f "$backup_file" 2>/dev/null
+      return 1
+    fi
+  )
 }
 
 # drop_database — Drop a MySQL database by name
 drop_database() {
   local db_name="$1"
+
+  _validate_database_name "$db_name" || return 1
 
   if ! command -v mysql >/dev/null 2>&1; then
     # Consistent with create_database: a missing client is a non-fatal skip, not
@@ -162,8 +187,13 @@ drop_database() {
 
   # Decide existence via information_schema (a failed USE could mean a lost
   # connection, so it is unsafe as an existence test).
-  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
-      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null | grep -q 1; then
+  local database_exists
+  if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null); then
+    warn "Could not check whether database $db_name exists - database was not dropped"
+    return 1
+  fi
+  if [[ "$database_exists" != "1" ]]; then
     dim "  Database $db_name does not exist"
     return 0
   fi

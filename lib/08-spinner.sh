@@ -136,10 +136,13 @@ step_complete() {
   printf "\r\033[K" >&2
 }
 
-# Ensure spinner is stopped on interrupts (INT/TERM only).
+# Ensure spinner is stopped on interrupts (INT/TERM only), then exit with the
+# conventional signal status. Using exit here also preserves the transaction
+# rollback performed by TRAPEXIT in 11-resilience.sh.
 # We intentionally avoid trapping EXIT here because the transaction system
 # in 11-resilience.sh uses EXIT for rollback, and Zsh's trap replacement
 # would cause the spinner cleanup to overwrite transaction rollback.
 # The spinner is always explicitly stopped via spinner_stop or with_spinner,
 # so EXIT coverage is not needed for normal operation.
-trap 'spinner_stop 2>/dev/null' INT TERM
+trap 'if (( $+functions[parallel_stop] )); then parallel_stop 2>/dev/null; fi; spinner_stop 2>/dev/null; exit 130' INT
+trap 'if (( $+functions[parallel_stop] )); then parallel_stop 2>/dev/null; fi; spinner_stop 2>/dev/null; exit 143' TERM

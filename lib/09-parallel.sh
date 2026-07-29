@@ -3,6 +3,35 @@
 
 autoload -Uz is-at-least
 
+typeset -ga PARALLEL_PIDS=()
+typeset -g PARALLEL_TMPDIR=""
+typeset -g PARALLEL_USES_PROCESS_GROUPS=false
+
+# Stop active workers before an interrupt exits Grove. When session support is
+# available, signalling -PID reaches each command's children as well as its
+# result wrapper; the fallback signals the wrapper PID directly.
+parallel_stop() {
+  local pid
+
+  for pid in "${PARALLEL_PIDS[@]}"; do
+    [[ "$PARALLEL_USES_PROCESS_GROUPS" == "true" ]] && kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  (( ${#PARALLEL_PIDS[@]} > 0 )) && sleep 0.05
+  for pid in "${PARALLEL_PIDS[@]}"; do
+    [[ "$PARALLEL_USES_PROCESS_GROUPS" == "true" ]] && kill -KILL -- "-$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  PARALLEL_PIDS=()
+  PARALLEL_USES_PROCESS_GROUPS=false
+
+  if [[ -n "$PARALLEL_TMPDIR" && -d "$PARALLEL_TMPDIR" ]]; then
+    rm -rf "$PARALLEL_TMPDIR"
+  fi
+  PARALLEL_TMPDIR=""
+}
+
 # report_results — Display success/failure summary after parallel operations
 report_results() {
   local success="$1" failed="$2" total="$3"
@@ -28,7 +57,7 @@ report_results() {
 #
 # Only the first two '|' separate the fields; any further '|' belong to the
 # command. The path and command are passed as SEPARATE argv to a fixed wrapper
-# (`sh -c 'cd "$1" && shift && exec sh -c "$@"' _ "$path" sh "$command"`), so the
+# (`sh -c 'cd "$1" && exec sh -c "$2"' _ "$path" "$command"`), so the
 # path is never interpolated into a shell string — this is the security boundary
 # replacing the old `cd '$path' && ...` quoting (see improvement plan #16).
 #
@@ -48,11 +77,28 @@ parallel_run() {
   if [[ -z "$tmpdir" || ! -d "$tmpdir" ]]; then
     error_exit "IO_ERROR" "Failed to create temporary directory for parallel run" 5
   fi
+  PARALLEL_TMPDIR="$tmpdir"
+  PARALLEL_PIDS=()
+
+  # Prefer a process group so Ctrl-C can stop the shell command and its children.
+  # macOS has POSIX::setsid in system Perl; Linux normally provides setsid.
+  local -a session_runner
+  PARALLEL_USES_PROCESS_GROUPS=false
+  if command -v setsid >/dev/null 2>&1; then
+    session_runner=(setsid)
+    PARALLEL_USES_PROCESS_GROUPS=true
+  elif command -v perl >/dev/null 2>&1 && perl -MPOSIX -e 'exit(defined(&POSIX::setsid) ? 0 : 1)' 2>/dev/null; then
+    session_runner=(perl -MPOSIX -e 'my $sid = POSIX::setsid(); defined($sid) or die "setsid failed"; exec @ARGV; die "exec failed"')
+    PARALLEL_USES_PROCESS_GROUPS=true
+  else
+    # ponytail: direct-PID cancellation may leave grandchildren; require a
+    # session tool only if that becomes an observed problem on these systems.
+    session_runner=()
+  fi
   # NOTE: Don't use EXIT trap - cleanup manually after wait completes
   # to avoid race condition where trap fires before background jobs finish
 
   # Job tracking
-  local pids=()
   local running=0
 
   info "Running $total operation(s) in parallel (max $GROVE_MAX_PARALLEL concurrent)..."
@@ -78,7 +124,7 @@ parallel_run() {
     # Wait if at max parallel
     while (( running >= GROVE_MAX_PARALLEL )); do
       local new_pids=()
-      for pid in "${pids[@]}"; do
+      for pid in "${PARALLEL_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
           new_pids+=("$pid")
         else
@@ -86,7 +132,7 @@ parallel_run() {
           running=$((running - 1))
         fi
       done
-      pids=("${new_pids[@]}")
+      PARALLEL_PIDS=("${new_pids[@]}")
       if (( running >= GROVE_MAX_PARALLEL )); then
         if is-at-least 5.9 "${ZSH_VERSION:-0}"; then
           wait -n 2>/dev/null || sleep 0.1
@@ -102,21 +148,23 @@ parallel_run() {
     # stdin from /dev/null: parallel jobs are inherently non-interactive, and a
     # job inheriting the parent's stdin can block/contend on it (which also hangs
     # `wait` below, e.g. under bats or when grove is driven via a pipe).
-    (
-      if sh -c 'cd "$1" && shift && exec sh -c "$@"' _ "$wt_path" sh "$cmd" </dev/null >/dev/null 2>&1; then
-        echo "ok|$label" > "$tmpdir/$i"
-      else
-        echo "fail|$label" > "$tmpdir/$i"
+    "${session_runner[@]}" sh -c '
+      op_status=fail
+      if cd "$1" && sh -c "$2" </dev/null >/dev/null 2>&1; then
+        op_status=ok
       fi
-    ) &
-    pids+=($!)
+      printf "%s|%s\n" "$op_status" "$4" > "$3"
+    ' _ "$wt_path" "$cmd" "$tmpdir/$i" "$label" &
+    PARALLEL_PIDS+=($!)
     running=$((running + 1))
   done
 
   # Wait for ALL remaining jobs to complete before processing results
-  for pid in "${pids[@]}"; do
+  for pid in "${PARALLEL_PIDS[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
+  PARALLEL_PIDS=()
+  PARALLEL_USES_PROCESS_GROUPS=false
 
   # NOW it's safe to collect and report results (all background jobs finished)
   local success=0 failed=0
@@ -151,6 +199,7 @@ parallel_run() {
 
   # Clean up temp directory now that all results are collected
   rm -rf "$tmpdir"
+  PARALLEL_TMPDIR=""
 
   # Call result handler
   "$result_handler" "$success" "$failed" "$total"
