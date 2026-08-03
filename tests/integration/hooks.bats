@@ -448,6 +448,19 @@ EOF
   [[ "$output" == *"group-writable"* ]]
 }
 
+@test "hooks: symlink through a group-writable target directory is skipped" {
+  create_hook "$GROVE_HOOKS_DIR/shared/unsafe-target.sh" \
+    "echo 'unsafe-ran' >> '$HOOK_LOG'"
+  chmod g+w "$GROVE_HOOKS_DIR/shared"
+  mkdir -p "$GROVE_HOOKS_DIR/post-add.d"
+  ln -s ../shared/unsafe-target.sh "$GROVE_HOOKS_DIR/post-add.d/01-link.sh"
+
+  run_hooks_isolated "post-add"
+  [ "$status" -eq 0 ]
+  ! grep -q "unsafe-ran" "$HOOK_LOG"
+  [[ "$output" == *"group-writable"* ]]
+}
+
 @test "hooks: group-writable hook root is skipped" {
   create_hook "$GROVE_HOOKS_DIR/post-add" \
     "echo 'unsafe-ran' >> '$HOOK_LOG'"

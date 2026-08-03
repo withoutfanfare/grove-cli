@@ -57,6 +57,18 @@ EOF
   ! find "$BUILD_FIXTURE" -maxdepth 1 -name 'grove.tmp.*' | grep -q .
 }
 
+@test "build rejects a directory output path" {
+  local outdir="$BUILD_FIXTURE/outdir"
+  mkdir -p "$outdir"
+
+  run zsh "$BUILD_FIXTURE/build.sh" --output "$outdir"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Output path is a directory"* ]]
+  ! find "$BUILD_FIXTURE" -name 'outdir.tmp.*' | grep -q .
+  ! find "$outdir" -mindepth 1 | grep -q .
+}
+
 @test "build produces a 0755 CLI artefact" {
   local artifact="$BUILD_FIXTURE/grove"
 

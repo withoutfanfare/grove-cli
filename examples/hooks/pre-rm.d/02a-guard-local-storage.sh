@@ -44,8 +44,14 @@ while IFS= read -r -d '' sentinel; do
     echo "Error: Refusing removal because ${sentinel} is not tracked by Git." >&2
     exit 1
   fi
-  if ! sentinel_status="$(git -C "$GROVE_PATH" status --porcelain -- "$relative_path" 2>/dev/null)" ||
-     [[ -n "$sentinel_status" ]]; then
+  # Compare content hashes directly: `git status` honours the assume-unchanged
+  # and skip-worktree bits, which would hide local edits to a sentinel.
+  index_hash="$(git -C "$GROVE_PATH" ls-files -s -- "$relative_path" 2>/dev/null)"
+  index_hash="${index_hash#* }"
+  index_hash="${index_hash%% *}"
+  worktree_hash="$(git -C "$GROVE_PATH" hash-object "$sentinel" 2>/dev/null)"
+  if [[ -z "$index_hash" || -z "$worktree_hash" || "$worktree_hash" != "$index_hash" ]] ||
+     ! git -C "$GROVE_PATH" diff --cached --quiet -- "$relative_path" 2>/dev/null; then
     echo "Error: Refusing removal because ${sentinel} has uncommitted changes." >&2
     exit 1
   fi

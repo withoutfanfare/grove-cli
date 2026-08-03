@@ -220,6 +220,22 @@ EOF
   done
 }
 
+@test "php runtime rejects an invalid explicit GROVE_PHP_BIN instead of falling back" {
+  cat > "$HOOK_TEST_DIR/bin/php" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "$HOOK_TEST_DIR/bin/php"
+
+  run env \
+    PATH="$HOOK_TEST_DIR/bin:/usr/bin:/bin" \
+    GROVE_PHP_BIN="$HOOK_TEST_DIR/missing-php" \
+    bash -c 'source "$1/_lib/php-runtime.sh"; grove_php_bin' _ "$EXAMPLE_HOOKS"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not executable"* ]]
+}
+
 @test "composer keeps an existing key that has a trailing comment" {
   cat > "$HOOK_TEST_DIR/bin/php" <<'EOF'
 #!/bin/sh
@@ -470,6 +486,23 @@ EOF
 
   [ "$status" -eq 0 ]
   grep -Fxq 'a[1].test=/tmp/a[1].test' "$registry"
+}
+
+@test "project removal preserves the registry when rewriting fails" {
+  local remove_hook="$EXAMPLE_HOOKS/post-rm"
+  local registry="$TEST_HOME/.projects"
+  printf 'app=/tmp/app\nkeep=/tmp/keep\n' > "$registry"
+
+  run env HOME="$TEST_HOME" GROVE_PATH=/tmp/app bash -c '
+    printf() { return 1; }
+    export -f printf
+    exec bash "$1"
+  ' _ "$remove_hook"
+
+  [ "$status" -ne 0 ]
+  grep -Fxq 'app=/tmp/app' "$registry"
+  grep -Fxq 'keep=/tmp/keep' "$registry"
+  [ -z "$(find "$TEST_HOME" -maxdepth 1 -name '.projects.tmp.*' -print -quit)" ]
 }
 
 @test "environment backup creates a private destination when setup is missing" {
@@ -744,6 +777,17 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"has uncommitted changes"* ]]
 
+  git -C "$HOOK_TEST_DIR/worktree" checkout -q HEAD -- storage/app/.gitignore
+
+  git -C "$HOOK_TEST_DIR/worktree" update-index --skip-worktree storage/app/.gitignore
+  printf '# hidden tweak\n' >> "$HOOK_TEST_DIR/worktree/storage/app/.gitignore"
+
+  run env GROVE_PATH="$HOOK_TEST_DIR/worktree" bash "$hook"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"has uncommitted changes"* ]]
+
+  git -C "$HOOK_TEST_DIR/worktree" update-index --no-skip-worktree storage/app/.gitignore
   git -C "$HOOK_TEST_DIR/worktree" checkout -q HEAD -- storage/app/.gitignore
 
   rm "$HOOK_TEST_DIR/worktree/storage/app/.gitignore"

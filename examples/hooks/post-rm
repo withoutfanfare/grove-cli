@@ -22,7 +22,10 @@ if [[ -f "$PROJECTS_FILE" ]]; then
     if [[ "$line" == "$PROJECT_KEY="* ]]; then
       found=true
     else
-      printf '%s\n' "$line" >> "$projects_tmp"
+      if ! printf '%s\n' "$line" >> "$projects_tmp"; then
+        rm -f "$projects_tmp"
+        exit 1
+      fi
     fi
   done < "$PROJECTS_FILE"
 
@@ -31,6 +34,9 @@ if [[ -f "$PROJECTS_FILE" ]]; then
     exit 0
   fi
 
-  mv "$projects_tmp" "$PROJECTS_FILE"
+  if ! mv "$projects_tmp" "$PROJECTS_FILE"; then
+    rm -f "$projects_tmp"
+    exit 1
+  fi
   echo "  Unregistered project: ${PROJECT_KEY}"
 fi

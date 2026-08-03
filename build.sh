@@ -26,6 +26,13 @@ elif [[ -n "${1:-}" ]]; then
   OUTPUT="$1"
 fi
 
+# An existing directory would make the final `mv` relocate the temp file into
+# it and report success without ever producing the artefact.
+if [[ -d "$OUTPUT" ]]; then
+  echo "Error: Output path is a directory: $OUTPUT" >&2
+  exit 1
+fi
+
 # Append a module, stripping only a genuine leading shebang (#!) so the combined
 # file keeps a single shebang. A module whose first line is real code is appended
 # verbatim rather than having a valid line of code silently removed.

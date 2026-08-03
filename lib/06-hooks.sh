@@ -11,31 +11,41 @@ verify_hook_path_security() {
   local target="$1"
   local kind="$2"   # "Hook" or "Hook directory" - used for messaging
   local current_uid="${_GROVE_UID:-$(id -u)}"
+  local trusted_root="${GROVE_HOOKS_DIR:A}"
+  local checked="${target:A}"
+  local owner perms group_digit other_digit
 
-  # Check ownership (macOS stat format, with Linux fallback)
-  local owner; owner="$(stat -Lf %u "$target" 2>/dev/null || stat -Lc %u "$target" 2>/dev/null)"
-  if [[ "$owner" != "$current_uid" ]]; then
-    warn "$kind '$target' is not owned by current user - skipping for security"
-    return 1
-  fi
+  while true; do
+    # Check ownership (macOS stat format, with Linux fallback)
+    owner="$(stat -Lf %u "$checked" 2>/dev/null || stat -Lc %u "$checked" 2>/dev/null)"
+    if [[ "$owner" != "$current_uid" ]]; then
+      warn "$kind '$checked' is not owned by current user - skipping for security"
+      return 1
+    fi
 
-  # Check for group- or world-writable (macOS octal perms, with Linux fallback).
-  # Octal write bit (2) is set when the digit is one of 2,3,6,7.
-  local perms; perms="$(stat -Lf %Lp "$target" 2>/dev/null || stat -Lc %a "$target" 2>/dev/null)"
-  # Normalise to a 3-digit owner/group/other string.
-  perms="${perms: -3}"
-  local group_digit="${perms:1:1}"
-  local other_digit="${perms: -1}"
-  if [[ "$group_digit" =~ [2367] ]]; then
-    warn "$kind '$target' is group-writable - skipping for security"
-    return 1
-  fi
-  if [[ "$other_digit" =~ [2367] ]]; then
-    warn "$kind '$target' is world-writable - skipping for security"
-    return 1
-  fi
+    # Check for group- or world-writable (macOS octal perms, with Linux fallback).
+    # Octal write bit (2) is set when the digit is one of 2,3,6,7.
+    perms="$(stat -Lf %Lp "$checked" 2>/dev/null || stat -Lc %a "$checked" 2>/dev/null)"
+    # Normalise to a 3-digit owner/group/other string.
+    perms="${perms: -3}"
+    group_digit="${perms:1:1}"
+    other_digit="${perms: -1}"
+    if [[ "$group_digit" =~ [2367] ]]; then
+      warn "$kind '$checked' is group-writable - skipping for security"
+      return 1
+    fi
+    if [[ "$other_digit" =~ [2367] ]]; then
+      warn "$kind '$checked' is world-writable - skipping for security"
+      return 1
+    fi
 
-  return 0
+    [[ "$checked" == "$trusted_root" ]] && return 0
+    if [[ "$checked" != "$trusted_root/"* ]]; then
+      warn "$kind '$target' resolves outside the trusted hook directory - skipping for security"
+      return 1
+    fi
+    checked="${checked:h}"
+  done
 }
 
 # verify_hook_security — Check hook file ownership and permissions before execution

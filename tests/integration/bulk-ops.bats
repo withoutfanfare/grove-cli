@@ -62,17 +62,30 @@ seed_group() {
   [[ "$output" != *"prompted"* ]]
 }
 
-@test "danger guard still blocks a real dd command" {
-  run zsh -c '
-    warn() { print -r -- "$*"; }
-    confirm() { return 1; }
-    error_exit() { exit "${3:-1}"; }
-    source "$1/lib/commands/bulk-ops.sh"
-    _check_dangerous_command "dd if=/dev/zero of=/dev/disk9"
-  ' _ "$GROVE_ROOT"
+@test "danger guard blocks real dd commands including path-prefixed executables" {
+  local command
+  for command in \
+    "dd if=/dev/zero of=/dev/disk9" \
+    "/bin/dd if=/dev/zero of=/dev/disk9" \
+    "/usr/local/bin/dd if=/dev/zero of=/dev/disk9" \
+    "\"dd\" if=/dev/zero of=/dev/disk9" \
+    "'dd' if=/dev/zero of=/dev/disk9" \
+    "\"/bin/dd\" if=/dev/zero of=/dev/disk9" \
+    "'/usr/local/bin/dd' if=/dev/zero of=/dev/disk9" \
+    "(dd if=/dev/zero of=/dev/disk9)" \
+    "echo \$(dd if=/dev/zero of=/dev/disk9)" \
+    "echo \`dd if=/dev/zero of=/dev/disk9\`"; do
+    run zsh -c '
+      warn() { print -r -- "$*"; }
+      confirm() { return 1; }
+      error_exit() { exit "${3:-1}"; }
+      source "$1/lib/commands/bulk-ops.sh"
+      _check_dangerous_command "$2"
+    ' _ "$GROVE_ROOT" "$command"
 
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"could be destructive"* ]]
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"could be destructive"* ]]
+  done
 }
 
 @test "danger guard blocks redirection to common block devices" {
