@@ -14,8 +14,10 @@ if [[ ! -f "${GROVE_PATH}/package.json" ]]; then
 fi
 
 if ! command -v npm >/dev/null 2>&1; then
-  echo "  npm not found - run manually: npm install"
-  exit 0
+  # Fail loudly: a worktree with no node_modules looks fine until every page
+  # 500s on a missing asset manifest.
+  echo "  npm not found - dependencies NOT installed. Run manually: npm install"
+  exit 1
 fi
 
 cd "$GROVE_PATH" || exit 0

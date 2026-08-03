@@ -108,6 +108,28 @@ ensure_tool_path() {
       PATH="${PATH:+$PATH:}$p"
     fi
   done
+
+  # nvm-managed node lives under a versioned directory, so it cannot be a static
+  # entry above. Shells that lazy-load nvm expose npm as a shell function only,
+  # which the bash hook subprocesses never inherit — without this, npm-dependent
+  # hooks silently skip themselves and the worktree ends up with no node_modules.
+  # ponytail: picks the highest version under the last matching nvm root (so
+  # Herd's wins over a plain ~/.nvm) and ignores .nvmrc; a hook that needs a
+  # pinned version should source nvm itself.
+  # `whence -p`, not `command -v`: the latter matches the lazy-load shell
+  # function and would report npm as present when no binary is on PATH.
+  if ! whence -p npm >/dev/null 2>&1; then
+    local -a node_bins
+    node_bins=(
+      "${NVM_DIR:-$HOME/.nvm}/versions/node"/*/bin(N/n)
+      "$HOME/Library/Application Support/Herd/config/nvm/versions/node"/*/bin(N/n)
+    )
+    if (( $#node_bins )); then
+      local node_bin="${node_bins[-1]}"
+      [[ ":${PATH:-}:" != *":$node_bin:"* ]] && PATH="${PATH:+$PATH:}$node_bin"
+    fi
+  fi
+
   export PATH
 }
 
@@ -2277,31 +2299,41 @@ verify_hook_path_security() {
   local target="$1"
   local kind="$2"   # "Hook" or "Hook directory" - used for messaging
   local current_uid="${_GROVE_UID:-$(id -u)}"
+  local trusted_root="${GROVE_HOOKS_DIR:A}"
+  local checked="${target:A}"
+  local owner perms group_digit other_digit
 
-  # Check ownership (macOS stat format, with Linux fallback)
-  local owner; owner="$(stat -Lf %u "$target" 2>/dev/null || stat -Lc %u "$target" 2>/dev/null)"
-  if [[ "$owner" != "$current_uid" ]]; then
-    warn "$kind '$target' is not owned by current user - skipping for security"
-    return 1
-  fi
+  while true; do
+    # Check ownership (macOS stat format, with Linux fallback)
+    owner="$(stat -Lf %u "$checked" 2>/dev/null || stat -Lc %u "$checked" 2>/dev/null)"
+    if [[ "$owner" != "$current_uid" ]]; then
+      warn "$kind '$checked' is not owned by current user - skipping for security"
+      return 1
+    fi
 
-  # Check for group- or world-writable (macOS octal perms, with Linux fallback).
-  # Octal write bit (2) is set when the digit is one of 2,3,6,7.
-  local perms; perms="$(stat -Lf %Lp "$target" 2>/dev/null || stat -Lc %a "$target" 2>/dev/null)"
-  # Normalise to a 3-digit owner/group/other string.
-  perms="${perms: -3}"
-  local group_digit="${perms:1:1}"
-  local other_digit="${perms: -1}"
-  if [[ "$group_digit" =~ [2367] ]]; then
-    warn "$kind '$target' is group-writable - skipping for security"
-    return 1
-  fi
-  if [[ "$other_digit" =~ [2367] ]]; then
-    warn "$kind '$target' is world-writable - skipping for security"
-    return 1
-  fi
+    # Check for group- or world-writable (macOS octal perms, with Linux fallback).
+    # Octal write bit (2) is set when the digit is one of 2,3,6,7.
+    perms="$(stat -Lf %Lp "$checked" 2>/dev/null || stat -Lc %a "$checked" 2>/dev/null)"
+    # Normalise to a 3-digit owner/group/other string.
+    perms="${perms: -3}"
+    group_digit="${perms:1:1}"
+    other_digit="${perms: -1}"
+    if [[ "$group_digit" =~ [2367] ]]; then
+      warn "$kind '$checked' is group-writable - skipping for security"
+      return 1
+    fi
+    if [[ "$other_digit" =~ [2367] ]]; then
+      warn "$kind '$checked' is world-writable - skipping for security"
+      return 1
+    fi
 
-  return 0
+    [[ "$checked" == "$trusted_root" ]] && return 0
+    if [[ "$checked" != "$trusted_root/"* ]]; then
+      warn "$kind '$target' resolves outside the trusted hook directory - skipping for security"
+      return 1
+    fi
+    checked="${checked:h}"
+  done
 }
 
 # verify_hook_security — Check hook file ownership and permissions before execution
@@ -8704,9 +8736,10 @@ cmd_version_check() {
 #   0 if no pattern matched or the user confirmed; exits if the user aborts
 _check_dangerous_command() {
   local cmd_str="$1"
+  local dd_pattern="(^|[[:space:];|&(\`])[\"']?([^[:space:];|&\"']*/)?dd[\"']?([[:space:]]|$)"
 
   if [[ "$cmd_str" == *"rm -rf"* ]] || [[ "$cmd_str" == *"mkfs"* ]] || \
-     [[ "$cmd_str" =~ '(^|[[:space:];|&])dd([[:space:]]|$)' ]] || [[ "$cmd_str" == *":()"* ]] || \
+     [[ "$cmd_str" =~ "$dd_pattern" ]] || [[ "$cmd_str" == *":()"* ]] || \
      [[ "$cmd_str" =~ '>[[:space:]]*/dev/(disk|rdisk|sd|nvme|mmcblk|vd|xvd|md|mapper/|dm-)' ]] || [[ "$cmd_str" == *"shutdown"* ]] || \
      [[ "$cmd_str" == *"reboot"* ]] || [[ "$cmd_str" == *"init 0"* ]]; then
     warn "This looks like it could be destructive: $cmd_str"

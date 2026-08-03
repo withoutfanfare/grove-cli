@@ -35,6 +35,28 @@ ensure_tool_path() {
       PATH="${PATH:+$PATH:}$p"
     fi
   done
+
+  # nvm-managed node lives under a versioned directory, so it cannot be a static
+  # entry above. Shells that lazy-load nvm expose npm as a shell function only,
+  # which the bash hook subprocesses never inherit — without this, npm-dependent
+  # hooks silently skip themselves and the worktree ends up with no node_modules.
+  # ponytail: picks the highest version under the last matching nvm root (so
+  # Herd's wins over a plain ~/.nvm) and ignores .nvmrc; a hook that needs a
+  # pinned version should source nvm itself.
+  # `whence -p`, not `command -v`: the latter matches the lazy-load shell
+  # function and would report npm as present when no binary is on PATH.
+  if ! whence -p npm >/dev/null 2>&1; then
+    local -a node_bins
+    node_bins=(
+      "${NVM_DIR:-$HOME/.nvm}/versions/node"/*/bin(N/n)
+      "$HOME/Library/Application Support/Herd/config/nvm/versions/node"/*/bin(N/n)
+    )
+    if (( $#node_bins )); then
+      local node_bin="${node_bins[-1]}"
+      [[ ":${PATH:-}:" != *":$node_bin:"* ]] && PATH="${PATH:+$PATH:}$node_bin"
+    fi
+  fi
+
   export PATH
 }
 
