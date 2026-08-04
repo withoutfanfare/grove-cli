@@ -42,6 +42,12 @@ GROVE_DIR=""
 # Global flags
 QUIET=false
 FORCE=false
+# A one-use Worktree Ledger acknowledgement token (--ledger-ack). Separate from
+# FORCE on purpose: -f forces git, a token accepts the loss of recorded risk.
+LEDGER_ACK=""
+# Worktree Ledger integration: auto (use it when `way` is present), off, or
+# required (an unavailable ledger blocks removal).
+LEDGER_INTEGRATION="${LEDGER_INTEGRATION:-auto}"
 JSON_OUTPUT=false
 PRETTY_JSON=false
 DRY_RUN=false
@@ -230,6 +236,9 @@ load_config() {
       REPO_GROUPS) REPO_GROUPS="$value" ;;
       GROVE_SHARED_DEPS_DIR) GROVE_SHARED_DEPS_DIR="$value" ;;
       GROVE_STALE_THRESHOLD) GROVE_STALE_THRESHOLD="$value" ;;
+      # auto (default) | off | required — see lib/13-ledger.sh
+      LEDGER_INTEGRATION) LEDGER_INTEGRATION="$value" ;;
+      GROVE_WAY_BIN) GROVE_WAY_BIN="$value" ;;
     esac
   }
 
@@ -351,6 +360,7 @@ dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}" >&2; }
 #              REPO_NOT_FOUND, BRANCH_NOT_FOUND, WORKTREE_NOT_FOUND (exit 3)
 #              GIT_ERROR, WORKTREE_EXISTS, PROTECTED_BRANCH (exit 4)
 #              DB_ERROR, HOOK_FAILED, IO_ERROR (exit 5)
+#              LEDGER_BLOCKED (exit 6) - the worktree ledger refused a removal
 die_json() {
   local code="$1"
   local message="$2"
@@ -2433,6 +2443,12 @@ _run_single_hook() {
     # Control flags for hooks
     [[ "$NO_BACKUP" == true ]] && export GROVE_NO_BACKUP="true"
     [[ "$DROP_DB" == true ]] && export GROVE_DROP_DB="true"
+    # Whether -f was passed. Exported so a hook can REPORT that a removal was
+    # forced — never so it can skip its own checks. Forcing git and accepting
+    # the loss of unrecorded work are different decisions.
+    [[ "$FORCE" == true ]] && export GROVE_FORCE="true"
+    # A one-use ledger acknowledgement token, when the operator supplied one.
+    [[ -n "${LEDGER_ACK:-}" ]] && export GROVE_LEDGER_ACK="$LEDGER_ACK"
 
     # Run hook from the worktree directory
     cd "$wt_path" 2>/dev/null || cd "$HOME"
@@ -4277,6 +4293,154 @@ cmd_share_deps_clean() {
   print -r -- ""
 }
 
+# 13-ledger.sh - Optional Worktree Ledger integration (Waypoint's `way` CLI)
+#
+# Grove owns the worktree lifecycle; Waypoint owns whether a worktree still
+# holds work nobody has recorded. This module is the seam between them, and it
+# has three rules:
+#
+#   1. Optional. No `way` on PATH, or LEDGER_INTEGRATION=off, and grove behaves
+#      exactly as it always has. The degraded mode is announced on stderr, never
+#      silent, because "no gate ran" and "the gate passed" must never look alike.
+#   2. Fails closed on risk, open on absence. A `way` that says "blocked" stops
+#      the removal. A `way` that cannot answer at all does not.
+#   3. `-f` is not consent. Forcing git and accepting the loss of uncommitted
+#      work are different decisions. Only a one-use token from
+#      `way worktree removal-check --acknowledge` opens this gate.
+#
+# Grove never parses the ledger's Markdown, and never decides what is risky. It
+# asks, relays the answer verbatim, and obeys the exit code.
+
+# way_binary — Print the `way` binary to use, or return 1 when unavailable
+#
+# A GUI-launched process does not inherit the shell PATH, so the usual install
+# locations are probed as well.
+way_binary() {
+  local candidate
+  for candidate in "${GROVE_WAY_BIN:-}" way "$HOME/.local/bin/way" "$HOME/.cargo/bin/way" \
+    /opt/homebrew/bin/way /usr/local/bin/way; do
+    [[ -n "$candidate" ]] || continue
+    if command -v "$candidate" >/dev/null 2>&1; then
+      print -r -- "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ledger_enabled — Whether the ledger gate should run at all
+#
+# LEDGER_INTEGRATION (config or environment):
+#   auto     - use the ledger when `way` is available (default)
+#   off      - never use it
+#   required - use it, and treat an unavailable `way` as a failure
+ledger_enabled() {
+  local mode="${LEDGER_INTEGRATION:-auto}"
+  [[ "$mode" == "off" ]] && return 1
+  return 0
+}
+
+# ledger_check_removal — Ask the ledger whether a worktree may be removed
+#
+# Arguments:
+#   $1 - worktree path
+#   $2 - acknowledgement token, or empty
+#
+# Returns:
+#   0 - removal may proceed (clear, acknowledged, or the ledger is unavailable
+#       in `auto` mode)
+#   1 - removal is blocked; the reason has already been printed to stderr
+#
+# Human-readable output from `way` is relayed verbatim rather than summarised:
+# it carries the remedy for each risk, and a gate that blocks without saying how
+# to proceed is exactly what teaches people to reach for -f.
+ledger_check_removal() {
+  local wt_path="$1"
+  local token="${2:-}"
+  local mode="${LEDGER_INTEGRATION:-auto}"
+
+  ledger_enabled || return 0
+
+  local way_bin=""
+  if ! way_bin="$(way_binary)"; then
+    if [[ "$mode" == "required" ]]; then
+      warn "LEDGER_INTEGRATION=required but the 'way' binary was not found"
+      return 1
+    fi
+    dim "  Worktree ledger unavailable ('way' not found) - removal not checked"
+    return 0
+  fi
+
+  [[ -d "$wt_path" ]] || return 0
+
+  local -a args
+  args=(worktree removal-check)
+  [[ -n "$token" ]] && args+=(--override-token "$token")
+
+  # Run from inside the worktree: `way` detects which worktree it is from cwd.
+  local output="" exit_code=0
+  output="$(cd "$wt_path" && "$way_bin" "${args[@]}" 2>&1)" || exit_code=$?
+
+  case $exit_code in
+    0)
+      [[ -n "$token" ]] && ok "Ledger acknowledgement accepted"
+      return 0
+      ;;
+    1)
+      # Blocked, or the token was refused. Either way `way` has explained it.
+      print -r -- "$output" >&2
+      return 1
+      ;;
+    *)
+      # Usage errors, an unregistered worktree, or no ledger root configured.
+      # None of these is evidence that the worktree is unsafe, so in `auto` mode
+      # grove carries on — but says so, so the gap is visible.
+      if [[ "$mode" == "required" ]]; then
+        warn "Worktree ledger could not answer (exit $exit_code):"
+        print -r -- "$output" >&2
+        return 1
+      fi
+      dim "  Worktree ledger not consulted: ${output%%$'\n'*}"
+      return 0
+      ;;
+  esac
+}
+
+# ledger_register — Register a newly created worktree, best effort
+#
+# Never fails the caller: a worktree that exists but is unregistered is a gap to
+# report, not a reason to undo a successful `grove add`.
+ledger_register() {
+  local wt_path="$1"
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$wt_path" ]] || return 0
+
+  local output="" exit_code=0
+  output="$(cd "$wt_path" && "$way_bin" worktree register 2>&1)" || exit_code=$?
+  if (( exit_code == 0 )); then
+    dim "  Registered in the worktree ledger"
+  else
+    dim "  Worktree ledger registration skipped: ${output%%$'\n'*}"
+  fi
+  return 0
+}
+
+# ledger_moved — Reconcile a worktree's recorded path after a move, best effort
+ledger_moved() {
+  local wt_path="$1"
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$wt_path" ]] || return 0
+
+  (cd "$wt_path" && "$way_bin" worktree moved >/dev/null 2>&1) || true
+  return 0
+}
+
 # lifecycle.sh - Worktree creation and removal commands
 
 # _update_env_app_url — Rewrite ONLY the APP_URL= line in a .env file, preserving every
@@ -4600,6 +4764,10 @@ cmd_add() {
   transaction_commit
 
   # Run post-add hooks
+  # Register before the post-add hooks so a hook can already resume the ledger.
+  # Best effort: a failure here never undoes a successful add.
+  ledger_register "$wt_path"
+
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   # Restart Herd services to pick up new site
@@ -4663,6 +4831,15 @@ cmd_rm() {
       read -r response
       [[ "$response" =~ ^[Yy]$ ]] || error_exit "INVALID_INPUT" "aborted by user" 2
     fi
+  fi
+
+  # Worktree Ledger gate. Deliberately BEFORE the pre-rm hooks and before git
+  # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
+  # it does not accept the loss of work nobody has recorded. The only way past
+  # this is a one-use token from `way worktree removal-check --acknowledge`,
+  # supplied as --ledger-ack.
+  if ! ledger_check_removal "$wt_path" "$LEDGER_ACK"; then
+    error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
   fi
 
   # Run pre-rm hooks
@@ -4877,6 +5054,9 @@ cmd_move() {
   transaction_commit
 
   # Run post-move hooks (with new path, URL, and db_name)
+  # The worktree id is unchanged; only its observed path moves.
+  ledger_moved "$new_wt_path"
+
   run_hooks "post-move" "$repo" "$branch" "$new_wt_path" "$new_url" "$db_name"
 
   print -r -- ""
@@ -11492,13 +11672,14 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}FLAGS${C_RESET}"
   print -r -- "  ${C_YELLOW}-q, --quiet${C_RESET}          Suppress informational output"
-  print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal"
+  print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal (does not bypass the ledger)"
   print -r -- "  ${C_YELLOW}-i, --interactive${C_RESET}    Launch interactive worktree creation wizard"
   print -r -- "  ${C_YELLOW}--json${C_RESET}               Output in JSON format"
   print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
   print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add)"
   print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
+  print -r -- "  ${C_YELLOW}--ledger-ack <token>${C_RESET} One-use worktree-ledger acknowledgement (NOT implied by -f)"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
   print -r -- "  ${C_YELLOW}--no-cache${C_RESET}           Bypass fetch cache (always fetch fresh)"
@@ -11598,6 +11779,13 @@ parse_flags() {
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;
+      # Deliberately NOT an alias for -f: a token is a separate, recorded,
+      # single-use decision issued by `way worktree removal-check --acknowledge`.
+      --ledger-ack)
+        shift
+        [[ $# -gt 0 ]] || error_exit "INVALID_INPUT" "--ledger-ack requires a token" 2
+        LEDGER_ACK="$1"
+        ;;
       -i|--interactive) INTERACTIVE=true ;;
       --json) JSON_OUTPUT=true ;;
       --delete-branch) DELETE_BRANCH=true ;;

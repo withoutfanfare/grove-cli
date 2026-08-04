@@ -322,6 +322,10 @@ cmd_add() {
   transaction_commit
 
   # Run post-add hooks
+  # Register before the post-add hooks so a hook can already resume the ledger.
+  # Best effort: a failure here never undoes a successful add.
+  ledger_register "$wt_path"
+
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   # Restart Herd services to pick up new site
@@ -385,6 +389,15 @@ cmd_rm() {
       read -r response
       [[ "$response" =~ ^[Yy]$ ]] || error_exit "INVALID_INPUT" "aborted by user" 2
     fi
+  fi
+
+  # Worktree Ledger gate. Deliberately BEFORE the pre-rm hooks and before git
+  # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
+  # it does not accept the loss of work nobody has recorded. The only way past
+  # this is a one-use token from `way worktree removal-check --acknowledge`,
+  # supplied as --ledger-ack.
+  if ! ledger_check_removal "$wt_path" "$LEDGER_ACK"; then
+    error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
   fi
 
   # Run pre-rm hooks
@@ -599,6 +612,9 @@ cmd_move() {
   transaction_commit
 
   # Run post-move hooks (with new path, URL, and db_name)
+  # The worktree id is unchanged; only its observed path moves.
+  ledger_moved "$new_wt_path"
+
   run_hooks "post-move" "$repo" "$branch" "$new_wt_path" "$new_url" "$db_name"
 
   print -r -- ""
