@@ -96,9 +96,28 @@ has nothing to say about it.**
 | Command | Ledger action |
 |---|---|
 | `grove add` | Registers the new worktree. Best effort — a failure never undoes the add. |
-| `grove rm` | Gates removal, before the confirmation prompt and before git touches anything. |
+| `grove rm` | Gates removal, before the confirmation prompt and before git touches anything. Then archives the record once the worktree is gone. |
 | `grove move` | Reconciles the recorded path. The worktree's identity is unchanged. |
 | `grove status --json` | Adds an optional nested `ledger` object. |
+
+### Archiving on removal
+
+The worktree's ledger id is read **before** git touches anything — once the
+folder has gone there is nowhere to stand and no sidecar to read, so the id is
+the only handle left on the record. After the removal succeeds, grove issues
+`way worktree archive --worktree-id <id>`.
+
+This is best effort in both directions, and deliberately so:
+
+- No id (an unregistered worktree, or `way` could not be asked) means grove
+  leaves the record alone rather than guessing which one to close.
+- A failed archive never fails the removal. The worktree is already gone by
+  then; reporting a successful removal as a failure would be worse than a
+  stale record.
+
+Archiving retains every ref — it records that the work is finished with, it
+does not delete anything. Without it, a removed worktree stays `active` for
+ever and `way worktree doctor` keeps counting folders that no longer exist.
 
 ## The `ledger` object in JSON
 

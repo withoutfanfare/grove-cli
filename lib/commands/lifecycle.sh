@@ -386,6 +386,13 @@ cmd_rm() {
     error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
   fi
 
+  # Read the ledger id while the worktree still exists — it is the only handle
+  # left on the record once the folder has gone, and without it the removed
+  # worktree stays `active` in the ledger for ever.
+  local ledger_id=""
+  ledger_worktree_id "$wt_path"
+  ledger_id="$REPLY"
+
   # Check for uncommitted changes and confirm (unless --force)
   if [[ "$FORCE" == false ]]; then
     local wt_status; wt_status="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || wt_status=""
@@ -462,6 +469,12 @@ cmd_rm() {
 
   info "Pruning stale worktrees..."
   git --git-dir="$git_dir" worktree prune
+
+  # Close the ledger record now the worktree is genuinely gone. Best effort: the
+  # removal has already succeeded, so a bookkeeping failure must not report it
+  # as a failure. Refs are retained — archiving records the end of the work, it
+  # does not destroy anything.
+  ledger_archive "$ledger_id" "removed by grove"
 
   # Run post-rm hooks
   run_hooks "post-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"

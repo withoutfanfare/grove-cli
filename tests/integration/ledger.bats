@@ -401,3 +401,63 @@ assert d['available'] is False, d
   [ "$status" -eq 0 ]
   [[ "$output" == "[]" ]]
 }
+
+# --- archiving on removal --------------------------------------------------
+#
+# Slice 2 specified a `post-rm` archive and it was never written, so every
+# worktree grove removed stayed `active` in the ledger for ever. `doctor` kept
+# counting folders that no longer exist, which is precisely the "the record
+# disagrees with the disk" failure the ledger is meant to catch.
+#
+# The id has to be read BEFORE the folder goes, and the archive issued AFTER —
+# so these are two functions, and neither may ever fail a removal.
+
+@test "ledger: the worktree id is captured before removal" {
+  cat > "$STUB_BIN/way" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TEST_TEMP_DIR/way-argv.log"
+printf '%s\n' '{"view":{"worktree_id":"wt_abc123"}}'
+exit 0
+EOF
+  chmod +x "$STUB_BIN/way"
+  run_zsh "ledger_worktree_id '$WT'; print -r -- \"\$REPLY\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"wt_abc123"* ]]
+}
+
+@test "ledger: archiving names the worktree by id and records the reason" {
+  stub_way 0 "archived wt_abc123"
+  run_zsh "ledger_archive 'wt_abc123' 'removed by grove'"
+  [ "$status" -eq 0 ]
+  run cat "$TEST_TEMP_DIR/way-argv.log"
+  [[ "$output" == *"worktree archive"* ]]
+  [[ "$output" == *"--worktree-id wt_abc123"* ]]
+  [[ "$output" == *"--reason removed by grove"* ]]
+}
+
+@test "ledger: a failed archive never fails the removal that already happened" {
+  # The worktree is already gone by this point. Turning a bookkeeping failure
+  # into a non-zero exit would report a successful removal as a failure.
+  stub_way 1 "ledger unreachable"
+  run_zsh "ledger_archive 'wt_abc123' 'removed by grove'"
+  [ "$status" -eq 0 ]
+}
+
+@test "ledger: an absent way binary makes archiving a no-op, not an error" {
+  run_zsh_without_way "ledger_archive 'wt_abc123' 'removed by grove'"
+  [ "$status" -eq 0 ]
+}
+
+@test "ledger: LEDGER_INTEGRATION=off skips archiving entirely" {
+  stub_way 0 "archived"
+  run_zsh "LEDGER_INTEGRATION=off; ledger_archive 'wt_abc123' 'removed by grove'"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_TEMP_DIR/way-argv.log" ]
+}
+
+@test "ledger: archiving without an id does nothing rather than guessing" {
+  stub_way 0 "archived"
+  run_zsh "ledger_archive '' 'removed by grove'"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_TEMP_DIR/way-argv.log" ]
+}

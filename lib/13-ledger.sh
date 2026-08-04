@@ -134,6 +134,69 @@ ledger_register() {
   return 0
 }
 
+# ledger_worktree_id — Set REPLY to a worktree's ledger id, or the empty string
+#
+# Must be called BEFORE removal. Once the folder has gone there is nowhere to
+# stand and no sidecar to read, so the id is the only handle left on the record.
+ledger_worktree_id() {
+  REPLY=""
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$1" ]] || return 0
+
+  local output=""
+  output="$(cd "$1" && "$way_bin" worktree resume --format json 2>/dev/null)" || return 0
+  [[ -n "$output" ]] || return 0
+
+  # One python pass rather than shell string-mangling: this is Waypoint's JSON,
+  # and a half-parsed id would archive the wrong record.
+  REPLY="$(print -r -- "$output" | python3 -c '
+import json, sys
+
+try:
+    brief = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+print((brief.get("view") or {}).get("worktree_id") or "")
+' 2>/dev/null)" || REPLY=""
+  return 0
+}
+
+# ledger_archive — Record that a removed worktree is finished with
+#
+# Best effort, always, and deliberately so: by the time this runs the worktree
+# is already gone. Turning a bookkeeping failure into a non-zero exit would
+# report a successful removal as a failure.
+#
+# Without this the ledger keeps every removed worktree `active` for ever —
+# `doctor` counts folders that do not exist, which is the same "record
+# disagrees with the disk" problem the ledger exists to catch.
+ledger_archive() {
+  local worktree_id="$1"
+  local reason="${2:-removed by grove}"
+
+  # No id means the worktree was never registered, or `way` could not be asked
+  # before removal. Guessing which record to close would be worse than leaving
+  # it open.
+  [[ -n "$worktree_id" ]] || return 0
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+
+  local output="" exit_code=0
+  output="$("$way_bin" worktree archive --worktree-id "$worktree_id" --reason "$reason" 2>&1)" \
+    || exit_code=$?
+
+  if (( exit_code == 0 )); then
+    dim "  Archived in the worktree ledger"
+  else
+    dim "  Worktree ledger archive skipped: ${output%%$'\n'*}"
+  fi
+  return 0
+}
+
 # ledger_moved — Reconcile a worktree's recorded path after a move, best effort
 ledger_moved() {
   local wt_path="$1"
