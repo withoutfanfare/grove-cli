@@ -457,6 +457,7 @@ For full setup, config format, and troubleshooting, see [docs/guides/services.md
 | `--pretty` | Pretty-print JSON output with colours (needs `jq`) |
 | `--dry-run` | Preview actions without executing (`grove add`) |
 | `--delete-branch` | Delete branch when removing worktree |
+| `--ledger-ack=<token>` | One-use Worktree Ledger acknowledgement. **Not implied by `-f`** — see [the guide](docs/guides/worktree-ledger.md) |
 | `--drop-db` | Drop database when removing worktree |
 | `--no-backup` | Skip database backup when removing worktree |
 | `--no-cache` | Bypass the fetch cache (always fetch fresh) |

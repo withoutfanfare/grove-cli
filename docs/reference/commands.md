@@ -110,7 +110,7 @@ Removes a worktree with cleanup of associated resources.
 **Usage**
 
 ```bash
-grove rm [-f] [--delete-branch] [--drop-db] [--no-backup] <repo> [branch]
+grove rm [-f] [--delete-branch] [--drop-db] [--no-backup] [--ledger-ack <token>] <repo> [branch]
 ```
 
 If `branch` is omitted and `fzf` is installed, an interactive picker is shown.
@@ -133,6 +133,11 @@ grove rm example-app
 
 # Explicit branch
 grove rm example-app feature/done
+
+# When the Worktree Ledger refuses a removal, `-f` does NOT override it.
+# Issue a one-use code first, then pass it:
+way worktree removal-check --acknowledge      # run inside the worktree
+grove rm -f --ledger-ack ack1.ack_019f… example-app feature/done
 
 # Force remove (bypass warnings)
 grove rm -f example-app feature/done
