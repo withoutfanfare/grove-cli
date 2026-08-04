@@ -438,3 +438,18 @@ GROVE_URL_SUBDOMAIN=api
 3. **Keep repo configs minimal** — only override the four keys that genuinely differ from your global settings.
 4. **Mind the namespace split** — config files use names like `DEFAULT_BASE`; the matching shell environment variable is `GROVE_BASE_DEFAULT`. See the [mapping table](#config-file-keys-vs-environment-variables).
 5. **Quote values with spaces** (e.g. `PROTECTED_BRANCHES`), and remember `~`/`$HOME` only expand for path-typed keys.
+
+## Worktree Ledger
+
+Optional integration with Waypoint's Worktree Ledger, which refuses to remove a
+worktree holding work nobody has recorded. See
+[the guide](../guides/worktree-ledger.md).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `LEDGER_INTEGRATION` | `auto` | `auto` uses the ledger when `way` is available; `off` never does; `required` also refuses removal when the ledger cannot answer. |
+| `GROVE_WAY_BIN` | *(unset)* | Explicit path to the `way` binary. Otherwise `PATH` is searched, then the usual install locations — a GUI-launched process does not inherit the shell `PATH`. |
+
+`grove rm -f` does **not** bypass the gate. To proceed past a refusal, issue a
+one-use token with `way worktree removal-check --acknowledge` and pass it as
+`grove rm --ledger-ack <token>`.

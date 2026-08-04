@@ -138,6 +138,7 @@ _grove() {
     '--pretty[Pretty-print JSON output with colours]'
     '--dry-run[Preview actions without executing]'
     '--delete-branch[Delete branch when removing worktree]'
+    '--ledger-ack=[One-use worktree-ledger acknowledgement token]:token:'
     '--drop-db[Drop database when removing worktree]'
     '--no-backup[Skip database backup when removing worktree]'
     '--all-repos[Apply operation to all repositories]'

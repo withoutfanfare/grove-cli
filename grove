@@ -42,6 +42,12 @@ GROVE_DIR=""
 # Global flags
 QUIET=false
 FORCE=false
+# A one-use Worktree Ledger acknowledgement token (--ledger-ack). Separate from
+# FORCE on purpose: -f forces git, a token accepts the loss of recorded risk.
+LEDGER_ACK=""
+# Worktree Ledger integration: auto (use it when `way` is present), off, or
+# required (an unavailable ledger blocks removal).
+LEDGER_INTEGRATION="${LEDGER_INTEGRATION:-auto}"
 JSON_OUTPUT=false
 PRETTY_JSON=false
 DRY_RUN=false
@@ -230,6 +236,9 @@ load_config() {
       REPO_GROUPS) REPO_GROUPS="$value" ;;
       GROVE_SHARED_DEPS_DIR) GROVE_SHARED_DEPS_DIR="$value" ;;
       GROVE_STALE_THRESHOLD) GROVE_STALE_THRESHOLD="$value" ;;
+      # auto (default) | off | required — see lib/13-ledger.sh
+      LEDGER_INTEGRATION) LEDGER_INTEGRATION="$value" ;;
+      GROVE_WAY_BIN) GROVE_WAY_BIN="$value" ;;
     esac
   }
 
@@ -351,6 +360,7 @@ dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}" >&2; }
 #              REPO_NOT_FOUND, BRANCH_NOT_FOUND, WORKTREE_NOT_FOUND (exit 3)
 #              GIT_ERROR, WORKTREE_EXISTS, PROTECTED_BRANCH (exit 4)
 #              DB_ERROR, HOOK_FAILED, IO_ERROR (exit 5)
+#              LEDGER_BLOCKED (exit 6) - the worktree ledger refused a removal
 die_json() {
   local code="$1"
   local message="$2"
@@ -1759,19 +1769,63 @@ get_ahead_behind() {
   print -r -- "$ahead $behind"
 }
 
-# worktree_base_for — Read worktree-local base ref (grove.base config), with fallback
+# worktree_base_sidecar_path — Absolute path of a worktree's own grove-base file
+#
+# `git rev-parse --git-path` resolves to the per-worktree administrative
+# directory, which is the whole point: `git config --local` resolves from the
+# COMMON config on a bare-repository layout, so every linked worktree saw the
+# same grove.base and a worktree's real base was silently replaced by whichever
+# one was written last. The result is absolute inside a linked worktree and
+# relative to the worktree in a main checkout, so relative paths are joined.
+#
+# Prints nothing and returns 1 when the path is not inside a git worktree.
+worktree_base_sidecar_path() {
+  local wt_path="$1"
+  local raw=""
+
+  raw="$(git -C "$wt_path" rev-parse --git-path grove-base 2>/dev/null || true)"
+  [[ -n "$raw" ]] || return 1
+
+  if [[ "$raw" == /* ]]; then
+    print -r -- "$raw"
+  else
+    print -r -- "$wt_path/$raw"
+  fi
+}
+
+# worktree_base_for — Read a worktree's base ref, with fallback
+#
+# Resolution order:
+#   1. the per-worktree grove-base sidecar (authoritative);
+#   2. the legacy grove.base config, so worktrees created before the sidecar
+#      existed keep working (retained for at least one release);
+#   3. the supplied fallback, else DEFAULT_BASE.
 worktree_base_for() {
   local wt_path="$1"
   local fallback="${2:-$DEFAULT_BASE}"
 
-  local base=""
-  base="$(git -C "$wt_path" config --local --get grove.base 2>/dev/null || true)"
+  local base="" sidecar=""
+  sidecar="$(worktree_base_sidecar_path "$wt_path" 2>/dev/null || true)"
+  if [[ -n "$sidecar" && -r "$sidecar" ]]; then
+    # An empty or whitespace-only sidecar falls through rather than returning
+    # nothing, so a truncated write cannot silently blank the base.
+    base="$(tr -d '[:space:]' < "$sidecar" 2>/dev/null || true)"
+  fi
+
+  [[ -n "$base" ]] || base="$(git -C "$wt_path" config --local --get grove.base 2>/dev/null || true)"
   [[ -n "$base" ]] || base="$fallback"
 
   print -r -- "$base"
 }
 
-# set_worktree_base — Save base ref in worktree-local git config (grove.base)
+# set_worktree_base — Save a worktree's base ref in its own sidecar
+#
+# Writes the per-worktree sidecar (authoritative) and, for one release, the
+# legacy grove.base config as well. The legacy write is deliberate: an older
+# grove binary that only knows about grove.base would otherwise fall back to
+# DEFAULT_BASE, which is a quieter and more misleading failure than reading a
+# stale value. Readers always prefer the sidecar, so the two cannot disagree in
+# this version.
 set_worktree_base() {
   local wt_path="$1"
   local base="$2"
@@ -1781,12 +1835,23 @@ set_worktree_base() {
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
 
-  # Surface a write failure rather than silently swallowing it — a missing
-  # grove.base later forces the (possibly wrong) DEFAULT_BASE fallback. The
-  # failure is non-fatal (the fallback still works), so we warn but return 0 to
-  # avoid aborting the caller under `set -e`.
+  local sidecar=""
+  sidecar="$(worktree_base_sidecar_path "$wt_path" 2>/dev/null || true)"
+  if [[ -n "$sidecar" ]]; then
+    # Write-then-rename so a reader never sees a half-written base.
+    local tmp="${sidecar}.tmp.$$"
+    if print -r -- "$base" > "$tmp" 2>/dev/null && mv -f "$tmp" "$sidecar" 2>/dev/null; then
+      :
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      warn "Failed to save base ref '$base' for $wt_path (will fall back to default)"
+    fi
+  fi
+
+  # Legacy compatibility. Non-fatal: the sidecar above is what this version
+  # reads, so a failure here only affects an older grove.
   if ! git -C "$wt_path" config --local grove.base "$base" 2>/dev/null; then
-    warn "Failed to save base ref '$base' for $wt_path (will fall back to default)"
+    dim "  Could not update the legacy grove.base config for $wt_path"
   fi
   return 0
 }
@@ -2378,6 +2443,12 @@ _run_single_hook() {
     # Control flags for hooks
     [[ "$NO_BACKUP" == true ]] && export GROVE_NO_BACKUP="true"
     [[ "$DROP_DB" == true ]] && export GROVE_DROP_DB="true"
+    # Whether -f was passed. Exported so a hook can REPORT that a removal was
+    # forced — never so it can skip its own checks. Forcing git and accepting
+    # the loss of unrecorded work are different decisions.
+    [[ "$FORCE" == true ]] && export GROVE_FORCE="true"
+    # A one-use ledger acknowledgement token, when the operator supplied one.
+    [[ -n "${LEDGER_ACK:-}" ]] && export GROVE_LEDGER_ACK="$LEDGER_ACK"
 
     # Run hook from the worktree directory
     cd "$wt_path" 2>/dev/null || cd "$HOME"
@@ -4222,6 +4293,221 @@ cmd_share_deps_clean() {
   print -r -- ""
 }
 
+# 13-ledger.sh - Optional Worktree Ledger integration (Waypoint's `way` CLI)
+#
+# Grove owns the worktree lifecycle; Waypoint owns whether a worktree still
+# holds work nobody has recorded. This module is the seam between them, and it
+# has three rules:
+#
+#   1. Optional. No `way` on PATH, or LEDGER_INTEGRATION=off, and grove behaves
+#      exactly as it always has. The degraded mode is announced on stderr, never
+#      silent, because "no gate ran" and "the gate passed" must never look alike.
+#   2. Fails closed on risk, open on absence. A `way` that says "blocked" stops
+#      the removal. A `way` that cannot answer at all does not.
+#   3. `-f` is not consent. Forcing git and accepting the loss of uncommitted
+#      work are different decisions. Only a one-use token from
+#      `way worktree removal-check --acknowledge` opens this gate.
+#
+# Grove never parses the ledger's Markdown, and never decides what is risky. It
+# asks, relays the answer verbatim, and obeys the exit code.
+
+# way_binary — Print the `way` binary to use, or return 1 when unavailable
+#
+# A GUI-launched process does not inherit the shell PATH, so the usual install
+# locations are probed as well.
+way_binary() {
+  local candidate
+  for candidate in "${GROVE_WAY_BIN:-}" way "$HOME/.local/bin/way" "$HOME/.cargo/bin/way" \
+    /opt/homebrew/bin/way /usr/local/bin/way; do
+    [[ -n "$candidate" ]] || continue
+    if command -v "$candidate" >/dev/null 2>&1; then
+      print -r -- "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ledger_enabled — Whether the ledger gate should run at all
+#
+# LEDGER_INTEGRATION (config or environment):
+#   auto     - use the ledger when `way` is available (default)
+#   off      - never use it
+#   required - use it, and treat an unavailable `way` as a failure
+ledger_enabled() {
+  local mode="${LEDGER_INTEGRATION:-auto}"
+  [[ "$mode" == "off" ]] && return 1
+  return 0
+}
+
+# ledger_check_removal — Ask the ledger whether a worktree may be removed
+#
+# Arguments:
+#   $1 - worktree path
+#   $2 - acknowledgement token, or empty
+#
+# Returns:
+#   0 - removal may proceed (clear, acknowledged, or the ledger is unavailable
+#       in `auto` mode)
+#   1 - removal is blocked; the reason has already been printed to stderr
+#
+# Human-readable output from `way` is relayed verbatim rather than summarised:
+# it carries the remedy for each risk, and a gate that blocks without saying how
+# to proceed is exactly what teaches people to reach for -f.
+ledger_check_removal() {
+  local wt_path="$1"
+  local token="${2:-}"
+  local mode="${LEDGER_INTEGRATION:-auto}"
+
+  ledger_enabled || return 0
+
+  local way_bin=""
+  if ! way_bin="$(way_binary)"; then
+    if [[ "$mode" == "required" ]]; then
+      warn "LEDGER_INTEGRATION=required but the 'way' binary was not found"
+      return 1
+    fi
+    dim "  Worktree ledger unavailable ('way' not found) - removal not checked"
+    return 0
+  fi
+
+  [[ -d "$wt_path" ]] || return 0
+
+  local -a args
+  args=(worktree removal-check)
+  [[ -n "$token" ]] && args+=(--override-token "$token")
+
+  # Run from inside the worktree: `way` detects which worktree it is from cwd.
+  local output="" exit_code=0
+  output="$(cd "$wt_path" && "$way_bin" "${args[@]}" 2>&1)" || exit_code=$?
+
+  case $exit_code in
+    0)
+      [[ -n "$token" ]] && ok "Ledger acknowledgement accepted"
+      return 0
+      ;;
+    1)
+      # Blocked, or the token was refused. Either way `way` has explained it.
+      print -r -- "$output" >&2
+      return 1
+      ;;
+    *)
+      # Usage errors, an unregistered worktree, or no ledger root configured.
+      # None of these is evidence that the worktree is unsafe, so in `auto` mode
+      # grove carries on — but says so, so the gap is visible.
+      if [[ "$mode" == "required" ]]; then
+        warn "Worktree ledger could not answer (exit $exit_code):"
+        print -r -- "$output" >&2
+        return 1
+      fi
+      dim "  Worktree ledger not consulted: ${output%%$'\n'*}"
+      return 0
+      ;;
+  esac
+}
+
+# ledger_register — Register a newly created worktree, best effort
+#
+# Never fails the caller: a worktree that exists but is unregistered is a gap to
+# report, not a reason to undo a successful `grove add`.
+ledger_register() {
+  local wt_path="$1"
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$wt_path" ]] || return 0
+
+  local output="" exit_code=0
+  output="$(cd "$wt_path" && "$way_bin" worktree register 2>&1)" || exit_code=$?
+  if (( exit_code == 0 )); then
+    dim "  Registered in the worktree ledger"
+  else
+    dim "  Worktree ledger registration skipped: ${output%%$'\n'*}"
+  fi
+  return 0
+}
+
+# ledger_moved — Reconcile a worktree's recorded path after a move, best effort
+ledger_moved() {
+  local wt_path="$1"
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$wt_path" ]] || return 0
+
+  (cd "$wt_path" && "$way_bin" worktree moved >/dev/null 2>&1) || true
+  return 0
+}
+
+# ledger_overlay_json — Build the optional `ledger` object for a worktree
+#
+# Sets REPLY to a JSON object, or to the empty string when the integration is
+# off or `way` is absent — in which case callers omit the key entirely and an
+# older consumer sees exactly the document it always saw.
+#
+# `available: false` is NOT "nothing at risk". It carries `unavailable_reason`,
+# and a consumer must render it as "unknown", never as safe. That distinction is
+# the whole reason this is a nested object rather than a handful of flat fields
+# that default to false.
+#
+# Grove never parses ledger Markdown: this is Waypoint's own JSON, relayed.
+ledger_overlay_json() {
+  REPLY=""
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$1" ]] || return 0
+
+  local output="" exit_code=0
+  output="$(cd "$1" && "$way_bin" worktree resume --format json 2>&1)" || exit_code=$?
+
+  if (( exit_code != 0 )); then
+    json_escape "${output%%$'\n'*}"
+    REPLY="{\"available\": false, \"unavailable_reason\": \"$REPLY\"}"
+    return 0
+  fi
+
+  # Reshape Waypoint's brief into the published overlay. Done with a single
+  # python pass rather than shell string-mangling because a malformed object
+  # here would corrupt the whole status document.
+  local overlay=""
+  overlay="$(print -r -- "$output" | python3 -c '
+import json, sys
+
+try:
+    brief = json.load(sys.stdin)
+except Exception as error:
+    print(json.dumps({"available": False, "unavailable_reason": f"unreadable resume JSON: {error}"}))
+    raise SystemExit(0)
+
+view = brief.get("view", {})
+narrative = view.get("narrative") or {}
+print(json.dumps({
+    "available": True,
+    "worktree_id": view.get("worktree_id"),
+    "workstream_id": view.get("workstream_id"),
+    # Slice 2 populates risk through `removal-check`; resume does not carry it,
+    # so it is explicitly null here rather than guessed.
+    "risk": None,
+    "checkpoint_at": view.get("last_checkpoint_at"),
+    "next_action": narrative.get("next_action"),
+    "narrative_status": brief.get("narrative_status"),
+    "drift": (brief.get("drift") or {}).get("since_checkpoint"),
+    "unavailable_reason": None,
+}))
+' 2>/dev/null)" || overlay=""
+
+  if [[ -z "$overlay" ]]; then
+    REPLY="{\"available\": false, \"unavailable_reason\": \"could not read the ledger overlay\"}"
+  else
+    REPLY="$overlay"
+  fi
+  return 0
+}
+
 # lifecycle.sh - Worktree creation and removal commands
 
 # _update_env_app_url — Rewrite ONLY the APP_URL= line in a .env file, preserving every
@@ -4545,6 +4831,10 @@ cmd_add() {
   transaction_commit
 
   # Run post-add hooks
+  # Register before the post-add hooks so a hook can already resume the ledger.
+  # Best effort: a failure here never undoes a successful add.
+  ledger_register "$wt_path"
+
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   # Restart Herd services to pick up new site
@@ -4594,6 +4884,15 @@ cmd_rm() {
   # Branch protection check
   if is_protected_branch "$branch" && [[ "$FORCE" == false ]]; then
     error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use -f to force removal" 4
+  fi
+
+  # Worktree Ledger gate. Deliberately BEFORE the pre-rm hooks and before git
+  # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
+  # it does not accept the loss of work nobody has recorded. The only way past
+  # this is a one-use token from `way worktree removal-check --acknowledge`,
+  # supplied as --ledger-ack.
+  if ! ledger_check_removal "$wt_path" "$LEDGER_ACK"; then
+    error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
   fi
 
   # Check for uncommitted changes and confirm (unless --force)
@@ -4822,6 +5121,9 @@ cmd_move() {
   transaction_commit
 
   # Run post-move hooks (with new path, URL, and db_name)
+  # The worktree id is unchanged; only its observed path moves.
+  ledger_moved "$new_wt_path"
+
   run_hooks "post-move" "$repo" "$branch" "$new_wt_path" "$new_url" "$db_name"
 
   print -r -- ""
@@ -6821,7 +7123,12 @@ _display_status_row() {
     json_escape "$b"; local _je_b="$REPLY"
     json_escape "$p"; local _je_p="$REPLY"
     json_escape "$sha"; local _je_sha="$REPLY"
-    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}"
+    # Optional, nested and additive: every field an existing consumer reads
+    # keeps its meaning, so today's Grove desktop parses this unchanged.
+    local ledger_json=""
+    ledger_overlay_json "$p"
+    [[ -n "$REPLY" ]] && ledger_json=", \"ledger\": $REPLY"
+    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged$ledger_json}"
   else
     printf "  %-28s ${state_color}%-10s${C_RESET} %-14s %-6s %-7s ${C_DIM}%-10s${C_RESET}\n" \
       "$branch_display" "$state_icon" "$sync_display" "$age_display" "$merged_icon" "$sha"
@@ -11437,13 +11744,14 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}FLAGS${C_RESET}"
   print -r -- "  ${C_YELLOW}-q, --quiet${C_RESET}          Suppress informational output"
-  print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal"
+  print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal (does not bypass the ledger)"
   print -r -- "  ${C_YELLOW}-i, --interactive${C_RESET}    Launch interactive worktree creation wizard"
   print -r -- "  ${C_YELLOW}--json${C_RESET}               Output in JSON format"
   print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
   print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add)"
   print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
+  print -r -- "  ${C_YELLOW}--ledger-ack <token>${C_RESET} One-use worktree-ledger acknowledgement (NOT implied by -f)"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
   print -r -- "  ${C_YELLOW}--no-cache${C_RESET}           Bypass fetch cache (always fetch fresh)"
@@ -11543,6 +11851,13 @@ parse_flags() {
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;
+      # Deliberately NOT an alias for -f: a token is a separate, recorded,
+      # single-use decision issued by `way worktree removal-check --acknowledge`.
+      --ledger-ack)
+        shift
+        [[ $# -gt 0 ]] || error_exit "INVALID_INPUT" "--ledger-ack requires a token" 2
+        LEDGER_ACK="$1"
+        ;;
       -i|--interactive) INTERACTIVE=true ;;
       --json) JSON_OUTPUT=true ;;
       --delete-branch) DELETE_BRANCH=true ;;

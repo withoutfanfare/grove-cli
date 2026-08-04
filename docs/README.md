@@ -10,6 +10,7 @@ Documentation for [grove](../README.md), a command-line git worktree manager wri
 - **[Tutorials](guides/tutorials.md)** — Command cookbook, recipes, and troubleshooting.
 - **[Advanced Usage](guides/advanced.md)** — Power-user workflows, templates, groups, and bulk operations.
 - **[Service Management](guides/services.md)** — Optional Laravel service management (Supervisor, Horizon, Reverb, scheduler).
+- [Worktree Ledger](guides/worktree-ledger.md) — optional integration with Waypoint: refuses to remove a worktree holding unrecorded work
 
 ### Reference
 

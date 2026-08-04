@@ -157,6 +157,9 @@ load_config() {
       REPO_GROUPS) REPO_GROUPS="$value" ;;
       GROVE_SHARED_DEPS_DIR) GROVE_SHARED_DEPS_DIR="$value" ;;
       GROVE_STALE_THRESHOLD) GROVE_STALE_THRESHOLD="$value" ;;
+      # auto (default) | off | required — see lib/13-ledger.sh
+      LEDGER_INTEGRATION) LEDGER_INTEGRATION="$value" ;;
+      GROVE_WAY_BIN) GROVE_WAY_BIN="$value" ;;
     esac
   }
 
@@ -278,6 +281,7 @@ dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}" >&2; }
 #              REPO_NOT_FOUND, BRANCH_NOT_FOUND, WORKTREE_NOT_FOUND (exit 3)
 #              GIT_ERROR, WORKTREE_EXISTS, PROTECTED_BRANCH (exit 4)
 #              DB_ERROR, HOOK_FAILED, IO_ERROR (exit 5)
+#              LEDGER_BLOCKED (exit 6) - the worktree ledger refused a removal
 die_json() {
   local code="$1"
   local message="$2"

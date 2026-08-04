@@ -81,13 +81,14 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}FLAGS${C_RESET}"
   print -r -- "  ${C_YELLOW}-q, --quiet${C_RESET}          Suppress informational output"
-  print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal"
+  print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal (does not bypass the ledger)"
   print -r -- "  ${C_YELLOW}-i, --interactive${C_RESET}    Launch interactive worktree creation wizard"
   print -r -- "  ${C_YELLOW}--json${C_RESET}               Output in JSON format"
   print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
   print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add)"
   print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
+  print -r -- "  ${C_YELLOW}--ledger-ack <token>${C_RESET} One-use worktree-ledger acknowledgement (NOT implied by -f)"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
   print -r -- "  ${C_YELLOW}--no-cache${C_RESET}           Bypass fetch cache (always fetch fresh)"
@@ -187,6 +188,13 @@ parse_flags() {
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;
+      # Deliberately NOT an alias for -f: a token is a separate, recorded,
+      # single-use decision issued by `way worktree removal-check --acknowledge`.
+      --ledger-ack)
+        shift
+        [[ $# -gt 0 ]] || error_exit "INVALID_INPUT" "--ledger-ack requires a token" 2
+        LEDGER_ACK="$1"
+        ;;
       -i|--interactive) INTERACTIVE=true ;;
       --json) JSON_OUTPUT=true ;;
       --delete-branch) DELETE_BRANCH=true ;;

@@ -89,6 +89,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Laravel-specific** → `lib/commands/laravel.sh`
 - **Service management** (services: status/start/stop/restart/add/remove/apps/horizon/logs/doctor — Supervisor, Horizon, Reverb, scheduler) → `lib/commands/services.sh` *(also emits the `services apps --json` and `services status --json` data contracts)*
 
+## Worktree Ledger integration (optional)
+
+`lib/13-ledger.sh` is the seam to Waypoint's `way` CLI. See
+[docs/guides/worktree-ledger.md](docs/guides/worktree-ledger.md).
+
+- **`-f` is not ledger consent.** `grove rm -f` forces git; it does not accept
+  the loss of work nobody has recorded. Only a one-use `--ledger-ack` token
+  from `way worktree removal-check --acknowledge` opens the gate. Never make
+  `-f` imply it, and never add a flag that does.
+- **Fails closed on risk, open on absence.** `way` exit 1 = blocked (stop);
+  exit 3 = could not answer (proceed in `auto` mode, stop in `required`). A
+  worktree grove could always remove must not become unremovable because
+  Waypoint has nothing to say about it — that is how a safety gate gets
+  switched off within a day.
+- **The degraded mode is always visible.** "No gate ran" and "the gate passed"
+  must never look alike.
+- **Grove never parses ledger Markdown** and never decides what is risky. It
+  asks, relays `way`'s answer verbatim (the remedies matter), and obeys the
+  exit code.
+- **`LEDGER_INTEGRATION=off` in `tests/test-helper.bash`** keeps the suite
+  hermetic from whichever `way` the developer has installed. Only
+  `tests/integration/ledger.bats` turns it on, with its own stub.
+- The base ref lives in a per-worktree sidecar (`git rev-parse --git-path
+  grove-base`), not `git config --local grove.base`, which resolves from the
+  COMMON config on a bare-repo layout. Legacy config is still read and written
+  for one release. Never enable `extensions.worktreeConfig`.
+
 ## Development Commands
 
 ```bash
