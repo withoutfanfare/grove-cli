@@ -1759,19 +1759,63 @@ get_ahead_behind() {
   print -r -- "$ahead $behind"
 }
 
-# worktree_base_for — Read worktree-local base ref (grove.base config), with fallback
+# worktree_base_sidecar_path — Absolute path of a worktree's own grove-base file
+#
+# `git rev-parse --git-path` resolves to the per-worktree administrative
+# directory, which is the whole point: `git config --local` resolves from the
+# COMMON config on a bare-repository layout, so every linked worktree saw the
+# same grove.base and a worktree's real base was silently replaced by whichever
+# one was written last. The result is absolute inside a linked worktree and
+# relative to the worktree in a main checkout, so relative paths are joined.
+#
+# Prints nothing and returns 1 when the path is not inside a git worktree.
+worktree_base_sidecar_path() {
+  local wt_path="$1"
+  local raw=""
+
+  raw="$(git -C "$wt_path" rev-parse --git-path grove-base 2>/dev/null || true)"
+  [[ -n "$raw" ]] || return 1
+
+  if [[ "$raw" == /* ]]; then
+    print -r -- "$raw"
+  else
+    print -r -- "$wt_path/$raw"
+  fi
+}
+
+# worktree_base_for — Read a worktree's base ref, with fallback
+#
+# Resolution order:
+#   1. the per-worktree grove-base sidecar (authoritative);
+#   2. the legacy grove.base config, so worktrees created before the sidecar
+#      existed keep working (retained for at least one release);
+#   3. the supplied fallback, else DEFAULT_BASE.
 worktree_base_for() {
   local wt_path="$1"
   local fallback="${2:-$DEFAULT_BASE}"
 
-  local base=""
-  base="$(git -C "$wt_path" config --local --get grove.base 2>/dev/null || true)"
+  local base="" sidecar=""
+  sidecar="$(worktree_base_sidecar_path "$wt_path" 2>/dev/null || true)"
+  if [[ -n "$sidecar" && -r "$sidecar" ]]; then
+    # An empty or whitespace-only sidecar falls through rather than returning
+    # nothing, so a truncated write cannot silently blank the base.
+    base="$(tr -d '[:space:]' < "$sidecar" 2>/dev/null || true)"
+  fi
+
+  [[ -n "$base" ]] || base="$(git -C "$wt_path" config --local --get grove.base 2>/dev/null || true)"
   [[ -n "$base" ]] || base="$fallback"
 
   print -r -- "$base"
 }
 
-# set_worktree_base — Save base ref in worktree-local git config (grove.base)
+# set_worktree_base — Save a worktree's base ref in its own sidecar
+#
+# Writes the per-worktree sidecar (authoritative) and, for one release, the
+# legacy grove.base config as well. The legacy write is deliberate: an older
+# grove binary that only knows about grove.base would otherwise fall back to
+# DEFAULT_BASE, which is a quieter and more misleading failure than reading a
+# stale value. Readers always prefer the sidecar, so the two cannot disagree in
+# this version.
 set_worktree_base() {
   local wt_path="$1"
   local base="$2"
@@ -1781,12 +1825,23 @@ set_worktree_base() {
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
 
-  # Surface a write failure rather than silently swallowing it — a missing
-  # grove.base later forces the (possibly wrong) DEFAULT_BASE fallback. The
-  # failure is non-fatal (the fallback still works), so we warn but return 0 to
-  # avoid aborting the caller under `set -e`.
+  local sidecar=""
+  sidecar="$(worktree_base_sidecar_path "$wt_path" 2>/dev/null || true)"
+  if [[ -n "$sidecar" ]]; then
+    # Write-then-rename so a reader never sees a half-written base.
+    local tmp="${sidecar}.tmp.$$"
+    if print -r -- "$base" > "$tmp" 2>/dev/null && mv -f "$tmp" "$sidecar" 2>/dev/null; then
+      :
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      warn "Failed to save base ref '$base' for $wt_path (will fall back to default)"
+    fi
+  fi
+
+  # Legacy compatibility. Non-fatal: the sidecar above is what this version
+  # reads, so a failure here only affects an older grove.
   if ! git -C "$wt_path" config --local grove.base "$base" 2>/dev/null; then
-    warn "Failed to save base ref '$base' for $wt_path (will fall back to default)"
+    dim "  Could not update the legacy grove.base config for $wt_path"
   fi
   return 0
 }
