@@ -377,6 +377,15 @@ cmd_rm() {
     error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use -f to force removal" 4
   fi
 
+  # Worktree Ledger gate. Deliberately BEFORE the pre-rm hooks and before git
+  # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
+  # it does not accept the loss of work nobody has recorded. The only way past
+  # this is a one-use token from `way worktree removal-check --acknowledge`,
+  # supplied as --ledger-ack.
+  if ! ledger_check_removal "$wt_path" "$LEDGER_ACK"; then
+    error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
+  fi
+
   # Check for uncommitted changes and confirm (unless --force)
   if [[ "$FORCE" == false ]]; then
     local wt_status; wt_status="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || wt_status=""
@@ -389,15 +398,6 @@ cmd_rm() {
       read -r response
       [[ "$response" =~ ^[Yy]$ ]] || error_exit "INVALID_INPUT" "aborted by user" 2
     fi
-  fi
-
-  # Worktree Ledger gate. Deliberately BEFORE the pre-rm hooks and before git
-  # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
-  # it does not accept the loss of work nobody has recorded. The only way past
-  # this is a one-use token from `way worktree removal-check --acknowledge`,
-  # supplied as --ledger-ack.
-  if ! ledger_check_removal "$wt_path" "$LEDGER_ACK"; then
-    error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
   fi
 
   # Run pre-rm hooks
