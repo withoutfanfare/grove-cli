@@ -300,3 +300,104 @@ run_cmd_rm() {
   [ "$status" -eq 0 ]
   [ ! -d "$WT_FIXTURE" ]
 }
+
+# ============================================================================
+# The optional `ledger` object in status JSON
+# ============================================================================
+
+# Build a sourceable file with json_escape plus the real ledger module.
+setup_overlay_harness() {
+  OVERLAY_FNS="$TEST_TEMP_DIR/overlay-fns.zsh"
+  export OVERLAY_FNS
+  cat > "$OVERLAY_FNS" <<'STUB'
+warn() { :; }
+dim()  { :; }
+ok()   { :; }
+json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; REPLY="$s"; }
+STUB
+  cat "$GROVE_ROOT/lib/13-ledger.sh" >> "$OVERLAY_FNS"
+}
+
+# Stub a `way` whose `resume --format json` prints $1.
+stub_way_resume() {
+  cat > "$STUB_BIN/way" <<EOF
+#!/bin/sh
+cat <<'JSON'
+$1
+JSON
+exit 0
+EOF
+  chmod +x "$STUB_BIN/way"
+}
+
+@test "json: no overlay is emitted when the integration is off" {
+  setup_overlay_harness
+  run env PATH="$STUB_BIN:$PATH" GROVE_WAY_BIN="" zsh -c \
+    "source '$OVERLAY_FNS'; LEDGER_INTEGRATION=off; ledger_overlay_json '$WT'; print -r -- \"[\$REPLY]\""
+  [ "$status" -eq 0 ]
+  # Empty REPLY means the caller omits the key, so an older consumer sees
+  # exactly the document it always saw.
+  [[ "$output" == "[]" ]]
+}
+
+@test "json: the overlay carries the ledger facts when way answers" {
+  setup_overlay_harness
+  stub_way_resume '{"view":{"worktree_id":"wt_abc","workstream_id":"ws_1","last_checkpoint_at":"2026-08-04T14:30:00Z","narrative":{"next_action":"Run focused UAT"}},"narrative_status":"present","drift":{"since_checkpoint":true}}'
+
+  run env PATH="$STUB_BIN:$PATH" GROVE_WAY_BIN="" zsh -c \
+    "source '$OVERLAY_FNS'; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\""
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['available'] is True, d
+assert d['worktree_id'] == 'wt_abc', d
+assert d['next_action'] == 'Run focused UAT', d
+assert d['narrative_status'] == 'present', d
+assert d['drift'] is True, d
+"
+}
+
+@test "json: a failing way yields available=false with a reason, never a silent pass" {
+  setup_overlay_harness
+  stub_way 3 "no worktree ledger root configured"
+
+  run env PATH="$STUB_BIN:$PATH" GROVE_WAY_BIN="" zsh -c \
+    "source '$OVERLAY_FNS'; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\""
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+# available:false is 'unknown', NOT 'nothing at risk' — and it must say why.
+assert d['available'] is False, d
+assert d['unavailable_reason'], d
+"
+}
+
+@test "json: unreadable resume output degrades to available=false rather than corrupting the document" {
+  setup_overlay_harness
+  stub_way_resume 'this is not json at all'
+
+  run env PATH="$STUB_BIN:$PATH" GROVE_WAY_BIN="" zsh -c \
+    "source '$OVERLAY_FNS'; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\""
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['available'] is False, d
+"
+}
+
+@test "json: an overlay from a worktree that no longer exists is omitted" {
+  setup_overlay_harness
+  stub_way_resume '{"view":{"worktree_id":"wt_abc"}}'
+
+  run env PATH="$STUB_BIN:$PATH" GROVE_WAY_BIN="" zsh -c \
+    "source '$OVERLAY_FNS'; ledger_overlay_json '$TEST_TEMP_DIR/gone'; print -r -- \"[\$REPLY]\""
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == "[]" ]]
+}

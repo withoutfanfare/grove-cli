@@ -146,3 +146,70 @@ ledger_moved() {
   (cd "$wt_path" && "$way_bin" worktree moved >/dev/null 2>&1) || true
   return 0
 }
+
+# ledger_overlay_json — Build the optional `ledger` object for a worktree
+#
+# Sets REPLY to a JSON object, or to the empty string when the integration is
+# off or `way` is absent — in which case callers omit the key entirely and an
+# older consumer sees exactly the document it always saw.
+#
+# `available: false` is NOT "nothing at risk". It carries `unavailable_reason`,
+# and a consumer must render it as "unknown", never as safe. That distinction is
+# the whole reason this is a nested object rather than a handful of flat fields
+# that default to false.
+#
+# Grove never parses ledger Markdown: this is Waypoint's own JSON, relayed.
+ledger_overlay_json() {
+  REPLY=""
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$1" ]] || return 0
+
+  local output="" exit_code=0
+  output="$(cd "$1" && "$way_bin" worktree resume --format json 2>&1)" || exit_code=$?
+
+  if (( exit_code != 0 )); then
+    json_escape "${output%%$'\n'*}"
+    REPLY="{\"available\": false, \"unavailable_reason\": \"$REPLY\"}"
+    return 0
+  fi
+
+  # Reshape Waypoint's brief into the published overlay. Done with a single
+  # python pass rather than shell string-mangling because a malformed object
+  # here would corrupt the whole status document.
+  local overlay=""
+  overlay="$(print -r -- "$output" | python3 -c '
+import json, sys
+
+try:
+    brief = json.load(sys.stdin)
+except Exception as error:
+    print(json.dumps({"available": False, "unavailable_reason": f"unreadable resume JSON: {error}"}))
+    raise SystemExit(0)
+
+view = brief.get("view", {})
+narrative = view.get("narrative") or {}
+print(json.dumps({
+    "available": True,
+    "worktree_id": view.get("worktree_id"),
+    "workstream_id": view.get("workstream_id"),
+    # Slice 2 populates risk through `removal-check`; resume does not carry it,
+    # so it is explicitly null here rather than guessed.
+    "risk": None,
+    "checkpoint_at": view.get("last_checkpoint_at"),
+    "next_action": narrative.get("next_action"),
+    "narrative_status": brief.get("narrative_status"),
+    "drift": (brief.get("drift") or {}).get("since_checkpoint"),
+    "unavailable_reason": None,
+}))
+' 2>/dev/null)" || overlay=""
+
+  if [[ -z "$overlay" ]]; then
+    REPLY="{\"available\": false, \"unavailable_reason\": \"could not read the ledger overlay\"}"
+  else
+    REPLY="$overlay"
+  fi
+  return 0
+}
