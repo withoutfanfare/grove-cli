@@ -230,6 +230,7 @@ See [Hooks](#hooks) below for resolution order, gating behaviour, and the enviro
 | Key | Type | Default | Env override | Path | Repo | Description |
 |---|---|---|---|:--:|:--:|---|
 | `GROVE_MAX_PARALLEL` | integer | `4` | `GROVE_MAX_PARALLEL` | | | Maximum concurrent operations for parallel commands (`pull-all`, `build-all`, `exec-all`, `prune --all-repos`). Validated as a positive integer. |
+| `GROVE_STATUS_PARALLEL` | integer | `8` | `GROVE_STATUS_PARALLEL` | | | Maximum concurrent per-worktree status lookups in `grove ls` (git status, ahead/behind, health, and the ledger overlay). Deliberately separate from `GROVE_MAX_PARALLEL`, which bounds *mutating* work against a remote; gathering status is read-only and local, so it runs wider. Set to `1` for a serial walk. A non-numeric or zero value falls back to serial rather than failing. |
 | `GROVE_STALE_THRESHOLD` | integer | `50` | `GROVE_STALE_THRESHOLD` | | ✓ | Commits behind base before a branch is marked **stale** in `grove status`/`grove dashboard`. Validated as a non-negative integer; invalid values fall back to `50` with a warning. |
 | `GROVE_SHARED_DEPS_DIR` | path | `$HOME/.grove/shared-deps` | `GROVE_SHARED_DEPS_DIR` | ✓ | | Cache directory used by `grove share-deps` for shared `vendor`/`node_modules`. |
 
