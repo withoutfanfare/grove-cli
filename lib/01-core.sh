@@ -35,6 +35,28 @@ ensure_tool_path() {
       PATH="${PATH:+$PATH:}$p"
     fi
   done
+
+  # nvm-managed node lives under a versioned directory, so it cannot be a static
+  # entry above. Shells that lazy-load nvm expose npm as a shell function only,
+  # which the bash hook subprocesses never inherit — without this, npm-dependent
+  # hooks silently skip themselves and the worktree ends up with no node_modules.
+  # ponytail: picks the highest version under the last matching nvm root (so
+  # Herd's wins over a plain ~/.nvm) and ignores .nvmrc; a hook that needs a
+  # pinned version should source nvm itself.
+  # `whence -p`, not `command -v`: the latter matches the lazy-load shell
+  # function and would report npm as present when no binary is on PATH.
+  if ! whence -p npm >/dev/null 2>&1; then
+    local -a node_bins
+    node_bins=(
+      "${NVM_DIR:-$HOME/.nvm}/versions/node"/*/bin(N/n)
+      "$HOME/Library/Application Support/Herd/config/nvm/versions/node"/*/bin(N/n)
+    )
+    if (( $#node_bins )); then
+      local node_bin="${node_bins[-1]}"
+      [[ ":${PATH:-}:" != *":$node_bin:"* ]] && PATH="${PATH:+$PATH:}$node_bin"
+    fi
+  fi
+
   export PATH
 }
 
@@ -46,7 +68,7 @@ _read_config_pairs() {
   local handler="$2"
   [[ -f "$file" ]] || return 0
 
-  local key value was_quoted
+  local key value quote char parsed escaped
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     # Skip lines with null bytes (potential injection attempt)
     [[ "$key" == *$'\0'* || "$value" == *$'\0'* ]] && continue
@@ -59,22 +81,38 @@ _read_config_pairs() {
     key="${key#"${key%%[![:space:]]*}"}"
     key="${key%"${key##*[![:space:]]}"}"
 
-    # Clean value inline (avoid subprocess from function call)
-    was_quoted=false
-    if [[ "$value" == \"*\" ]] || [[ "$value" == \'*\' ]]; then
-      was_quoted=true
-    fi
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    # Only strip inline comments if value was not quoted
-    # (quoted values like "my#password" should keep the #).
-    # Strip a trailing " #..." comment (whitespace then #) only — never a bare
-    # mid-value '#', so unquoted secrets like DB_PASSWORD=pass#word survive intact.
-    if [[ "$was_quoted" == false && "$value" == *[[:space:]]#* ]]; then
-      value="${value%%[[:space:]]#*}"
-    fi
+    # Clean value inline (avoid subprocess from function call). A closing quote
+    # ends a quoted value, so a later " # comment" is ignored without losing a
+    # literal # inside the quotes.
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"*|\'*)
+        quote="${value:0:1}"
+        value="${value:1}"
+        parsed=""
+        escaped=false
+        # ponytail: config values are short; use an indexed parser if long
+        # quoted values ever become supported input.
+        while [[ -n "$value" ]]; do
+          char="${value:0:1}"
+          value="${value:1}"
+          if [[ "$char" == "$quote" && "$escaped" != "true" ]]; then
+            break
+          fi
+          parsed+="$char"
+          if [[ "$char" == \\ && "$escaped" != "true" ]]; then
+            escaped=true
+          else
+            escaped=false
+          fi
+        done
+        value="$parsed"
+        ;;
+      *)
+        # Strip only whitespace-prefixed comments; pass#word remains literal.
+        [[ "$value" == *[[:space:]]#* ]] && value="${value%%[[:space:]]#*}"
+        ;;
+    esac
     value="${value%"${value##*[![:space:]]}"}"
 
     # Expand $HOME and a leading ~ for path-typed keys only, so path values like
@@ -119,6 +157,9 @@ load_config() {
       REPO_GROUPS) REPO_GROUPS="$value" ;;
       GROVE_SHARED_DEPS_DIR) GROVE_SHARED_DEPS_DIR="$value" ;;
       GROVE_STALE_THRESHOLD) GROVE_STALE_THRESHOLD="$value" ;;
+      # auto (default) | off | required — see lib/13-ledger.sh
+      LEDGER_INTEGRATION) LEDGER_INTEGRATION="$value" ;;
+      GROVE_WAY_BIN) GROVE_WAY_BIN="$value" ;;
     esac
   }
 
@@ -226,13 +267,13 @@ die() {
   exit 1
 }
 # info — Print informational message (suppressed in quiet mode)
-info() { [[ "$QUIET" == true ]] || print -r -- "${C_BLUE}→${C_RESET} $*"; }
+info() { [[ "$QUIET" == true ]] || print -r -- "${C_BLUE}→${C_RESET} $*" >&2; }
 # ok — Print success message (suppressed in quiet mode)
-ok()   { [[ "$QUIET" == true ]] || print -r -- "${C_GREEN}✔${C_RESET} $*"; }
+ok()   { [[ "$QUIET" == true ]] || print -r -- "${C_GREEN}✔${C_RESET} $*" >&2; }
 # warn — Print warning message (always shown, even in quiet mode)
-warn() { print -r -- "${C_YELLOW}⚠${C_RESET} $*"; }
+warn() { print -r -- "${C_YELLOW}⚠${C_RESET} $*" >&2; }
 # dim — Print dimmed/secondary message (suppressed in quiet mode)
-dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}"; }
+dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}" >&2; }
 
 # Output structured error JSON and exit
 # Usage: die_json "ERROR_CODE" "Human readable message" [exit_code]
@@ -240,6 +281,7 @@ dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}"; }
 #              REPO_NOT_FOUND, BRANCH_NOT_FOUND, WORKTREE_NOT_FOUND (exit 3)
 #              GIT_ERROR, WORKTREE_EXISTS, PROTECTED_BRANCH (exit 4)
 #              DB_ERROR, HOOK_FAILED, IO_ERROR (exit 5)
+#              LEDGER_BLOCKED (exit 6) - the worktree ledger refused a removal
 die_json() {
   local code="$1"
   local message="$2"

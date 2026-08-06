@@ -157,6 +157,16 @@ _display_worktree() {
     fi
     json_item+="\"merged\": $merged, "
     json_item+="\"stale\": $stale"
+    # The optional ledger overlay, exactly as `grove status --json` carries it.
+    # It has to be on BOTH: Grove desktop reads `ls --json` (see get_worktrees
+    # in grove's src-tauri/src/wt.rs), never `status --json`, so while this key
+    # existed only on `status` the overlay never reached the app and its badges
+    # had nothing to render. Additive and last: an empty REPLY omits the key
+    # entirely, and an older consumer sees precisely the document it always saw.
+    local ledger_json=""
+    ledger_overlay_json "$wt_path"
+    [[ -n "$REPLY" ]] && ledger_json=", \"ledger\": $REPLY"
+    json_item+="$ledger_json"
     json_item+="}"
 
     REPLY="$json_item"
@@ -342,7 +352,12 @@ _display_status_row() {
     json_escape "$b"; local _je_b="$REPLY"
     json_escape "$p"; local _je_p="$REPLY"
     json_escape "$sha"; local _je_sha="$REPLY"
-    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}"
+    # Optional, nested and additive: every field an existing consumer reads
+    # keeps its meaning, so today's Grove desktop parses this unchanged.
+    local ledger_json=""
+    ledger_overlay_json "$p"
+    [[ -n "$REPLY" ]] && ledger_json=", \"ledger\": $REPLY"
+    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged$ledger_json}"
   else
     printf "  %-28s ${state_color}%-10s${C_RESET} %-14s %-6s %-7s ${C_DIM}%-10s${C_RESET}\n" \
       "$branch_display" "$state_icon" "$sync_display" "$age_display" "$merged_icon" "$sha"

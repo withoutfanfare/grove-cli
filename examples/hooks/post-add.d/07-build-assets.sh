@@ -21,8 +21,9 @@ if ! grep -q '"build"' package.json 2>/dev/null; then
 fi
 
 if ! command -v npm >/dev/null 2>&1; then
-  echo "  npm not found - run manually: npm run build"
-  exit 0
+  # Fail loudly: unbuilt assets mean every page 500s on a missing manifest.
+  echo "  npm not found - assets NOT built. Run manually: npm run build"
+  exit 1
 fi
 
 echo "  Running npm run build..."

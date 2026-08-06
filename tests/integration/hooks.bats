@@ -396,6 +396,18 @@ EOF
   [[ "$output" == *"not executable"* ]]
 }
 
+@test "hooks: extensionless hooks run while unrelated files are ignored" {
+  mkdir -p "$GROVE_HOOKS_DIR/pre-rm.d"
+  printf 'notes only\n' > "$GROVE_HOOKS_DIR/pre-rm.d/README"
+  create_hook "$GROVE_HOOKS_DIR/pre-rm.d/01-extensionless" \
+    "echo 'extensionless-ran' >> '$HOOK_LOG'"
+
+  run_hooks_isolated "pre-rm"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"not executable"* ]]
+  grep -q "extensionless-ran" "$HOOK_LOG"
+}
+
 @test "hooks: world-writable hook is skipped with security warning" {
   create_hook "$GROVE_HOOKS_DIR/post-add" \
     "echo 'should not run'"
@@ -421,6 +433,69 @@ EOF
 
   grep -q "safe-ran" "$HOOK_LOG"
   ! grep -q "unsafe-ran" "$HOOK_LOG"
+}
+
+@test "hooks: symlink to a group-writable script is skipped" {
+  create_hook "$TEST_TEMP_DIR/unsafe-target.sh" \
+    "echo 'unsafe-ran' >> '$HOOK_LOG'"
+  chmod g+w "$TEST_TEMP_DIR/unsafe-target.sh"
+  mkdir -p "$GROVE_HOOKS_DIR/post-add.d"
+  ln -s "$TEST_TEMP_DIR/unsafe-target.sh" "$GROVE_HOOKS_DIR/post-add.d/01-link.sh"
+
+  run_hooks_isolated "post-add"
+  [ "$status" -eq 0 ]
+  ! grep -q "unsafe-ran" "$HOOK_LOG"
+  [[ "$output" == *"group-writable"* ]]
+}
+
+@test "hooks: symlink through a group-writable target directory is skipped" {
+  create_hook "$GROVE_HOOKS_DIR/shared/unsafe-target.sh" \
+    "echo 'unsafe-ran' >> '$HOOK_LOG'"
+  chmod g+w "$GROVE_HOOKS_DIR/shared"
+  mkdir -p "$GROVE_HOOKS_DIR/post-add.d"
+  ln -s ../shared/unsafe-target.sh "$GROVE_HOOKS_DIR/post-add.d/01-link.sh"
+
+  run_hooks_isolated "post-add"
+  [ "$status" -eq 0 ]
+  ! grep -q "unsafe-ran" "$HOOK_LOG"
+  [[ "$output" == *"group-writable"* ]]
+}
+
+@test "hooks: group-writable hook root is skipped" {
+  create_hook "$GROVE_HOOKS_DIR/post-add" \
+    "echo 'unsafe-ran' >> '$HOOK_LOG'"
+  chmod g+w "$GROVE_HOOKS_DIR"
+
+  run_hooks_isolated "post-add"
+  [ "$status" -eq 0 ]
+  ! grep -q "unsafe-ran" "$HOOK_LOG"
+  [[ "$output" == *"group-writable"* ]]
+}
+
+@test "hooks: pre-rm fails closed when required hook paths are unsafe or non-executable" {
+  local hook="$GROVE_HOOKS_DIR/pre-rm.d/01-backup.sh"
+  create_hook "$hook" "echo 'must-not-run' >> '$HOOK_LOG'"
+
+  chmod g+w "$GROVE_HOOKS_DIR"
+  run_hooks_isolated "pre-rm"
+  [ "$status" -ne 0 ]
+  chmod g-w "$GROVE_HOOKS_DIR"
+
+  chmod g+w "$GROVE_HOOKS_DIR/pre-rm.d"
+  run_hooks_isolated "pre-rm"
+  [ "$status" -ne 0 ]
+  chmod g-w "$GROVE_HOOKS_DIR/pre-rm.d"
+
+  chmod g+w "$hook"
+  run_hooks_isolated "pre-rm"
+  [ "$status" -ne 0 ]
+  chmod g-w "$hook"
+
+  chmod -x "$hook"
+  run_hooks_isolated "pre-rm"
+  [ "$status" -ne 0 ]
+
+  ! grep -q 'must-not-run' "$HOOK_LOG"
 }
 
 # ============================================================================

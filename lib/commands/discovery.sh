@@ -345,7 +345,7 @@ cmd_recent() {
   # Sort by access time (newest first) using Zsh
   # We still need sort for numerical sorting, but avoid head subprocess
   local sorted_all
-  sorted_all=($(printf '%s\n' "${worktrees[@]}" | sort -t'|' -k1 -rn))
+  sorted_all=("${(f)$(printf '%s\n' "${worktrees[@]}" | sort -t'|' -k1 -rn)}")
   # Take first N entries using Zsh array slicing
   local sorted=("${sorted_all[@]:0:$limit}")
 
@@ -633,5 +633,4 @@ cmd_clean() {
 
 # Alias management
 readonly GROVE_ALIASES_FILE="$HOME/.grove/aliases"
-
 

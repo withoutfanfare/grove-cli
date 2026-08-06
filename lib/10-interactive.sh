@@ -1,6 +1,17 @@
 #!/usr/bin/env zsh
 # 10-interactive.sh - Interactive worktree creation wizard
 
+# Treat fzf's no-match and interrupt statuses as cancellation, but surface real
+# operational failures instead of silently selecting a fallback.
+_fzf_select() {
+  local fzf_status=0
+  fzf "$@" || fzf_status=$?
+  case "$fzf_status" in
+    0|1|130) return 0 ;;
+    *) die "fzf failed with exit status $fzf_status" ;;
+  esac
+}
+
 # Interactive worktree creation
 # Usage: interactive_add [repo]
 interactive_add() {
@@ -22,7 +33,7 @@ interactive_add() {
     local repos; repos="$(list_repos)"
     [[ -n "$repos" ]] || die "No repositories found in $HERD_ROOT"
 
-    repo="$(echo "$repos" | fzf --prompt="Repository: " --height=40% --reverse)"
+    repo="$(echo "$repos" | _fzf_select --prompt="Repository: " --height=40% --reverse)" || return $?
     [[ -n "$repo" ]] || die "No repository selected"
   fi
 
@@ -44,7 +55,7 @@ interactive_add() {
   local branches; branches="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null | grep -v HEAD)"
 
   local base
-  base="$(echo "$branches" | fzf --prompt="Base branch: " --height=40% --reverse --query="origin/staging")"
+  base="$(echo "$branches" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="origin/staging")" || return $?
   [[ -n "$base" ]] || base="$DEFAULT_BASE"
 
   ok "Base: ${C_DIM}$base${C_RESET}"
@@ -103,7 +114,7 @@ interactive_add() {
     templates="(none)
 $templates"
 
-    template="$(echo "$templates" | fzf --prompt="Template: " --height=40% --reverse)"
+    template="$(echo "$templates" | _fzf_select --prompt="Template: " --height=40% --reverse)" || return $?
 
     if [[ "$template" != "(none)" && -n "$template" ]]; then
       GROVE_TEMPLATE="$template"
@@ -242,7 +253,7 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
     fzf_opts+=(--height=80%)
   fi
 
-  selection="$(printf '%s\n' "${entries[@]%%|*}" | fzf "${fzf_opts[@]}")"
+  selection="$(printf '%s\n' "${entries[@]%%|*}" | _fzf_select "${fzf_opts[@]}")" || return $?
 
   [[ -n "$selection" ]] || { dim "No selection made"; return 0; }
 

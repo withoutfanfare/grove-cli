@@ -11,31 +11,41 @@ verify_hook_path_security() {
   local target="$1"
   local kind="$2"   # "Hook" or "Hook directory" - used for messaging
   local current_uid="${_GROVE_UID:-$(id -u)}"
+  local trusted_root="${GROVE_HOOKS_DIR:A}"
+  local checked="${target:A}"
+  local owner perms group_digit other_digit
 
-  # Check ownership (macOS stat format, with Linux fallback)
-  local owner; owner="$(stat -f %u "$target" 2>/dev/null || stat -c %u "$target" 2>/dev/null)"
-  if [[ "$owner" != "$current_uid" ]]; then
-    warn "$kind '$target' is not owned by current user - skipping for security"
-    return 1
-  fi
+  while true; do
+    # Check ownership (macOS stat format, with Linux fallback)
+    owner="$(stat -Lf %u "$checked" 2>/dev/null || stat -Lc %u "$checked" 2>/dev/null)"
+    if [[ "$owner" != "$current_uid" ]]; then
+      warn "$kind '$checked' is not owned by current user - skipping for security"
+      return 1
+    fi
 
-  # Check for group- or world-writable (macOS octal perms, with Linux fallback).
-  # Octal write bit (2) is set when the digit is one of 2,3,6,7.
-  local perms; perms="$(stat -f %Lp "$target" 2>/dev/null || stat -c %a "$target" 2>/dev/null)"
-  # Normalise to a 3-digit owner/group/other string.
-  perms="${perms: -3}"
-  local group_digit="${perms:1:1}"
-  local other_digit="${perms: -1}"
-  if [[ "$group_digit" =~ [2367] ]]; then
-    warn "$kind '$target' is group-writable - skipping for security"
-    return 1
-  fi
-  if [[ "$other_digit" =~ [2367] ]]; then
-    warn "$kind '$target' is world-writable - skipping for security"
-    return 1
-  fi
+    # Check for group- or world-writable (macOS octal perms, with Linux fallback).
+    # Octal write bit (2) is set when the digit is one of 2,3,6,7.
+    perms="$(stat -Lf %Lp "$checked" 2>/dev/null || stat -Lc %a "$checked" 2>/dev/null)"
+    # Normalise to a 3-digit owner/group/other string.
+    perms="${perms: -3}"
+    group_digit="${perms:1:1}"
+    other_digit="${perms: -1}"
+    if [[ "$group_digit" =~ [2367] ]]; then
+      warn "$kind '$checked' is group-writable - skipping for security"
+      return 1
+    fi
+    if [[ "$other_digit" =~ [2367] ]]; then
+      warn "$kind '$checked' is world-writable - skipping for security"
+      return 1
+    fi
 
-  return 0
+    [[ "$checked" == "$trusted_root" ]] && return 0
+    if [[ "$checked" != "$trusted_root/"* ]]; then
+      warn "$kind '$target' resolves outside the trusted hook directory - skipping for security"
+      return 1
+    fi
+    checked="${checked:h}"
+  done
 }
 
 # verify_hook_security — Check hook file ownership and permissions before execution
@@ -80,6 +90,12 @@ _run_single_hook() {
     # Control flags for hooks
     [[ "$NO_BACKUP" == true ]] && export GROVE_NO_BACKUP="true"
     [[ "$DROP_DB" == true ]] && export GROVE_DROP_DB="true"
+    # Whether -f was passed. Exported so a hook can REPORT that a removal was
+    # forced — never so it can skip its own checks. Forcing git and accepting
+    # the loss of unrecorded work are different decisions.
+    [[ "$FORCE" == true ]] && export GROVE_FORCE="true"
+    # A one-use ledger acknowledgement token, when the operator supplied one.
+    [[ -n "${LEDGER_ACK:-}" ]] && export GROVE_LEDGER_ACK="$LEDGER_ACK"
 
     # Run hook from the worktree directory
     cd "$wt_path" 2>/dev/null || cd "$HOME"
@@ -87,7 +103,7 @@ _run_single_hook() {
     # Redirect stdin from /dev/null so hooks cannot deadlock by waiting on
     # input (e.g. during bulk or JSON flows).
     local hook_status=0
-    "$hook_script" </dev/null || hook_status=$?
+    "$hook_script" </dev/null >&2 || hook_status=$?
 
     if [[ $hook_status -eq 0 ]]; then
       ok "$display_label completed"
@@ -126,6 +142,7 @@ run_hooks() {
 
   # Check if hooks directory exists
   [[ -d "$GROVE_HOOKS_DIR" ]] || return 0
+  verify_hook_path_security "$GROVE_HOOKS_DIR" "Hook directory" || return $is_gating
 
   local hook_file="$GROVE_HOOKS_DIR/$hook_name"
 
@@ -135,16 +152,17 @@ run_hooks() {
   if [[ -x "$hook_file" ]]; then
     # Security check before executing
     if ! verify_hook_security "$hook_file"; then
-      return 0
-    fi
-
-    info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
-    if ! _run_single_hook "$hook_file" "Hook ${C_CYAN}$hook_name${C_RESET}" \
-      "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
       [[ $is_gating -eq 1 ]] && overall_status=1
+    else
+      info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
+      if ! _run_single_hook "$hook_file" "Hook ${C_CYAN}$hook_name${C_RESET}" \
+        "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
+        [[ $is_gating -eq 1 ]] && overall_status=1
+      fi
     fi
   elif [[ -f "$hook_file" ]]; then
     dim "  Hook $hook_name exists but is not executable. Run: chmod +x $hook_file"
+    [[ $is_gating -eq 1 ]] && overall_status=1
   fi
 
   # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks).
@@ -154,24 +172,36 @@ run_hooks() {
   # Identical filenames run global first, then repo, so the repo hook can
   # override the global hook's work.
   local hooks_d="$GROVE_HOOKS_DIR/${hook_name}.d"
-  if [[ -d "$hooks_d" ]] && verify_hook_path_security "$hooks_d" "Hook directory"; then
-    local repo_hooks_d="$hooks_d/$repo"
-    local include_repo_hooks=0
-    if [[ -d "$repo_hooks_d" ]] && verify_hook_path_security "$repo_hooks_d" "Hook directory"; then
-      include_repo_hooks=1
+  if [[ -d "$hooks_d" ]]; then
+    if ! verify_hook_path_security "$hooks_d" "Hook directory"; then
+      [[ $is_gating -eq 1 ]] && overall_status=1
+      return $overall_status
     fi
 
-    # Decorate each script as "<filename>\t<0|1>\t<path>" (0=global, 1=repo)
+    local repo_hooks_d="$hooks_d/$repo"
+    local include_repo_hooks=0
+    if [[ -d "$repo_hooks_d" ]]; then
+      if verify_hook_path_security "$repo_hooks_d" "Hook directory"; then
+        include_repo_hooks=1
+      else
+        [[ $is_gating -eq 1 ]] && overall_status=1
+      fi
+    fi
+
+    # Decorate each hook as "<filename>\t<0|1>\t<path>" (0=global, 1=repo)
     # so one numeric-aware sort (the (on) expansion flags) yields the merged
-    # order; the path is recovered from after the last tab. Globs match files
-    # only, follow symlinks, and require owner-execute.
+    # order; the path is recovered from after the last tab. Executable files
+    # retain extensionless-hook support, while non-executable *.sh files remain
+    # candidates so a pre-* hook fails closed instead of disappearing silently.
     local -a hook_entries
     local hook_script
-    for hook_script in "$hooks_d"/*(N-.x); do
+    for hook_script in "$hooks_d"/*(N-.); do
+      [[ -x "$hook_script" || "$hook_script" == *.sh ]] || continue
       hook_entries+=("${hook_script:t}"$'\t'0$'\t'"$hook_script")
     done
     if [[ $include_repo_hooks -eq 1 ]]; then
-      for hook_script in "$repo_hooks_d"/*(N-.x); do
+      for hook_script in "$repo_hooks_d"/*(N-.); do
+        [[ -x "$hook_script" || "$hook_script" == *.sh ]] || continue
         hook_entries+=("${hook_script:t}"$'\t'1$'\t'"$hook_script")
       done
     fi
@@ -180,8 +210,15 @@ run_hooks() {
     for entry in "${(on)hook_entries[@]}"; do
       hook_script="${entry##*$'\t'}"
 
+      if [[ ! -x "$hook_script" ]]; then
+        dim "  Hook ${hook_script:t} exists but is not executable. Run: chmod +x $hook_script"
+        [[ $is_gating -eq 1 ]] && overall_status=1
+        continue
+      fi
+
       # Security check before executing
       if ! verify_hook_security "$hook_script"; then
+        [[ $is_gating -eq 1 ]] && overall_status=1
         continue
       fi
 

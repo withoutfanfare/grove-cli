@@ -277,15 +277,15 @@ cmd_add() {
   local created_from_base=false
   if [[ "$branch_local" == true ]]; then
     info "Creating worktree from existing branch: ${C_MAGENTA}$branch${C_RESET}"
-    git --git-dir="$git_dir" worktree add "$wt_path" "$branch"
+    git --git-dir="$git_dir" worktree add "$wt_path" "$branch" >&2
   elif [[ "$branch_on_remote" == true ]]; then
     # Branch exists on remote but fetch to local failed - try worktree add with remote tracking
     info "Creating worktree tracking remote branch: ${C_MAGENTA}origin/$branch${C_RESET}"
-    git --git-dir="$git_dir" worktree add --track -b "$branch" "$wt_path" "origin/$branch"
+    git --git-dir="$git_dir" worktree add --track -b "$branch" "$wt_path" "origin/$branch" >&2
   else
     created_from_base=true
     info "Creating NEW branch ${C_MAGENTA}$branch${C_RESET} from ${C_DIM}$base${C_RESET}"
-    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base"
+    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base" >&2
   fi
   # Worktree now exists on disk — register its removal (and any Herd site set up
   # by post-add hooks) so a later failure tears down the partial state.
@@ -299,7 +299,7 @@ cmd_add() {
   if [[ "$branch_on_remote" == true ]]; then
     # Branch already exists on remote, just set up tracking
     dim "  Branch already exists on remote - setting up tracking"
-    /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" 2>/dev/null || true
+    /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1 || true
   else
     # New branch - push to remote
     info "Pushing new branch to remote..."
@@ -322,6 +322,10 @@ cmd_add() {
   transaction_commit
 
   # Run post-add hooks
+  # Register before the post-add hooks so a hook can already resume the ledger.
+  # Best effort: a failure here never undoes a successful add.
+  ledger_register "$wt_path"
+
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   # Restart Herd services to pick up new site
@@ -372,6 +376,22 @@ cmd_rm() {
   if is_protected_branch "$branch" && [[ "$FORCE" == false ]]; then
     error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use -f to force removal" 4
   fi
+
+  # Worktree Ledger gate. Deliberately BEFORE the pre-rm hooks and before git
+  # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
+  # it does not accept the loss of work nobody has recorded. The only way past
+  # this is a one-use token from `way worktree removal-check --acknowledge`,
+  # supplied as --ledger-ack.
+  if ! ledger_check_removal "$wt_path" "$LEDGER_ACK"; then
+    error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
+  fi
+
+  # Read the ledger id while the worktree still exists — it is the only handle
+  # left on the record once the folder has gone, and without it the removed
+  # worktree stays `active` in the ledger for ever.
+  local ledger_id=""
+  ledger_worktree_id "$wt_path"
+  ledger_id="$REPLY"
 
   # Check for uncommitted changes and confirm (unless --force)
   if [[ "$FORCE" == false ]]; then
@@ -440,7 +460,7 @@ cmd_rm() {
   local branch_deleted=false
   if [[ "$DELETE_BRANCH" == true ]]; then
     info "Deleting branch ${C_MAGENTA}$branch${C_RESET}"
-    if git --git-dir="$git_dir" branch -D "$branch" 2>/dev/null; then
+    if git --git-dir="$git_dir" branch -D "$branch" >&2; then
       branch_deleted=true
     else
       warn "Could not delete branch (may not exist locally)"
@@ -449,6 +469,12 @@ cmd_rm() {
 
   info "Pruning stale worktrees..."
   git --git-dir="$git_dir" worktree prune
+
+  # Close the ledger record now the worktree is genuinely gone. Best effort: the
+  # removal has already succeeded, so a bookkeeping failure must not report it
+  # as a failure. Refs are retained — archiving records the end of the work, it
+  # does not destroy anything.
+  ledger_archive "$ledger_id" "removed by grove"
 
   # Run post-rm hooks
   run_hooks "post-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
@@ -599,6 +625,9 @@ cmd_move() {
   transaction_commit
 
   # Run post-move hooks (with new path, URL, and db_name)
+  # The worktree id is unchanged; only its observed path moves.
+  ledger_moved "$new_wt_path"
+
   run_hooks "post-move" "$repo" "$branch" "$new_wt_path" "$new_url" "$db_name"
 
   print -r -- ""

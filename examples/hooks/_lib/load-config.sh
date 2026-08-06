@@ -28,6 +28,7 @@ HERD_CONFIG="${HERD_CONFIG:-$HOME/Library/Application Support/Herd/config}"
 # Only sets whitelisted variables
 _load_config_file() {
   local file="$1"
+  local key value quote char parsed escaped
   [[ -f "$file" ]] || return 0
 
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
@@ -39,16 +40,45 @@ _load_config_file() {
     key="${key#"${key%%[![:space:]]*}"}"
     key="${key%"${key##*[![:space:]]}"}"
 
-    # Remove quotes and trailing comments from value
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    value="${value%%#*}"
+    # Preserve # inside quoted values and bare mid-value secrets. A closing
+    # quote ends the value before any trailing comment.
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"*|\'*)
+        quote="${value:0:1}"
+        value="${value:1}"
+        parsed=""
+        escaped=false
+        # ponytail: config values are short; use an indexed parser if long
+        # quoted values ever become supported input.
+        while [[ -n "$value" ]]; do
+          char="${value:0:1}"
+          value="${value:1}"
+          if [[ "$char" == "$quote" && "$escaped" != "true" ]]; then
+            break
+          fi
+          parsed+="$char"
+          if [[ "$char" == \\ && "$escaped" != "true" ]]; then
+            escaped=true
+          else
+            escaped=false
+          fi
+        done
+        value="$parsed"
+        ;;
+      *)
+        [[ "$value" == *[[:space:]]#* ]] && value="${value%%[[:space:]]#*}"
+        ;;
+    esac
     value="${value%"${value##*[![:space:]]}"}"
 
-    # Expand $HOME in value
-    value="${value//\$HOME/$HOME}"
+    # Expand paths without changing passwords or other literal values.
+    case "$key" in
+      HERD_ROOT|HERD_CONFIG|DB_BACKUP_DIR)
+        value="${value//\$HOME/$HOME}"
+        [[ "$value" == \~ || "$value" == \~/* ]] && value="${HOME}${value#\~}"
+        ;;
+    esac
 
     # Only set whitelisted variables
     case "$key" in
@@ -64,6 +94,16 @@ _load_config_file() {
       PROTECTED_BRANCHES) PROTECTED_BRANCHES="$value" ;;
     esac
   done < "$file"
+}
+
+# Reject values that could escape a quoted MySQL identifier, become command
+# options, or traverse the backup directory when hooks are run directly.
+grove_validate_database_name() {
+  local db_name="${1:-}"
+  if [[ -z "$db_name" || ${#db_name} -gt 64 || ! "$db_name" =~ ^[a-zA-Z0-9_.]+$ ]]; then
+    echo "  Invalid database name: '$db_name'" >&2
+    return 1
+  fi
 }
 
 # Load configs in order (later overrides earlier)

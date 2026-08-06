@@ -16,14 +16,13 @@ if [[ ! -f "${GROVE_PATH}/artisan" ]]; then
   exit 0
 fi
 
-created_any=false
+umask 077
 
 ensure_dir() {
   local rel="$1"
   local full="${GROVE_PATH}/${rel}"
   if [[ ! -d "$full" ]]; then
     mkdir -p "$full"
-    created_any=true
     echo "  Created ${rel}"
   fi
 }
@@ -35,11 +34,8 @@ ensure_dir "storage/framework/testing"
 ensure_dir "storage/framework/views"
 ensure_dir "storage/logs"
 
-if [[ "$created_any" != "true" ]]; then
-  exit 0
-fi
-
-# Match permissions Laravel expects for writable dirs.
-chmod -R u+rwX,g+rwX "${GROVE_PATH}/bootstrap/cache" "${GROVE_PATH}/storage" 2>/dev/null || true
+# Herd runs PHP as the current user, so runtime files do not need to be exposed
+# to every account in the caller's default macOS group.
+chmod -R u+rwX,go-rwx "${GROVE_PATH}/bootstrap/cache" "${GROVE_PATH}/storage" 2>/dev/null || true
 
 exit 0

@@ -20,14 +20,28 @@
 
 # Path to your pre-built .env file
 ENV_SOURCE="$HOME/Code/Worktree/myapp/myapp-env/.env"
+ENV_TARGET="${GROVE_PATH}/.env"
+ENV_FALLBACK="${GROVE_PATH}/.env.example"
 
 if [[ -f "$ENV_SOURCE" ]]; then
-  # Remove the .env created by the global hook
-  rm -f "${GROVE_PATH}/.env"
+  # ponytail: content equality identifies the generated fallback; add a marker
+  # if identical hand-written .env files ever need different treatment.
+  if [[ -f "$ENV_TARGET" && ! -L "$ENV_TARGET" && -f "$ENV_FALLBACK" ]] &&
+     cmp -s "$ENV_FALLBACK" "$ENV_TARGET"; then
+    if ! rm -f "$ENV_TARGET"; then
+      echo "  Failed to replace .env.example fallback"
+      exit 1
+    fi
+  fi
 
-  # Create symlink to pre-built .env
-  ln -sf "$ENV_SOURCE" "${GROVE_PATH}/.env"
-  echo "  Linked .env → $ENV_SOURCE"
+  if [[ -e "$ENV_TARGET" || -L "$ENV_TARGET" ]]; then
+    echo "  Preserved existing .env"
+  elif ln -s "$ENV_SOURCE" "$ENV_TARGET"; then
+    echo "  Linked .env → $ENV_SOURCE"
+  else
+    echo "  Failed to link .env"
+    exit 1
+  fi
 else
   echo "  Pre-built .env not found at $ENV_SOURCE"
   echo "  Keeping .env.example copy as fallback"

@@ -26,21 +26,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$SCRIPT_DIR/../_lib/load-config.sh" ]]; then
   source "$SCRIPT_DIR/../_lib/load-config.sh"
 else
-  # Fallback: load from ~/.groverc directly
-  if [[ -f "$HOME/.groverc" ]]; then
-    DB_HOST="${DB_HOST:-$(grep '^DB_HOST=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
-    DB_USER="${DB_USER:-$(grep '^DB_USER=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
-    DB_PASSWORD="${DB_PASSWORD:-$(grep '^DB_PASSWORD=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
-    DB_CREATE="${DB_CREATE:-$(grep '^DB_CREATE=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
-    DB_BACKUP="${DB_BACKUP:-$(grep '^DB_BACKUP=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
-    DB_BACKUP_DIR="${DB_BACKUP_DIR:-$(grep '^DB_BACKUP_DIR=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2- | sed 's|\$HOME|'"$HOME"'|g' | tr -d '"')}"
-  fi
-  DB_HOST="${DB_HOST:-127.0.0.1}"
-  DB_USER="${DB_USER:-root}"
-  DB_PASSWORD="${DB_PASSWORD:-}"
-  DB_CREATE="${DB_CREATE:-true}"
-  DB_BACKUP="${DB_BACKUP:-true}"
-  DB_BACKUP_DIR="${DB_BACKUP_DIR:-$HOME/Code/Project Support/Worktree/Database/Backup}"
+  echo "  Config loader not found - refusing removal without a safe backup check"
+  exit 1
 fi
 
 # If database creation is disabled, we don't manage databases - skip silently
@@ -54,25 +41,36 @@ if [[ "$DB_BACKUP" != "true" ]]; then
   exit 0
 fi
 
-if ! command -v mysqldump >/dev/null 2>&1; then
-  echo "  mysqldump not found - skipping backup"
-  exit 0
+grove_validate_database_name "${GROVE_DB_NAME:-}" || exit 1
+
+if ! command -v mysql >/dev/null 2>&1 || ! command -v mysqldump >/dev/null 2>&1; then
+  echo "  MySQL backup tools not found - refusing removal without a backup"
+  exit 1
 fi
 
-# Build mysql command to check if database exists
-mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
-# Use MYSQL_PWD env var instead of -p to keep the password out of 'ps' output
-[[ -n "$DB_PASSWORD" ]] && export MYSQL_PWD="$DB_PASSWORD"
+# Check connectivity separately so an authentication or server failure is not
+# mistaken for a database that does not exist.
+mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
+  echo "  Cannot reach MySQL - refusing removal without a database backup"
+  exit 1
+fi
 
 # Check if database exists
-if ! "${mysql_cmd[@]}" -e "USE \`${GROVE_DB_NAME}\`;" 2>/dev/null; then
+if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+    -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='${GROVE_DB_NAME}';" 2>/dev/null); then
+  echo "  Could not check database - refusing removal without a backup"
+  exit 1
+fi
+if [[ "$database_exists" != "1" ]]; then
   echo "  Database ${GROVE_DB_NAME} does not exist - skipping backup"
   exit 0
 fi
 
 # Create backup directory
+umask 077
 backup_dir="$DB_BACKUP_DIR/$GROVE_REPO"
-mkdir -p "$backup_dir" || { echo "  Could not create backup directory"; exit 0; }
+mkdir -p "$backup_dir" || { echo "  Could not create backup directory"; exit 1; }
 
 # Generate backup filename with timestamp
 timestamp="$(date +%Y%m%d_%H%M%S)"
@@ -80,15 +78,13 @@ backup_file="$backup_dir/${GROVE_DB_NAME}_${timestamp}.sql"
 
 # Build mysqldump command
 mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
-# Use MYSQL_PWD env var instead of -p to keep the password out of 'ps' output
-[[ -n "$DB_PASSWORD" ]] && export MYSQL_PWD="$DB_PASSWORD"
 
 echo "  Backing up database ${GROVE_DB_NAME}..."
-if "${mysqldump_cmd[@]}" "$GROVE_DB_NAME" > "$backup_file" 2>/dev/null; then
+if MYSQL_PWD="${DB_PASSWORD:-}" "${mysqldump_cmd[@]}" "$GROVE_DB_NAME" > "$backup_file" 2>/dev/null; then
   echo "  Backup saved: $backup_file"
   exit 0
 else
-  echo "  Backup failed - continuing anyway"
+  echo "  Backup failed - refusing removal"
   rm -f "$backup_file" 2>/dev/null
-  exit 0
+  exit 1
 fi

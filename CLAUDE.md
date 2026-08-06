@@ -46,14 +46,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    ./grove <command> --json | python3 -c "import json,sys; json.load(sys.stdin)"
    ```
 
-3. **Test all JSON commands after changes to shared functions**:
-   ```bash
-   ./grove repos --json | python3 -c "import json,sys; json.load(sys.stdin)"
-   ./grove recent --json | python3 -c "import json,sys; json.load(sys.stdin)"
-   ./grove ls <repo> --json | python3 -c "import json,sys; json.load(sys.stdin)"
-   ./grove branches <repo> --json | python3 -c "import json,sys; json.load(sys.stdin)"
-   ./grove health <repo> --json | python3 -c "import json,sys; json.load(sys.stdin)"
-   ```
+3. **Test all JSON commands after changes to shared functions**: same check as above, e.g. `./grove repos --json | python3 -c "import json,sys; json.load(sys.stdin)"` — also run for `recent`, `ls <repo>`, `branches <repo>`, `health <repo>`.
 
 4. **Zsh loop variable pattern (IMPORTANT)**:
    ```zsh
@@ -96,6 +89,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Laravel-specific** → `lib/commands/laravel.sh`
 - **Service management** (services: status/start/stop/restart/add/remove/apps/horizon/logs/doctor — Supervisor, Horizon, Reverb, scheduler) → `lib/commands/services.sh` *(also emits the `services apps --json` and `services status --json` data contracts)*
 
+## Worktree Ledger integration (optional)
+
+`lib/13-ledger.sh` is the seam to Waypoint's `way` CLI. See
+[docs/guides/worktree-ledger.md](docs/guides/worktree-ledger.md).
+
+- **`-f` is not ledger consent.** `grove rm -f` forces git; it does not accept
+  the loss of work nobody has recorded. Only a one-use `--ledger-ack` token
+  from `way worktree removal-check --acknowledge` opens the gate. Never make
+  `-f` imply it, and never add a flag that does.
+- **Fails closed on risk, open on absence.** `way` exit 1 = blocked (stop);
+  exit 3 = could not answer (proceed in `auto` mode, stop in `required`). A
+  worktree grove could always remove must not become unremovable because
+  Waypoint has nothing to say about it — that is how a safety gate gets
+  switched off within a day.
+- **The degraded mode is always visible.** "No gate ran" and "the gate passed"
+  must never look alike.
+- **Grove never parses ledger Markdown** and never decides what is risky. It
+  asks, relays `way`'s answer verbatim (the remedies matter), and obeys the
+  exit code.
+- **`LEDGER_INTEGRATION=off` in `tests/test-helper.bash`** keeps the suite
+  hermetic from whichever `way` the developer has installed. Only
+  `tests/integration/ledger.bats` turns it on, with its own stub.
+- The base ref lives in a per-worktree sidecar (`git rev-parse --git-path
+  grove-base`), not `git config --local grove.base`, which resolves from the
+  COMMON config on a bare-repo layout. Legacy config is still read and written
+  for one release. Never enable `extensions.worktreeConfig`.
+
 ## Development Commands
 
 ```bash
@@ -117,37 +137,7 @@ grove-dev doctor
 
 ## Architecture
 
-The tool is structured as a single main script (`grove`) **generated from** modular libraries in `lib/`:
-
-```bash
-grove                    # GENERATED FILE - built from lib/ modules via ./build.sh
-lib/
-├── 00-header.sh      # Version, defaults, global flags
-├── 01-core.sh        # Config loading, colour output, notifications
-├── 02-validation.sh  # Input validation (security-critical)
-├── 03-paths.sh       # Worktree path/URL generation, slugification
-├── 04-git.sh         # Git operations (fetch, sync, worktree management)
-├── 05-database.sh    # MySQL database creation/backup/removal
-├── 06-hooks.sh       # Lifecycle hook execution
-├── 07-templates.sh   # Worktree templates (skip flags for setup steps)
-├── 08-spinner.sh     # Progress spinner for long operations
-├── 09-parallel.sh    # Parallel worktree operations
-├── 10-interactive.sh # fzf integration for branch selection
-├── 11-resilience.sh  # Lock file handling, error recovery
-├── 12-deps.sh        # Shared dependency management
-├── 99-main.sh        # Main entry point and argument parsing
-└── commands/
-    ├── lifecycle.sh     # Worktree lifecycle (add, rm, move, clone, fresh)
-    ├── git-ops.sh       # Git operations (pull, sync, prune, log, diff, summary)
-    ├── navigation.sh    # Directory navigation (cd, open, edit)
-    ├── info.sh          # Information/reporting (ls, status, repos, report, health, dashboard)
-    ├── maintenance.sh   # System maintenance (doctor, cleanup, unlock, repair, upgrade)
-    ├── bulk-ops.sh      # Bulk operations (build_all, exec_all)
-    ├── discovery.sh     # Worktree discovery (recent, clean, info)
-    ├── config.sh        # Configuration (setup, templates, alias, group)
-    ├── laravel.sh       # Laravel-specific commands (migrate, tinker, fresh)
-    └── services.sh      # App service management (Supervisor, Horizon, Reverb, scheduler)
-```
+The tool is structured as a single main script (`grove`) **generated from** modular libraries in `lib/`.
 
 **Command pattern:** Each command is a `cmd_<name>()` function. Adding a new command requires:
 1. Create `cmd_yourcommand()` function in the appropriate `lib/commands/*.sh` file
@@ -163,9 +153,7 @@ Uses BATS (Bash Automated Testing System). Test files are in `tests/`:
 - `tests/unit/*.bats` - Pure function tests (validation, slugification, JSON escaping)
 - `tests/integration/*.bats` - Config parsing, command integration
 
-Current coverage: ~270 tests focusing on security-critical validation, path handling, database naming, hooks, and the .env rewrite used by move/restructure.
-
-Install BATS: `brew install bats-core` or clone to `test_modules/bats`
+Run the full suite — count grows constantly. Focuses on security-critical validation, path handling, database naming, hooks, and the .env rewrite used by move/restructure.
 
 ## Key Concepts
 
@@ -186,16 +174,5 @@ Install BATS: `brew install bats-core` or clone to `test_modules/bats`
 
 ## Code Style
 
-- 2-space indentation
-- British English in user-facing text (colour, behaviour, honour)
 - Use existing output helpers: `die()`, `info()`, `ok()`, `warn()`, `dim()`
 - JSON output via `--json` flag where applicable
-
-## Commit Message Format
-
-```bash
-feat: add new command for X
-fix: correct database backup path
-docs: update installation instructions
-refactor: simplify branch detection logic
-```

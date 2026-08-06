@@ -26,6 +26,12 @@ setup_test_environment() {
   # Disable colours for testing
   export NO_COLOR=1
 
+  # Keep the suite hermetic from whichever `way` binary happens to be installed
+  # on the developer's machine. The ledger integration is exercised deliberately
+  # by tests/integration/ledger.bats, which turns it on with its own stub; every
+  # other test must behave as it did before the integration existed.
+  export LEDGER_INTEGRATION=off
+
   # Set test defaults
   export DEFAULT_BASE="origin/main"
   export QUIET=true

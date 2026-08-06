@@ -43,6 +43,12 @@ GROVE_DIR=""
 # Global flags
 QUIET=false
 FORCE=false
+# A one-use Worktree Ledger acknowledgement token (--ledger-ack). Separate from
+# FORCE on purpose: -f forces git, a token accepts the loss of recorded risk.
+LEDGER_ACK=""
+# Worktree Ledger integration: auto (use it when `way` is present), off, or
+# required (an unavailable ledger blocks removal).
+LEDGER_INTEGRATION="${LEDGER_INTEGRATION:-auto}"
 JSON_OUTPUT=false
 PRETTY_JSON=false
 DRY_RUN=false
@@ -109,6 +115,28 @@ ensure_tool_path() {
       PATH="${PATH:+$PATH:}$p"
     fi
   done
+
+  # nvm-managed node lives under a versioned directory, so it cannot be a static
+  # entry above. Shells that lazy-load nvm expose npm as a shell function only,
+  # which the bash hook subprocesses never inherit — without this, npm-dependent
+  # hooks silently skip themselves and the worktree ends up with no node_modules.
+  # ponytail: picks the highest version under the last matching nvm root (so
+  # Herd's wins over a plain ~/.nvm) and ignores .nvmrc; a hook that needs a
+  # pinned version should source nvm itself.
+  # `whence -p`, not `command -v`: the latter matches the lazy-load shell
+  # function and would report npm as present when no binary is on PATH.
+  if ! whence -p npm >/dev/null 2>&1; then
+    local -a node_bins
+    node_bins=(
+      "${NVM_DIR:-$HOME/.nvm}/versions/node"/*/bin(N/n)
+      "$HOME/Library/Application Support/Herd/config/nvm/versions/node"/*/bin(N/n)
+    )
+    if (( $#node_bins )); then
+      local node_bin="${node_bins[-1]}"
+      [[ ":${PATH:-}:" != *":$node_bin:"* ]] && PATH="${PATH:+$PATH:}$node_bin"
+    fi
+  fi
+
   export PATH
 }
 
@@ -120,7 +148,7 @@ _read_config_pairs() {
   local handler="$2"
   [[ -f "$file" ]] || return 0
 
-  local key value was_quoted
+  local key value quote char parsed escaped
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     # Skip lines with null bytes (potential injection attempt)
     [[ "$key" == *$'\0'* || "$value" == *$'\0'* ]] && continue
@@ -133,22 +161,38 @@ _read_config_pairs() {
     key="${key#"${key%%[![:space:]]*}"}"
     key="${key%"${key##*[![:space:]]}"}"
 
-    # Clean value inline (avoid subprocess from function call)
-    was_quoted=false
-    if [[ "$value" == \"*\" ]] || [[ "$value" == \'*\' ]]; then
-      was_quoted=true
-    fi
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    # Only strip inline comments if value was not quoted
-    # (quoted values like "my#password" should keep the #).
-    # Strip a trailing " #..." comment (whitespace then #) only — never a bare
-    # mid-value '#', so unquoted secrets like DB_PASSWORD=pass#word survive intact.
-    if [[ "$was_quoted" == false && "$value" == *[[:space:]]#* ]]; then
-      value="${value%%[[:space:]]#*}"
-    fi
+    # Clean value inline (avoid subprocess from function call). A closing quote
+    # ends a quoted value, so a later " # comment" is ignored without losing a
+    # literal # inside the quotes.
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"*|\'*)
+        quote="${value:0:1}"
+        value="${value:1}"
+        parsed=""
+        escaped=false
+        # ponytail: config values are short; use an indexed parser if long
+        # quoted values ever become supported input.
+        while [[ -n "$value" ]]; do
+          char="${value:0:1}"
+          value="${value:1}"
+          if [[ "$char" == "$quote" && "$escaped" != "true" ]]; then
+            break
+          fi
+          parsed+="$char"
+          if [[ "$char" == \\ && "$escaped" != "true" ]]; then
+            escaped=true
+          else
+            escaped=false
+          fi
+        done
+        value="$parsed"
+        ;;
+      *)
+        # Strip only whitespace-prefixed comments; pass#word remains literal.
+        [[ "$value" == *[[:space:]]#* ]] && value="${value%%[[:space:]]#*}"
+        ;;
+    esac
     value="${value%"${value##*[![:space:]]}"}"
 
     # Expand $HOME and a leading ~ for path-typed keys only, so path values like
@@ -193,6 +237,9 @@ load_config() {
       REPO_GROUPS) REPO_GROUPS="$value" ;;
       GROVE_SHARED_DEPS_DIR) GROVE_SHARED_DEPS_DIR="$value" ;;
       GROVE_STALE_THRESHOLD) GROVE_STALE_THRESHOLD="$value" ;;
+      # auto (default) | off | required — see lib/13-ledger.sh
+      LEDGER_INTEGRATION) LEDGER_INTEGRATION="$value" ;;
+      GROVE_WAY_BIN) GROVE_WAY_BIN="$value" ;;
     esac
   }
 
@@ -300,13 +347,13 @@ die() {
   exit 1
 }
 # info — Print informational message (suppressed in quiet mode)
-info() { [[ "$QUIET" == true ]] || print -r -- "${C_BLUE}→${C_RESET} $*"; }
+info() { [[ "$QUIET" == true ]] || print -r -- "${C_BLUE}→${C_RESET} $*" >&2; }
 # ok — Print success message (suppressed in quiet mode)
-ok()   { [[ "$QUIET" == true ]] || print -r -- "${C_GREEN}✔${C_RESET} $*"; }
+ok()   { [[ "$QUIET" == true ]] || print -r -- "${C_GREEN}✔${C_RESET} $*" >&2; }
 # warn — Print warning message (always shown, even in quiet mode)
-warn() { print -r -- "${C_YELLOW}⚠${C_RESET} $*"; }
+warn() { print -r -- "${C_YELLOW}⚠${C_RESET} $*" >&2; }
 # dim — Print dimmed/secondary message (suppressed in quiet mode)
-dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}"; }
+dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}" >&2; }
 
 # Output structured error JSON and exit
 # Usage: die_json "ERROR_CODE" "Human readable message" [exit_code]
@@ -314,6 +361,7 @@ dim()  { [[ "$QUIET" == true ]] || print -r -- "${C_DIM}$*${C_RESET}"; }
 #              REPO_NOT_FOUND, BRANCH_NOT_FOUND, WORKTREE_NOT_FOUND (exit 3)
 #              GIT_ERROR, WORKTREE_EXISTS, PROTECTED_BRANCH (exit 4)
 #              DB_ERROR, HOOK_FAILED, IO_ERROR (exit 5)
+#              LEDGER_BLOCKED (exit 6) - the worktree ledger refused a removal
 die_json() {
   local code="$1"
   local message="$2"
@@ -1741,19 +1789,63 @@ get_ahead_behind() {
   print -r -- "$ahead $behind"
 }
 
-# worktree_base_for — Read worktree-local base ref (grove.base config), with fallback
+# worktree_base_sidecar_path — Absolute path of a worktree's own grove-base file
+#
+# `git rev-parse --git-path` resolves to the per-worktree administrative
+# directory, which is the whole point: `git config --local` resolves from the
+# COMMON config on a bare-repository layout, so every linked worktree saw the
+# same grove.base and a worktree's real base was silently replaced by whichever
+# one was written last. The result is absolute inside a linked worktree and
+# relative to the worktree in a main checkout, so relative paths are joined.
+#
+# Prints nothing and returns 1 when the path is not inside a git worktree.
+worktree_base_sidecar_path() {
+  local wt_path="$1"
+  local raw=""
+
+  raw="$(git -C "$wt_path" rev-parse --git-path grove-base 2>/dev/null || true)"
+  [[ -n "$raw" ]] || return 1
+
+  if [[ "$raw" == /* ]]; then
+    print -r -- "$raw"
+  else
+    print -r -- "$wt_path/$raw"
+  fi
+}
+
+# worktree_base_for — Read a worktree's base ref, with fallback
+#
+# Resolution order:
+#   1. the per-worktree grove-base sidecar (authoritative);
+#   2. the legacy grove.base config, so worktrees created before the sidecar
+#      existed keep working (retained for at least one release);
+#   3. the supplied fallback, else DEFAULT_BASE.
 worktree_base_for() {
   local wt_path="$1"
   local fallback="${2:-$DEFAULT_BASE}"
 
-  local base=""
-  base="$(git -C "$wt_path" config --local --get grove.base 2>/dev/null || true)"
+  local base="" sidecar=""
+  sidecar="$(worktree_base_sidecar_path "$wt_path" 2>/dev/null || true)"
+  if [[ -n "$sidecar" && -r "$sidecar" ]]; then
+    # An empty or whitespace-only sidecar falls through rather than returning
+    # nothing, so a truncated write cannot silently blank the base.
+    base="$(tr -d '[:space:]' < "$sidecar" 2>/dev/null || true)"
+  fi
+
+  [[ -n "$base" ]] || base="$(git -C "$wt_path" config --local --get grove.base 2>/dev/null || true)"
   [[ -n "$base" ]] || base="$fallback"
 
   print -r -- "$base"
 }
 
-# set_worktree_base — Save base ref in worktree-local git config (grove.base)
+# set_worktree_base — Save a worktree's base ref in its own sidecar
+#
+# Writes the per-worktree sidecar (authoritative) and, for one release, the
+# legacy grove.base config as well. The legacy write is deliberate: an older
+# grove binary that only knows about grove.base would otherwise fall back to
+# DEFAULT_BASE, which is a quieter and more misleading failure than reading a
+# stale value. Readers always prefer the sidecar, so the two cannot disagree in
+# this version.
 set_worktree_base() {
   local wt_path="$1"
   local base="$2"
@@ -1763,12 +1855,23 @@ set_worktree_base() {
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
 
-  # Surface a write failure rather than silently swallowing it — a missing
-  # grove.base later forces the (possibly wrong) DEFAULT_BASE fallback. The
-  # failure is non-fatal (the fallback still works), so we warn but return 0 to
-  # avoid aborting the caller under `set -e`.
+  local sidecar=""
+  sidecar="$(worktree_base_sidecar_path "$wt_path" 2>/dev/null || true)"
+  if [[ -n "$sidecar" ]]; then
+    # Write-then-rename so a reader never sees a half-written base.
+    local tmp="${sidecar}.tmp.$$"
+    if print -r -- "$base" > "$tmp" 2>/dev/null && mv -f "$tmp" "$sidecar" 2>/dev/null; then
+      :
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      warn "Failed to save base ref '$base' for $wt_path (will fall back to default)"
+    fi
+  fi
+
+  # Legacy compatibility. Non-fatal: the sidecar above is what this version
+  # reads, so a failure here only affects an older grove.
   if ! git -C "$wt_path" config --local grove.base "$base" 2>/dev/null; then
-    warn "Failed to save base ref '$base' for $wt_path (will fall back to default)"
+    dim "  Could not update the legacy grove.base config for $wt_path"
   fi
   return 0
 }
@@ -2052,6 +2155,16 @@ db_name_for() {
   print -r -- "$db_name"
 }
 
+# _validate_database_name — Reject unsafe MySQL identifiers supplied by hooks
+_validate_database_name() {
+  local db_name="${1:-}"
+
+  if [[ -z "$db_name" || ${#db_name} -gt 64 || ! "$db_name" =~ ^[a-zA-Z0-9_.]+$ ]]; then
+    warn "Refusing database operation for invalid database name: '$db_name'"
+    return 1
+  fi
+}
+
 # create_database — Create a MySQL database (respects DB_CREATE config)
 create_database() {
   local db_name="$1"
@@ -2060,6 +2173,8 @@ create_database() {
     dim "  Database creation disabled (GROVE_DB_CREATE=false)"
     return 0
   fi
+
+  _validate_database_name "$db_name" || return 1
 
   if ! command -v mysql >/dev/null 2>&1; then
     warn "MySQL client not found - skipping database creation"
@@ -2092,9 +2207,11 @@ backup_database() {
     return 0
   fi
 
+  _validate_database_name "$db_name" || return 1
+
   if ! command -v mysqldump >/dev/null 2>&1; then
-    warn "mysqldump not found - skipping database backup"
-    return 0
+    warn "mysqldump not found - refusing removal without a database backup"
+    return 1
   fi
 
   # Probe connectivity FIRST so a connection/auth failure is never mistaken for
@@ -2111,38 +2228,49 @@ backup_database() {
 
   # Connection is good — now decide existence via information_schema (a failed
   # USE could mean connection loss, so it is unsafe as an existence test).
-  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
-      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null | grep -q 1; then
+  local database_exists
+  if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null); then
+    warn "Could not check whether database $db_name exists - refusing removal without a backup"
+    return 1
+  fi
+  if [[ "$database_exists" != "1" ]]; then
     dim "  Database $db_name does not exist - skipping backup"
     return 0
   fi
 
-  # Create backup directory
-  local backup_dir="$DB_BACKUP_DIR/$repo"
-  mkdir -p "$backup_dir" || { warn "Could not create backup directory: $backup_dir"; return 1; }
+  (
+    umask 077
 
-  # Generate backup filename with timestamp
-  local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
-  local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
+    # Create backup directory
+    local backup_dir="$DB_BACKUP_DIR/$repo"
+    mkdir -p "$backup_dir" || { warn "Could not create backup directory: $backup_dir"; return 1; }
 
-  local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
+    # Generate backup filename with timestamp
+    local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
+    local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
 
-  info "Backing up database ${C_CYAN}$db_name${C_RESET}"
+    local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
 
-  # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-  if MYSQL_PWD="${DB_PASSWORD:-}" "${mysqldump_cmd[@]}" "$db_name" > "$backup_file" 2>/dev/null; then
-    ok "Database backed up: ${C_DIM}$backup_file${C_RESET}"
-    return 0
-  else
-    warn "Could not backup database"
-    rm -f "$backup_file" 2>/dev/null
-    return 1
-  fi
+    info "Backing up database ${C_CYAN}$db_name${C_RESET}"
+
+    # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
+    if MYSQL_PWD="${DB_PASSWORD:-}" "${mysqldump_cmd[@]}" "$db_name" > "$backup_file" 2>/dev/null; then
+      ok "Database backed up: ${C_DIM}$backup_file${C_RESET}"
+      return 0
+    else
+      warn "Could not backup database"
+      rm -f "$backup_file" 2>/dev/null
+      return 1
+    fi
+  )
 }
 
 # drop_database — Drop a MySQL database by name
 drop_database() {
   local db_name="$1"
+
+  _validate_database_name "$db_name" || return 1
 
   if ! command -v mysql >/dev/null 2>&1; then
     # Consistent with create_database: a missing client is a non-fatal skip, not
@@ -2164,8 +2292,13 @@ drop_database() {
 
   # Decide existence via information_schema (a failed USE could mean a lost
   # connection, so it is unsafe as an existence test).
-  if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
-      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null | grep -q 1; then
+  local database_exists
+  if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \
+      -e "SELECT 1 FROM information_schema.SCHEMATA WHERE schema_name='$db_name';" 2>/dev/null); then
+    warn "Could not check whether database $db_name exists - database was not dropped"
+    return 1
+  fi
+  if [[ "$database_exists" != "1" ]]; then
     dim "  Database $db_name does not exist"
     return 0
   fi
@@ -2251,31 +2384,41 @@ verify_hook_path_security() {
   local target="$1"
   local kind="$2"   # "Hook" or "Hook directory" - used for messaging
   local current_uid="${_GROVE_UID:-$(id -u)}"
+  local trusted_root="${GROVE_HOOKS_DIR:A}"
+  local checked="${target:A}"
+  local owner perms group_digit other_digit
 
-  # Check ownership (macOS stat format, with Linux fallback)
-  local owner; owner="$(stat -f %u "$target" 2>/dev/null || stat -c %u "$target" 2>/dev/null)"
-  if [[ "$owner" != "$current_uid" ]]; then
-    warn "$kind '$target' is not owned by current user - skipping for security"
-    return 1
-  fi
+  while true; do
+    # Check ownership (macOS stat format, with Linux fallback)
+    owner="$(stat -Lf %u "$checked" 2>/dev/null || stat -Lc %u "$checked" 2>/dev/null)"
+    if [[ "$owner" != "$current_uid" ]]; then
+      warn "$kind '$checked' is not owned by current user - skipping for security"
+      return 1
+    fi
 
-  # Check for group- or world-writable (macOS octal perms, with Linux fallback).
-  # Octal write bit (2) is set when the digit is one of 2,3,6,7.
-  local perms; perms="$(stat -f %Lp "$target" 2>/dev/null || stat -c %a "$target" 2>/dev/null)"
-  # Normalise to a 3-digit owner/group/other string.
-  perms="${perms: -3}"
-  local group_digit="${perms:1:1}"
-  local other_digit="${perms: -1}"
-  if [[ "$group_digit" =~ [2367] ]]; then
-    warn "$kind '$target' is group-writable - skipping for security"
-    return 1
-  fi
-  if [[ "$other_digit" =~ [2367] ]]; then
-    warn "$kind '$target' is world-writable - skipping for security"
-    return 1
-  fi
+    # Check for group- or world-writable (macOS octal perms, with Linux fallback).
+    # Octal write bit (2) is set when the digit is one of 2,3,6,7.
+    perms="$(stat -Lf %Lp "$checked" 2>/dev/null || stat -Lc %a "$checked" 2>/dev/null)"
+    # Normalise to a 3-digit owner/group/other string.
+    perms="${perms: -3}"
+    group_digit="${perms:1:1}"
+    other_digit="${perms: -1}"
+    if [[ "$group_digit" =~ [2367] ]]; then
+      warn "$kind '$checked' is group-writable - skipping for security"
+      return 1
+    fi
+    if [[ "$other_digit" =~ [2367] ]]; then
+      warn "$kind '$checked' is world-writable - skipping for security"
+      return 1
+    fi
 
-  return 0
+    [[ "$checked" == "$trusted_root" ]] && return 0
+    if [[ "$checked" != "$trusted_root/"* ]]; then
+      warn "$kind '$target' resolves outside the trusted hook directory - skipping for security"
+      return 1
+    fi
+    checked="${checked:h}"
+  done
 }
 
 # verify_hook_security — Check hook file ownership and permissions before execution
@@ -2320,6 +2463,12 @@ _run_single_hook() {
     # Control flags for hooks
     [[ "$NO_BACKUP" == true ]] && export GROVE_NO_BACKUP="true"
     [[ "$DROP_DB" == true ]] && export GROVE_DROP_DB="true"
+    # Whether -f was passed. Exported so a hook can REPORT that a removal was
+    # forced — never so it can skip its own checks. Forcing git and accepting
+    # the loss of unrecorded work are different decisions.
+    [[ "$FORCE" == true ]] && export GROVE_FORCE="true"
+    # A one-use ledger acknowledgement token, when the operator supplied one.
+    [[ -n "${LEDGER_ACK:-}" ]] && export GROVE_LEDGER_ACK="$LEDGER_ACK"
 
     # Run hook from the worktree directory
     cd "$wt_path" 2>/dev/null || cd "$HOME"
@@ -2327,7 +2476,7 @@ _run_single_hook() {
     # Redirect stdin from /dev/null so hooks cannot deadlock by waiting on
     # input (e.g. during bulk or JSON flows).
     local hook_status=0
-    "$hook_script" </dev/null || hook_status=$?
+    "$hook_script" </dev/null >&2 || hook_status=$?
 
     if [[ $hook_status -eq 0 ]]; then
       ok "$display_label completed"
@@ -2366,6 +2515,7 @@ run_hooks() {
 
   # Check if hooks directory exists
   [[ -d "$GROVE_HOOKS_DIR" ]] || return 0
+  verify_hook_path_security "$GROVE_HOOKS_DIR" "Hook directory" || return $is_gating
 
   local hook_file="$GROVE_HOOKS_DIR/$hook_name"
 
@@ -2375,16 +2525,17 @@ run_hooks() {
   if [[ -x "$hook_file" ]]; then
     # Security check before executing
     if ! verify_hook_security "$hook_file"; then
-      return 0
-    fi
-
-    info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
-    if ! _run_single_hook "$hook_file" "Hook ${C_CYAN}$hook_name${C_RESET}" \
-      "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
       [[ $is_gating -eq 1 ]] && overall_status=1
+    else
+      info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
+      if ! _run_single_hook "$hook_file" "Hook ${C_CYAN}$hook_name${C_RESET}" \
+        "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
+        [[ $is_gating -eq 1 ]] && overall_status=1
+      fi
     fi
   elif [[ -f "$hook_file" ]]; then
     dim "  Hook $hook_name exists but is not executable. Run: chmod +x $hook_file"
+    [[ $is_gating -eq 1 ]] && overall_status=1
   fi
 
   # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks).
@@ -2394,24 +2545,36 @@ run_hooks() {
   # Identical filenames run global first, then repo, so the repo hook can
   # override the global hook's work.
   local hooks_d="$GROVE_HOOKS_DIR/${hook_name}.d"
-  if [[ -d "$hooks_d" ]] && verify_hook_path_security "$hooks_d" "Hook directory"; then
-    local repo_hooks_d="$hooks_d/$repo"
-    local include_repo_hooks=0
-    if [[ -d "$repo_hooks_d" ]] && verify_hook_path_security "$repo_hooks_d" "Hook directory"; then
-      include_repo_hooks=1
+  if [[ -d "$hooks_d" ]]; then
+    if ! verify_hook_path_security "$hooks_d" "Hook directory"; then
+      [[ $is_gating -eq 1 ]] && overall_status=1
+      return $overall_status
     fi
 
-    # Decorate each script as "<filename>\t<0|1>\t<path>" (0=global, 1=repo)
+    local repo_hooks_d="$hooks_d/$repo"
+    local include_repo_hooks=0
+    if [[ -d "$repo_hooks_d" ]]; then
+      if verify_hook_path_security "$repo_hooks_d" "Hook directory"; then
+        include_repo_hooks=1
+      else
+        [[ $is_gating -eq 1 ]] && overall_status=1
+      fi
+    fi
+
+    # Decorate each hook as "<filename>\t<0|1>\t<path>" (0=global, 1=repo)
     # so one numeric-aware sort (the (on) expansion flags) yields the merged
-    # order; the path is recovered from after the last tab. Globs match files
-    # only, follow symlinks, and require owner-execute.
+    # order; the path is recovered from after the last tab. Executable files
+    # retain extensionless-hook support, while non-executable *.sh files remain
+    # candidates so a pre-* hook fails closed instead of disappearing silently.
     local -a hook_entries
     local hook_script
-    for hook_script in "$hooks_d"/*(N-.x); do
+    for hook_script in "$hooks_d"/*(N-.); do
+      [[ -x "$hook_script" || "$hook_script" == *.sh ]] || continue
       hook_entries+=("${hook_script:t}"$'\t'0$'\t'"$hook_script")
     done
     if [[ $include_repo_hooks -eq 1 ]]; then
-      for hook_script in "$repo_hooks_d"/*(N-.x); do
+      for hook_script in "$repo_hooks_d"/*(N-.); do
+        [[ -x "$hook_script" || "$hook_script" == *.sh ]] || continue
         hook_entries+=("${hook_script:t}"$'\t'1$'\t'"$hook_script")
       done
     fi
@@ -2420,8 +2583,15 @@ run_hooks() {
     for entry in "${(on)hook_entries[@]}"; do
       hook_script="${entry##*$'\t'}"
 
+      if [[ ! -x "$hook_script" ]]; then
+        dim "  Hook ${hook_script:t} exists but is not executable. Run: chmod +x $hook_script"
+        [[ $is_gating -eq 1 ]] && overall_status=1
+        continue
+      fi
+
       # Security check before executing
       if ! verify_hook_security "$hook_script"; then
+        [[ $is_gating -eq 1 ]] && overall_status=1
         continue
       fi
 
@@ -2878,17 +3048,49 @@ step_complete() {
   printf "\r\033[K" >&2
 }
 
-# Ensure spinner is stopped on interrupts (INT/TERM only).
+# Ensure spinner is stopped on interrupts (INT/TERM only), then exit with the
+# conventional signal status. Using exit here also preserves the transaction
+# rollback performed by TRAPEXIT in 11-resilience.sh.
 # We intentionally avoid trapping EXIT here because the transaction system
 # in 11-resilience.sh uses EXIT for rollback, and Zsh's trap replacement
 # would cause the spinner cleanup to overwrite transaction rollback.
 # The spinner is always explicitly stopped via spinner_stop or with_spinner,
 # so EXIT coverage is not needed for normal operation.
-trap 'spinner_stop 2>/dev/null' INT TERM
+trap 'if (( $+functions[parallel_stop] )); then parallel_stop 2>/dev/null; fi; spinner_stop 2>/dev/null; exit 130' INT
+trap 'if (( $+functions[parallel_stop] )); then parallel_stop 2>/dev/null; fi; spinner_stop 2>/dev/null; exit 143' TERM
 
 # 09-parallel.sh - Parallel execution framework
 
 autoload -Uz is-at-least
+
+typeset -ga PARALLEL_PIDS=()
+typeset -g PARALLEL_TMPDIR=""
+typeset -g PARALLEL_USES_PROCESS_GROUPS=false
+
+# Stop active workers before an interrupt exits Grove. When session support is
+# available, signalling -PID reaches each command's children as well as its
+# result wrapper; the fallback signals the wrapper PID directly.
+parallel_stop() {
+  local pid
+
+  for pid in "${PARALLEL_PIDS[@]}"; do
+    [[ "$PARALLEL_USES_PROCESS_GROUPS" == "true" ]] && kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  (( ${#PARALLEL_PIDS[@]} > 0 )) && sleep 0.05
+  for pid in "${PARALLEL_PIDS[@]}"; do
+    [[ "$PARALLEL_USES_PROCESS_GROUPS" == "true" ]] && kill -KILL -- "-$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  PARALLEL_PIDS=()
+  PARALLEL_USES_PROCESS_GROUPS=false
+
+  if [[ -n "$PARALLEL_TMPDIR" && -d "$PARALLEL_TMPDIR" ]]; then
+    rm -rf "$PARALLEL_TMPDIR"
+  fi
+  PARALLEL_TMPDIR=""
+}
 
 # report_results — Display success/failure summary after parallel operations
 report_results() {
@@ -2915,7 +3117,7 @@ report_results() {
 #
 # Only the first two '|' separate the fields; any further '|' belong to the
 # command. The path and command are passed as SEPARATE argv to a fixed wrapper
-# (`sh -c 'cd "$1" && shift && exec sh -c "$@"' _ "$path" sh "$command"`), so the
+# (`sh -c 'cd "$1" && exec sh -c "$2"' _ "$path" "$command"`), so the
 # path is never interpolated into a shell string — this is the security boundary
 # replacing the old `cd '$path' && ...` quoting (see improvement plan #16).
 #
@@ -2935,11 +3137,28 @@ parallel_run() {
   if [[ -z "$tmpdir" || ! -d "$tmpdir" ]]; then
     error_exit "IO_ERROR" "Failed to create temporary directory for parallel run" 5
   fi
+  PARALLEL_TMPDIR="$tmpdir"
+  PARALLEL_PIDS=()
+
+  # Prefer a process group so Ctrl-C can stop the shell command and its children.
+  # macOS has POSIX::setsid in system Perl; Linux normally provides setsid.
+  local -a session_runner
+  PARALLEL_USES_PROCESS_GROUPS=false
+  if command -v setsid >/dev/null 2>&1; then
+    session_runner=(setsid)
+    PARALLEL_USES_PROCESS_GROUPS=true
+  elif command -v perl >/dev/null 2>&1 && perl -MPOSIX -e 'exit(defined(&POSIX::setsid) ? 0 : 1)' 2>/dev/null; then
+    session_runner=(perl -MPOSIX -e 'my $sid = POSIX::setsid(); defined($sid) or die "setsid failed"; exec @ARGV; die "exec failed"')
+    PARALLEL_USES_PROCESS_GROUPS=true
+  else
+    # ponytail: direct-PID cancellation may leave grandchildren; require a
+    # session tool only if that becomes an observed problem on these systems.
+    session_runner=()
+  fi
   # NOTE: Don't use EXIT trap - cleanup manually after wait completes
   # to avoid race condition where trap fires before background jobs finish
 
   # Job tracking
-  local pids=()
   local running=0
 
   info "Running $total operation(s) in parallel (max $GROVE_MAX_PARALLEL concurrent)..."
@@ -2965,7 +3184,7 @@ parallel_run() {
     # Wait if at max parallel
     while (( running >= GROVE_MAX_PARALLEL )); do
       local new_pids=()
-      for pid in "${pids[@]}"; do
+      for pid in "${PARALLEL_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
           new_pids+=("$pid")
         else
@@ -2973,7 +3192,7 @@ parallel_run() {
           running=$((running - 1))
         fi
       done
-      pids=("${new_pids[@]}")
+      PARALLEL_PIDS=("${new_pids[@]}")
       if (( running >= GROVE_MAX_PARALLEL )); then
         if is-at-least 5.9 "${ZSH_VERSION:-0}"; then
           wait -n 2>/dev/null || sleep 0.1
@@ -2989,21 +3208,23 @@ parallel_run() {
     # stdin from /dev/null: parallel jobs are inherently non-interactive, and a
     # job inheriting the parent's stdin can block/contend on it (which also hangs
     # `wait` below, e.g. under bats or when grove is driven via a pipe).
-    (
-      if sh -c 'cd "$1" && shift && exec sh -c "$@"' _ "$wt_path" sh "$cmd" </dev/null >/dev/null 2>&1; then
-        echo "ok|$label" > "$tmpdir/$i"
-      else
-        echo "fail|$label" > "$tmpdir/$i"
+    "${session_runner[@]}" sh -c '
+      op_status=fail
+      if cd "$1" && sh -c "$2" </dev/null >/dev/null 2>&1; then
+        op_status=ok
       fi
-    ) &
-    pids+=($!)
+      printf "%s|%s\n" "$op_status" "$4" > "$3"
+    ' _ "$wt_path" "$cmd" "$tmpdir/$i" "$label" &
+    PARALLEL_PIDS+=($!)
     running=$((running + 1))
   done
 
   # Wait for ALL remaining jobs to complete before processing results
-  for pid in "${pids[@]}"; do
+  for pid in "${PARALLEL_PIDS[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
+  PARALLEL_PIDS=()
+  PARALLEL_USES_PROCESS_GROUPS=false
 
   # NOW it's safe to collect and report results (all background jobs finished)
   local success=0 failed=0
@@ -3038,6 +3259,7 @@ parallel_run() {
 
   # Clean up temp directory now that all results are collected
   rm -rf "$tmpdir"
+  PARALLEL_TMPDIR=""
 
   # Call result handler
   "$result_handler" "$success" "$failed" "$total"
@@ -3046,6 +3268,17 @@ parallel_run() {
 }
 
 # 10-interactive.sh - Interactive worktree creation wizard
+
+# Treat fzf's no-match and interrupt statuses as cancellation, but surface real
+# operational failures instead of silently selecting a fallback.
+_fzf_select() {
+  local fzf_status=0
+  fzf "$@" || fzf_status=$?
+  case "$fzf_status" in
+    0|1|130) return 0 ;;
+    *) die "fzf failed with exit status $fzf_status" ;;
+  esac
+}
 
 # Interactive worktree creation
 # Usage: interactive_add [repo]
@@ -3068,7 +3301,7 @@ interactive_add() {
     local repos; repos="$(list_repos)"
     [[ -n "$repos" ]] || die "No repositories found in $HERD_ROOT"
 
-    repo="$(echo "$repos" | fzf --prompt="Repository: " --height=40% --reverse)"
+    repo="$(echo "$repos" | _fzf_select --prompt="Repository: " --height=40% --reverse)" || return $?
     [[ -n "$repo" ]] || die "No repository selected"
   fi
 
@@ -3090,7 +3323,7 @@ interactive_add() {
   local branches; branches="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null | grep -v HEAD)"
 
   local base
-  base="$(echo "$branches" | fzf --prompt="Base branch: " --height=40% --reverse --query="origin/staging")"
+  base="$(echo "$branches" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="origin/staging")" || return $?
   [[ -n "$base" ]] || base="$DEFAULT_BASE"
 
   ok "Base: ${C_DIM}$base${C_RESET}"
@@ -3149,7 +3382,7 @@ interactive_add() {
     templates="(none)
 $templates"
 
-    template="$(echo "$templates" | fzf --prompt="Template: " --height=40% --reverse)"
+    template="$(echo "$templates" | _fzf_select --prompt="Template: " --height=40% --reverse)" || return $?
 
     if [[ "$template" != "(none)" && -n "$template" ]]; then
       GROVE_TEMPLATE="$template"
@@ -3288,7 +3521,7 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
     fzf_opts+=(--height=80%)
   fi
 
-  selection="$(printf '%s\n' "${entries[@]%%|*}" | fzf "${fzf_opts[@]}")"
+  selection="$(printf '%s\n' "${entries[@]%%|*}" | _fzf_select "${fzf_opts[@]}")" || return $?
 
   [[ -n "$selection" ]] || { dim "No selection made"; return 0; }
 
@@ -3550,7 +3783,14 @@ check_disk_space() {
   local min_mb="${2:-1024}"  # Default 1GB
 
   local available_kb
-  available_kb=$(df -k "$target_path" 2>/dev/null | tail -1 | awk '{print $4}')
+  if ! available_kb=$(df -Pk "$target_path" 2>/dev/null | awk 'NR == 2 { print $4 }'); then
+    warn "Could not determine available disk space for '$target_path'"
+    return 0
+  fi
+  if [[ ! "$available_kb" =~ ^[0-9]+$ ]]; then
+    warn "Could not determine available disk space for '$target_path'"
+    return 0
+  fi
   local available_mb=$((available_kb / 1024))
 
   if (( available_mb < min_mb )); then
@@ -4073,6 +4313,423 @@ cmd_share_deps_clean() {
   print -r -- ""
 }
 
+# 13-ledger.sh - Optional Worktree Ledger integration (Waypoint's `way` CLI)
+#
+# Grove owns the worktree lifecycle; Waypoint owns whether a worktree still
+# holds work nobody has recorded. This module is the seam between them, and it
+# has three rules:
+#
+#   1. Optional. No `way` on PATH, or LEDGER_INTEGRATION=off, and grove behaves
+#      exactly as it always has. The degraded mode is announced on stderr, never
+#      silent, because "no gate ran" and "the gate passed" must never look alike.
+#   2. Fails closed on risk, open on absence. A `way` that says "blocked" stops
+#      the removal. A `way` that cannot answer at all does not.
+#   3. `-f` is not consent. Forcing git and accepting the loss of uncommitted
+#      work are different decisions. Only a one-use token from
+#      `way worktree removal-check --acknowledge` opens this gate.
+#
+# Grove never parses the ledger's Markdown, and never decides what is risky. It
+# asks, relays the answer verbatim, and obeys the exit code.
+
+# way_binary — Print the `way` binary to use, or return 1 when unavailable
+#
+# A GUI-launched process does not inherit the shell PATH, so the usual install
+# locations are probed as well.
+way_binary() {
+  local candidate
+  for candidate in "${GROVE_WAY_BIN:-}" way "$HOME/.local/bin/way" "$HOME/.cargo/bin/way" \
+    /opt/homebrew/bin/way /usr/local/bin/way; do
+    [[ -n "$candidate" ]] || continue
+    if command -v "$candidate" >/dev/null 2>&1; then
+      print -r -- "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ledger_enabled — Whether the ledger gate should run at all
+#
+# LEDGER_INTEGRATION (config or environment):
+#   auto     - use the ledger when `way` is available (default)
+#   off      - never use it
+#   required - use it, and treat an unavailable `way` as a failure
+ledger_enabled() {
+  local mode="${LEDGER_INTEGRATION:-auto}"
+  [[ "$mode" == "off" ]] && return 1
+  return 0
+}
+
+# ledger_check_removal — Ask the ledger whether a worktree may be removed
+#
+# Arguments:
+#   $1 - worktree path
+#   $2 - acknowledgement token, or empty
+#
+# Returns:
+#   0 - removal may proceed (clear, acknowledged, or the ledger is unavailable
+#       in `auto` mode)
+#   1 - removal is blocked; the reason has already been printed to stderr
+#
+# Human-readable output from `way` is relayed verbatim rather than summarised:
+# it carries the remedy for each risk, and a gate that blocks without saying how
+# to proceed is exactly what teaches people to reach for -f.
+ledger_check_removal() {
+  local wt_path="$1"
+  local token="${2:-}"
+  local mode="${LEDGER_INTEGRATION:-auto}"
+
+  ledger_enabled || return 0
+
+  local way_bin=""
+  if ! way_bin="$(way_binary)"; then
+    if [[ "$mode" == "required" ]]; then
+      warn "LEDGER_INTEGRATION=required but the 'way' binary was not found"
+      return 1
+    fi
+    dim "  Worktree ledger unavailable ('way' not found) - removal not checked"
+    return 0
+  fi
+
+  [[ -d "$wt_path" ]] || return 0
+
+  local -a args
+  args=(worktree removal-check)
+  [[ -n "$token" ]] && args+=(--override-token "$token")
+
+  # Run from inside the worktree: `way` detects which worktree it is from cwd.
+  local output="" exit_code=0
+  output="$(cd "$wt_path" && "$way_bin" "${args[@]}" 2>&1)" || exit_code=$?
+
+  case $exit_code in
+    0)
+      [[ -n "$token" ]] && ok "Ledger acknowledgement accepted"
+      return 0
+      ;;
+    1)
+      # Blocked, or the token was refused. Either way `way` has explained it.
+      print -r -- "$output" >&2
+      return 1
+      ;;
+    *)
+      # Usage errors, an unregistered worktree, or no ledger root configured.
+      # None of these is evidence that the worktree is unsafe, so in `auto` mode
+      # grove carries on — but says so, so the gap is visible.
+      if [[ "$mode" == "required" ]]; then
+        warn "Worktree ledger could not answer (exit $exit_code):"
+        print -r -- "$output" >&2
+        return 1
+      fi
+      dim "  Worktree ledger not consulted: ${output%%$'\n'*}"
+      return 0
+      ;;
+  esac
+}
+
+# ledger_register — Register a newly created worktree, best effort
+#
+# Never fails the caller: a worktree that exists but is unregistered is a gap to
+# report, not a reason to undo a successful `grove add`.
+ledger_register() {
+  local wt_path="$1"
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$wt_path" ]] || return 0
+
+  local output="" exit_code=0
+  output="$(cd "$wt_path" && "$way_bin" worktree register 2>&1)" || exit_code=$?
+  if (( exit_code == 0 )); then
+    dim "  Registered in the worktree ledger"
+  else
+    dim "  Worktree ledger registration skipped: ${output%%$'\n'*}"
+  fi
+  return 0
+}
+
+# ledger_worktree_id — Set REPLY to a worktree's ledger id, or the empty string
+#
+# Must be called BEFORE removal. Once the folder has gone there is nowhere to
+# stand and no sidecar to read, so the id is the only handle left on the record.
+ledger_worktree_id() {
+  REPLY=""
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$1" ]] || return 0
+
+  local output=""
+  output="$(cd "$1" && "$way_bin" worktree resume --format json 2>/dev/null)" || return 0
+  [[ -n "$output" ]] || return 0
+
+  # One python pass rather than shell string-mangling: this is Waypoint's JSON,
+  # and a half-parsed id would archive the wrong record.
+  REPLY="$(print -r -- "$output" | python3 -c '
+import json, sys
+
+try:
+    brief = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+print((brief.get("view") or {}).get("worktree_id") or "")
+' 2>/dev/null)" || REPLY=""
+  return 0
+}
+
+# ledger_archive — Record that a removed worktree is finished with
+#
+# Best effort, always, and deliberately so: by the time this runs the worktree
+# is already gone. Turning a bookkeeping failure into a non-zero exit would
+# report a successful removal as a failure.
+#
+# Without this the ledger keeps every removed worktree `active` for ever —
+# `doctor` counts folders that do not exist, which is the same "record
+# disagrees with the disk" problem the ledger exists to catch.
+ledger_archive() {
+  local worktree_id="$1"
+  local reason="${2:-removed by grove}"
+
+  # No id means the worktree was never registered, or `way` could not be asked
+  # before removal. Guessing which record to close would be worse than leaving
+  # it open.
+  [[ -n "$worktree_id" ]] || return 0
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+
+  local output="" exit_code=0
+  output="$("$way_bin" worktree archive --worktree-id "$worktree_id" --reason "$reason" 2>&1)" \
+    || exit_code=$?
+
+  if (( exit_code == 0 )); then
+    dim "  Archived in the worktree ledger"
+  else
+    dim "  Worktree ledger archive skipped: ${output%%$'\n'*}"
+  fi
+  return 0
+}
+
+# ledger_moved — Reconcile a worktree's recorded path after a move, best effort
+ledger_moved() {
+  local wt_path="$1"
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$wt_path" ]] || return 0
+
+  (cd "$wt_path" && "$way_bin" worktree moved >/dev/null 2>&1) || true
+  return 0
+}
+
+# ledger_overlay_json — Build the optional `ledger` object for a worktree
+#
+# Sets REPLY to a JSON object, or to the empty string when the integration is
+# off or `way` is absent — in which case callers omit the key entirely and an
+# older consumer sees exactly the document it always saw.
+#
+# `available: false` is NOT "nothing at risk". It carries `unavailable_reason`,
+# and a consumer must render it as "unknown", never as safe. That distinction is
+# the whole reason this is a nested object rather than a handful of flat fields
+# that default to false.
+#
+# THREE questions, three commands, because no single `way` command answers all
+# of them:
+#   - `resume`        — identity, checkpoint, next action, drift. Without it
+#                       there is no worktree_id, so a failure here is the only
+#                       thing that makes the WHOLE overlay unavailable.
+#   - `removal-check` — the risk. `resume` has never carried one, which is why
+#                       `risk` was hardcoded null and the overlay could never
+#                       show it.
+#   - `lease status`  — who, if anyone, is working here.
+#
+# Risk and lease carry their OWN availability flags rather than folding into
+# `available`, so "resume answered but the risk could not be established" stays
+# distinguishable from "no risk found". A consumer that cannot tell those apart
+# renders unknown as safe, which is the failure this whole system exists to
+# prevent.
+#
+# The three run CONCURRENTLY. Sequentially they more than double `grove ls`
+# (measured: resume ~440ms, removal-check ~410ms, lease ~110ms per worktree).
+# Rows are processed one at a time, so this is at most three `way` processes at
+# once. All three are read-only — no `--acknowledge`, no `--override-token`,
+# ever. Issuing or spending an override is a deliberate command-line act and
+# must never be a side effect of listing worktrees.
+#
+# Grove never parses ledger Markdown: this is Waypoint's own JSON, relayed.
+ledger_overlay_json() {
+  REPLY=""
+
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$1" ]] || return 0
+
+  local scratch=""
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/grove-ledger.XXXXXX")" || {
+    REPLY='{"available": false, "unavailable_reason": "could not create a temporary directory for the ledger overlay"}'
+    return 0
+  }
+
+  # stdout and stderr are kept apart on purpose: `removal-check` prints its JSON
+  # to stdout and still exits 1 when it blocks, so a block is an ANSWER whose
+  # body must survive. Merging the streams would let a stderr warning corrupt it.
+  local resume_pid removal_pid lease_pid
+  ( cd "$1" && "$way_bin" worktree resume --format json \
+      >"$scratch/resume.out" 2>"$scratch/resume.err" ) &
+  resume_pid=$!
+  ( cd "$1" && "$way_bin" worktree removal-check --json \
+      >"$scratch/removal.out" 2>"$scratch/removal.err" ) &
+  removal_pid=$!
+  ( cd "$1" && "$way_bin" worktree lease status --json \
+      >"$scratch/lease.out" 2>"$scratch/lease.err" ) &
+  lease_pid=$!
+
+  # `set -e` is in force: a non-zero `wait` would abort grove outright, and
+  # exit 1 from removal-check is an ordinary, expected answer.
+  local resume_rc=0 removal_rc=0 lease_rc=0
+  wait "$resume_pid" || resume_rc=$?
+  wait "$removal_pid" || removal_rc=$?
+  wait "$lease_pid" || lease_rc=$?
+
+  # Reshape Waypoint's three answers into the published overlay. Done with a
+  # single python pass rather than shell string-mangling because a malformed
+  # object here would corrupt the whole status document.
+  local overlay=""
+  overlay="$(python3 -c '
+import json, sys
+
+scratch = sys.argv[1]
+resume_rc, removal_rc, lease_rc = (int(code) for code in sys.argv[2:5])
+
+
+def read(name):
+    try:
+        with open(f"{scratch}/{name}", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def first_line(text, fallback):
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return fallback
+
+
+# --- resume: identity, and the whole overlay stands or falls on it ----------
+if resume_rc != 0:
+    reason = first_line(
+        read("resume.err") + read("resume.out"),
+        f"way worktree resume exited {resume_rc}",
+    )
+    print(json.dumps({"available": False, "unavailable_reason": reason}))
+    raise SystemExit(0)
+
+try:
+    brief = json.loads(read("resume.out"))
+except Exception as error:
+    print(json.dumps({"available": False, "unavailable_reason": f"unreadable resume JSON: {error}"}))
+    raise SystemExit(0)
+
+view = brief.get("view", {})
+narrative = view.get("narrative") or {}
+
+# --- removal-check: the risk ------------------------------------------------
+# Exit 0 (clear) and exit 1 (blocked) are both answers, and both print the
+# RemovalCheck document to stdout. Exit 2 (usage) and exit 3 (could not answer)
+# are not answers, and must not read as "no risk".
+risk = None
+risk_available = False
+risk_unavailable_reason = None
+removal_blocked = None
+
+if removal_rc in (0, 1):
+    try:
+        check = json.loads(read("removal.out"))
+    except Exception as error:
+        check = None
+        risk_unavailable_reason = f"unreadable removal-check JSON: {error}"
+    # A document that does not carry a removal decision has not answered the
+    # question asked, whatever else is in it.
+    if isinstance(check, dict) and isinstance(check.get("removal_blocked"), bool):
+        risk_available = True
+        risk = check.get("highest_risk")
+        removal_blocked = check["removal_blocked"]
+    elif risk_unavailable_reason is None:
+        risk_unavailable_reason = "removal-check returned no removal decision"
+else:
+    risk_unavailable_reason = first_line(
+        read("removal.err") + read("removal.out"),
+        f"way worktree removal-check exited {removal_rc}",
+    )
+
+# --- lease status: who is working here --------------------------------------
+# `lease status` reports rather than gates, so it exits 0 whether or not a
+# lease is held; anything non-zero means it could not tell us.
+lease = None
+lease_held = None
+lease_available = False
+lease_unavailable_reason = None
+
+if lease_rc == 0:
+    try:
+        status = json.loads(read("lease.out"))
+    except Exception as error:
+        status = None
+        lease_unavailable_reason = f"unreadable lease JSON: {error}"
+    if isinstance(status, dict) and isinstance(status.get("held"), bool):
+        lease_available = True
+        lease_held = status["held"]
+        holder = status.get("lease")
+        lease = holder if isinstance(holder, dict) else None
+    elif lease_unavailable_reason is None:
+        lease_unavailable_reason = "lease status did not say whether the worktree is held"
+else:
+    lease_unavailable_reason = first_line(
+        read("lease.err") + read("lease.out"),
+        f"way worktree lease status exited {lease_rc}",
+    )
+
+print(json.dumps({
+    "available": True,
+    "worktree_id": view.get("worktree_id"),
+    "workstream_id": view.get("workstream_id"),
+    # Populated from removal-check. Null means EITHER no risk found (when
+    # risk_available is true) OR the risk could not be established (when it is
+    # false) — the flag is what tells them apart, and null alone never means safe.
+    "risk": risk,
+    "risk_available": risk_available,
+    "risk_unavailable_reason": risk_unavailable_reason,
+    # Relayed, never derived. Whether a risk blocks removal is a rule the
+    # ledger states and Grove only repeats.
+    "removal_blocked": removal_blocked,
+    "lease_available": lease_available,
+    "lease_unavailable_reason": lease_unavailable_reason,
+    "lease_held": lease_held,
+    "lease": lease,
+    "checkpoint_at": view.get("last_checkpoint_at"),
+    "next_action": narrative.get("next_action"),
+    "narrative_status": brief.get("narrative_status"),
+    "drift": (brief.get("drift") or {}).get("since_checkpoint"),
+    "unavailable_reason": None,
+}))
+' "$scratch" "$resume_rc" "$removal_rc" "$lease_rc" 2>/dev/null)" || overlay=""
+
+  rm -rf "$scratch"
+
+  if [[ -z "$overlay" ]]; then
+    REPLY='{"available": false, "unavailable_reason": "could not read the ledger overlay"}'
+  else
+    REPLY="$overlay"
+  fi
+  return 0
+}
+
 # lifecycle.sh - Worktree creation and removal commands
 
 # _update_env_app_url — Rewrite ONLY the APP_URL= line in a .env file, preserving every
@@ -4351,15 +5008,15 @@ cmd_add() {
   local created_from_base=false
   if [[ "$branch_local" == true ]]; then
     info "Creating worktree from existing branch: ${C_MAGENTA}$branch${C_RESET}"
-    git --git-dir="$git_dir" worktree add "$wt_path" "$branch"
+    git --git-dir="$git_dir" worktree add "$wt_path" "$branch" >&2
   elif [[ "$branch_on_remote" == true ]]; then
     # Branch exists on remote but fetch to local failed - try worktree add with remote tracking
     info "Creating worktree tracking remote branch: ${C_MAGENTA}origin/$branch${C_RESET}"
-    git --git-dir="$git_dir" worktree add --track -b "$branch" "$wt_path" "origin/$branch"
+    git --git-dir="$git_dir" worktree add --track -b "$branch" "$wt_path" "origin/$branch" >&2
   else
     created_from_base=true
     info "Creating NEW branch ${C_MAGENTA}$branch${C_RESET} from ${C_DIM}$base${C_RESET}"
-    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base"
+    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base" >&2
   fi
   # Worktree now exists on disk — register its removal (and any Herd site set up
   # by post-add hooks) so a later failure tears down the partial state.
@@ -4373,7 +5030,7 @@ cmd_add() {
   if [[ "$branch_on_remote" == true ]]; then
     # Branch already exists on remote, just set up tracking
     dim "  Branch already exists on remote - setting up tracking"
-    /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" 2>/dev/null || true
+    /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1 || true
   else
     # New branch - push to remote
     info "Pushing new branch to remote..."
@@ -4396,6 +5053,10 @@ cmd_add() {
   transaction_commit
 
   # Run post-add hooks
+  # Register before the post-add hooks so a hook can already resume the ledger.
+  # Best effort: a failure here never undoes a successful add.
+  ledger_register "$wt_path"
+
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   # Restart Herd services to pick up new site
@@ -4446,6 +5107,22 @@ cmd_rm() {
   if is_protected_branch "$branch" && [[ "$FORCE" == false ]]; then
     error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use -f to force removal" 4
   fi
+
+  # Worktree Ledger gate. Deliberately BEFORE the pre-rm hooks and before git
+  # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
+  # it does not accept the loss of work nobody has recorded. The only way past
+  # this is a one-use token from `way worktree removal-check --acknowledge`,
+  # supplied as --ledger-ack.
+  if ! ledger_check_removal "$wt_path" "$LEDGER_ACK"; then
+    error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
+  fi
+
+  # Read the ledger id while the worktree still exists — it is the only handle
+  # left on the record once the folder has gone, and without it the removed
+  # worktree stays `active` in the ledger for ever.
+  local ledger_id=""
+  ledger_worktree_id "$wt_path"
+  ledger_id="$REPLY"
 
   # Check for uncommitted changes and confirm (unless --force)
   if [[ "$FORCE" == false ]]; then
@@ -4514,7 +5191,7 @@ cmd_rm() {
   local branch_deleted=false
   if [[ "$DELETE_BRANCH" == true ]]; then
     info "Deleting branch ${C_MAGENTA}$branch${C_RESET}"
-    if git --git-dir="$git_dir" branch -D "$branch" 2>/dev/null; then
+    if git --git-dir="$git_dir" branch -D "$branch" >&2; then
       branch_deleted=true
     else
       warn "Could not delete branch (may not exist locally)"
@@ -4523,6 +5200,12 @@ cmd_rm() {
 
   info "Pruning stale worktrees..."
   git --git-dir="$git_dir" worktree prune
+
+  # Close the ledger record now the worktree is genuinely gone. Best effort: the
+  # removal has already succeeded, so a bookkeeping failure must not report it
+  # as a failure. Refs are retained — archiving records the end of the work, it
+  # does not destroy anything.
+  ledger_archive "$ledger_id" "removed by grove"
 
   # Run post-rm hooks
   run_hooks "post-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
@@ -4673,6 +5356,9 @@ cmd_move() {
   transaction_commit
 
   # Run post-move hooks (with new path, URL, and db_name)
+  # The worktree id is unchanged; only its observed path moves.
+  ledger_moved "$new_wt_path"
+
   run_hooks "post-move" "$repo" "$branch" "$new_wt_path" "$new_url" "$db_name"
 
   print -r -- ""
@@ -6487,6 +7173,16 @@ _display_worktree() {
     fi
     json_item+="\"merged\": $merged, "
     json_item+="\"stale\": $stale"
+    # The optional ledger overlay, exactly as `grove status --json` carries it.
+    # It has to be on BOTH: Grove desktop reads `ls --json` (see get_worktrees
+    # in grove's src-tauri/src/wt.rs), never `status --json`, so while this key
+    # existed only on `status` the overlay never reached the app and its badges
+    # had nothing to render. Additive and last: an empty REPLY omits the key
+    # entirely, and an older consumer sees precisely the document it always saw.
+    local ledger_json=""
+    ledger_overlay_json "$wt_path"
+    [[ -n "$REPLY" ]] && ledger_json=", \"ledger\": $REPLY"
+    json_item+="$ledger_json"
     json_item+="}"
 
     REPLY="$json_item"
@@ -6672,7 +7368,12 @@ _display_status_row() {
     json_escape "$b"; local _je_b="$REPLY"
     json_escape "$p"; local _je_p="$REPLY"
     json_escape "$sha"; local _je_sha="$REPLY"
-    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}"
+    # Optional, nested and additive: every field an existing consumer reads
+    # keeps its meaning, so today's Grove desktop parses this unchanged.
+    local ledger_json=""
+    ledger_overlay_json "$p"
+    [[ -n "$REPLY" ]] && ledger_json=", \"ledger\": $REPLY"
+    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged$ledger_json}"
   else
     printf "  %-28s ${state_color}%-10s${C_RESET} %-14s %-6s %-7s ${C_DIM}%-10s${C_RESET}\n" \
       "$branch_display" "$state_icon" "$sync_display" "$age_display" "$merged_icon" "$sha"
@@ -8587,10 +9288,11 @@ cmd_version_check() {
 #   0 if no pattern matched or the user confirmed; exits if the user aborts
 _check_dangerous_command() {
   local cmd_str="$1"
+  local dd_pattern="(^|[[:space:];|&(\`])[\"']?([^[:space:];|&\"']*/)?dd[\"']?([[:space:]]|$)"
 
   if [[ "$cmd_str" == *"rm -rf"* ]] || [[ "$cmd_str" == *"mkfs"* ]] || \
-     [[ "$cmd_str" == *"dd "* ]] || [[ "$cmd_str" == *":()"* ]] || \
-     [[ "$cmd_str" == *">/dev/"* ]] || [[ "$cmd_str" == *"shutdown"* ]] || \
+     [[ "$cmd_str" =~ "$dd_pattern" ]] || [[ "$cmd_str" == *":()"* ]] || \
+     [[ "$cmd_str" =~ '>[[:space:]]*/dev/(disk|rdisk|sd|nvme|mmcblk|vd|xvd|md|mapper/|dm-)' ]] || [[ "$cmd_str" == *"shutdown"* ]] || \
      [[ "$cmd_str" == *"reboot"* ]] || [[ "$cmd_str" == *"init 0"* ]]; then
     warn "This looks like it could be destructive: $cmd_str"
     print -r -- ""
@@ -8795,7 +9497,6 @@ _exec_all_for_repo() {
 # ============================================================================
 # New commands: upgrade, info, recent, clean, alias
 # ============================================================================
-
 
 
 # discovery.sh - Worktree discovery and filtering commands
@@ -9144,7 +9845,7 @@ cmd_recent() {
   # Sort by access time (newest first) using Zsh
   # We still need sort for numerical sorting, but avoid head subprocess
   local sorted_all
-  sorted_all=($(printf '%s\n' "${worktrees[@]}" | sort -t'|' -k1 -rn))
+  sorted_all=("${(f)$(printf '%s\n' "${worktrees[@]}" | sort -t'|' -k1 -rn)}")
   # Take first N entries using Zsh array slicing
   local sorted=("${sorted_all[@]:0:$limit}")
 
@@ -9434,7 +10135,6 @@ cmd_clean() {
 readonly GROVE_ALIASES_FILE="$HOME/.grove/aliases"
 
 
-
 # config.sh - Configuration and customisation commands
 
 # cmd_config — Show current grove configuration
@@ -9599,6 +10299,7 @@ cmd_alias() {
   local action="${1:-}"
   local alias_name="${2:-}"
   local target="${3:-}"
+  local rewrite_status=0
 
   # Ensure aliases file exists
   [[ -d "${GROVE_ALIASES_FILE:h}" ]] || mkdir -p "${GROVE_ALIASES_FILE:h}"
@@ -9648,8 +10349,9 @@ cmd_alias() {
         local temp_file; temp_file="$(mktemp)"
         # grep returns 1 when no lines match (file now empty) — that is fine.
         # Only overwrite the original when grep did not hit a real error (rc>=2).
-        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_ALIASES_FILE"
         else
           rm -f "$temp_file"
@@ -9665,11 +10367,16 @@ cmd_alias() {
     rm|remove|delete)
       [[ -n "$alias_name" ]] || error_exit "INVALID_INPUT" "Usage: grove alias rm <name>" 2
 
+      if [[ ! "$alias_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        error_exit "INVALID_INPUT" "invalid alias name '$alias_name', use alphanumeric, dash, or underscore" 2
+      fi
+
       # Anchor to line start so removing 'foo' never deletes 'myfoo=...'.
       if grep -q "^${alias_name}=" "$GROVE_ALIASES_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
-        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${alias_name}=" "$GROVE_ALIASES_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_ALIASES_FILE"
           ok "Alias removed: ${C_YELLOW}$alias_name${C_RESET}"
         else
@@ -10004,6 +10711,7 @@ cmd_group() {
   local group_name="${2:-}"
   shift 2 2>/dev/null || true
   local repos=("$@")
+  local rewrite_status=0
 
   # Ensure groups file exists
   [[ -d "${GROVE_GROUPS_FILE:h}" ]] || mkdir -p "${GROVE_GROUPS_FILE:h}"
@@ -10053,8 +10761,9 @@ cmd_group() {
       if grep -q "^${group_name}=" "$GROVE_GROUPS_FILE" 2>/dev/null; then
         local temp_file="$(mktemp)"
         # grep rc 1 means no remaining lines (fine); only rc>=2 is a real error.
-        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_GROUPS_FILE"
         else
           rm -f "$temp_file"
@@ -10071,10 +10780,15 @@ cmd_group() {
     rm|remove|delete)
       [[ -n "$group_name" ]] || error_exit "INVALID_INPUT" "Usage: grove group rm <name>" 2
 
+      if [[ ! "$group_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        error_exit "INVALID_INPUT" "invalid group name '$group_name', use alphanumeric, dash, or underscore" 2
+      fi
+
       if grep -q "^${group_name}=" "$GROVE_GROUPS_FILE" 2>/dev/null; then
         local temp_file; temp_file="$(mktemp)"
-        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file"
-        if (( $? <= 1 )); then
+        rewrite_status=0
+        grep -v "^${group_name}=" "$GROVE_GROUPS_FILE" > "$temp_file" || rewrite_status=$?
+        if (( rewrite_status <= 1 )); then
           mv "$temp_file" "$GROVE_GROUPS_FILE"
           ok "Group removed: ${C_YELLOW}@$group_name${C_RESET}"
         else
@@ -10154,7 +10868,6 @@ resolve_group() {
   fi
   return 1
 }
-
 
 # laravel.sh - Laravel-specific commands
 
@@ -11276,13 +11989,14 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}FLAGS${C_RESET}"
   print -r -- "  ${C_YELLOW}-q, --quiet${C_RESET}          Suppress informational output"
-  print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal"
+  print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal (does not bypass the ledger)"
   print -r -- "  ${C_YELLOW}-i, --interactive${C_RESET}    Launch interactive worktree creation wizard"
   print -r -- "  ${C_YELLOW}--json${C_RESET}               Output in JSON format"
   print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
   print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add)"
   print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
+  print -r -- "  ${C_YELLOW}--ledger-ack <token>${C_RESET} One-use worktree-ledger acknowledgement (NOT implied by -f)"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
   print -r -- "  ${C_YELLOW}--no-cache${C_RESET}           Bypass fetch cache (always fetch fresh)"
@@ -11382,6 +12096,13 @@ parse_flags() {
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;
+      # Deliberately NOT an alias for -f: a token is a separate, recorded,
+      # single-use decision issued by `way worktree removal-check --acknowledge`.
+      --ledger-ack)
+        shift
+        [[ $# -gt 0 ]] || error_exit "INVALID_INPUT" "--ledger-ack requires a token" 2
+        LEDGER_ACK="$1"
+        ;;
       -i|--interactive) INTERACTIVE=true ;;
       --json) JSON_OUTPUT=true ;;
       --delete-branch) DELETE_BRANCH=true ;;
@@ -11425,7 +12146,7 @@ parse_flags() {
         GROVE_DIR="$1"
         ;;
       -v|--version) show_version=true ;;
-      -h|--help|help) setup_colors; usage; exit 0 ;;
+      -h|--help) setup_colors; usage; exit 0 ;;
       -n)
         # -n is used by grove log for limiting commit count - pass through to command
         REMAINING_ARGS+=("$1")
@@ -11547,6 +12268,7 @@ main() {
     group)        cmd_group "$@" ;;
     share-deps)   cmd_share_deps "$@" ;;
     services)     cmd_services "$@" ;;
+    help)         usage ;;
     "")           usage ;;
     *)            die "Unknown command: $cmd (try: grove --help)" ;;
   esac

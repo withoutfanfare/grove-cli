@@ -14,10 +14,11 @@
 #   0 if no pattern matched or the user confirmed; exits if the user aborts
 _check_dangerous_command() {
   local cmd_str="$1"
+  local dd_pattern="(^|[[:space:];|&(\`])[\"']?([^[:space:];|&\"']*/)?dd[\"']?([[:space:]]|$)"
 
   if [[ "$cmd_str" == *"rm -rf"* ]] || [[ "$cmd_str" == *"mkfs"* ]] || \
-     [[ "$cmd_str" == *"dd "* ]] || [[ "$cmd_str" == *":()"* ]] || \
-     [[ "$cmd_str" == *">/dev/"* ]] || [[ "$cmd_str" == *"shutdown"* ]] || \
+     [[ "$cmd_str" =~ "$dd_pattern" ]] || [[ "$cmd_str" == *":()"* ]] || \
+     [[ "$cmd_str" =~ '>[[:space:]]*/dev/(disk|rdisk|sd|nvme|mmcblk|vd|xvd|md|mapper/|dm-)' ]] || [[ "$cmd_str" == *"shutdown"* ]] || \
      [[ "$cmd_str" == *"reboot"* ]] || [[ "$cmd_str" == *"init 0"* ]]; then
     warn "This looks like it could be destructive: $cmd_str"
     print -r -- ""
@@ -222,5 +223,4 @@ _exec_all_for_repo() {
 # ============================================================================
 # New commands: upgrade, info, recent, clean, alias
 # ============================================================================
-
 

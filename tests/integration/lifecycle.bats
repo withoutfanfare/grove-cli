@@ -32,6 +32,7 @@ C_RESET='' C_BOLD='' C_DIM='' C_CYAN='' C_MAGENTA='' C_GREEN='' C_YELLOW='' C_RE
 # --- flags / globals ---
 JSON_OUTPUT=false
 FORCE=false
+LEDGER_ACK=""
 DELETE_BRANCH=false
 DROP_DB=false
 INTERACTIVE=false
@@ -64,6 +65,10 @@ cleanup_herd_site() { return 0; }
 count_lines() { print -r -- 1; }
 STUB
   cat "$GROVE_ROOT/lib/11-resilience.sh" >> "$LIFE_FNS"
+  # The REAL ledger module rather than a stub, so these tests also prove the
+  # gate is genuinely inert when LEDGER_INTEGRATION=off (set by the test helper).
+  # A stub could drift from the real "off" behaviour without anyone noticing.
+  cat "$GROVE_ROOT/lib/13-ledger.sh" >> "$LIFE_FNS"
   cat "$GROVE_ROOT/lib/commands/lifecycle.sh" >> "$LIFE_FNS"
 }
 

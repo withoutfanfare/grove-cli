@@ -39,8 +39,24 @@ if [[ ! -d "$hooks_dir" ]]; then
   mkdir -p "$hooks_dir"
 fi
 
-# Set core.hooksPath in the worktree
-if git config core.hooksPath "$hooks_dir"; then
+# Preserve an intentional repo-wide hooks path. In linked worktrees the local
+# config is shared, so overwriting it here would affect every worktree.
+existing_hooks="$(git -C "$GROVE_PATH" config --get core.hooksPath 2>/dev/null)"
+config_status=$?
+if (( config_status > 1 )); then
+  echo "  Failed to inspect existing core.hooksPath"
+  exit 1
+fi
+if [[ -n "$existing_hooks" && "$existing_hooks" != "$hooks_dir" ]]; then
+  echo "  Preserving existing core.hooksPath -> $existing_hooks"
+  exit 0
+fi
+if [[ "$existing_hooks" == "$hooks_dir" ]]; then
+  exit 0
+fi
+
+# Set core.hooksPath in the intended worktree.
+if git -C "$GROVE_PATH" config --local core.hooksPath "$hooks_dir"; then
   echo "  Set core.hooksPath -> $hooks_dir"
 else
   echo "  Failed to set core.hooksPath"

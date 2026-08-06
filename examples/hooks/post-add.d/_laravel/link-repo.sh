@@ -30,6 +30,16 @@ fi
 REPO="$1"
 REPO_DIR="$HOOKS_DIR/$REPO"
 
+if [[ ! "$REPO" =~ ^[[:alnum:]][[:alnum:]._-]*$ ]]; then
+  echo "Invalid repo name: $REPO" >&2
+  exit 1
+fi
+
+if [[ -L "$REPO_DIR" ]]; then
+  echo "Refusing to write through symlinked repo directory: $REPO_DIR" >&2
+  exit 1
+fi
+
 # Create repo directory if it doesn't exist
 mkdir -p "$REPO_DIR"
 
@@ -37,8 +47,19 @@ mkdir -p "$REPO_DIR"
 for hook in "$SCRIPT_DIR"/*.sh; do
   hook_name=$(basename "$hook")
   [[ "$hook_name" == "link-repo.sh" ]] && continue
+  hook_link="../_laravel/$hook_name"
+  hook_target="$REPO_DIR/$hook_name"
 
-  ln -sf "../_laravel/$hook_name" "$REPO_DIR/$hook_name"
+  if [[ -e "$hook_target" || -L "$hook_target" ]]; then
+    if [[ -L "$hook_target" && "$(readlink "$hook_target")" == "$hook_link" ]]; then
+      echo "  Already linked $hook_name"
+    else
+      echo "  Preserved existing $hook_name"
+    fi
+    continue
+  fi
+
+  ln -s "$hook_link" "$hook_target"
   echo "  Linked $hook_name"
 done
 
