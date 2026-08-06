@@ -665,6 +665,37 @@ The command runs with the worktree directory as the working directory. Both `<re
 
 ## Git Operations
 
+### grove fetch
+
+Refreshes a repository's remote-tracking refs and nothing else. No worktree is checked out, nothing is merged or rebased, so it is safe to run on a timer against a repository somebody is actively working in.
+
+Fetching already happens inside `pull`, `sync` and `status`; this is the way to ask for *just* it, so ahead/behind counts stay honest between actions. It runs `git fetch --all --prune`, which also drops refs for branches deleted upstream.
+
+**Usage**
+
+```bash
+grove fetch [repo]
+```
+
+Auto-detects the repository when run from inside a worktree.
+
+Goes through the fetch cache, so `GROVE_FETCH_CACHE_TTL` (default 30s) collapses a burst of calls into one network round trip. Use `--no-cache` or `--refresh` to force a real fetch.
+
+Unlike `pull` and `sync` — which warn and carry on against local refs — a failed fetch here is a **failure**, exiting non-zero. Refreshing is the whole job, so a caller polling on a timer must be able to tell a real refresh from a no-op.
+
+**Examples**
+
+```bash
+# Auto-detect from inside a worktree
+grove fetch
+
+# A named repository
+grove fetch example-app
+
+# Bypass the fetch cache
+grove --no-cache fetch example-app
+```
+
 ### grove pull
 
 Pulls latest changes for a specific worktree using `git pull --rebase`.

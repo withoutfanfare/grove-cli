@@ -22,6 +22,7 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}GIT COMMANDS${C_RESET} ${C_DIM}(auto-detect repo/branch when run from worktree)${C_RESET}"
   print -r -- "  ${C_GREEN}status${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Dashboard view of all worktrees"
+  print -r -- "  ${C_GREEN}fetch${C_RESET}    ${C_DIM}[repo]${C_RESET}                     Refresh remote refs only (no checkout)"
   print -r -- "  ${C_GREEN}pull${C_RESET}     ${C_DIM}[repo] [branch]${C_RESET}            Pull latest changes"
   print -r -- "  ${C_GREEN}pull-all${C_RESET} ${C_DIM}<repo>${C_RESET}                     Pull all worktrees (parallel)"
   print -r -- "  ${C_GREEN}sync${C_RESET}     ${C_DIM}[repo] [branch] [base]${C_RESET}     Rebase onto base branch"
@@ -320,6 +321,7 @@ main() {
     move)         cmd_move "$@" ;;
     ls)           cmd_ls "$@" ;;
     status)       cmd_status "$@" ;;
+    fetch)        cmd_fetch "$@" ;;
     pull)         cmd_pull "$@" ;;
     pull-all)     cmd_pull_all "$@" ;;
     sync)         cmd_sync "$@" ;;

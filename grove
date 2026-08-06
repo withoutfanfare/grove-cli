@@ -5829,6 +5829,51 @@ cmd_restructure() {
 
 # git-ops.sh - Git operation commands
 
+# cmd_fetch — Refresh a repository's remote-tracking refs, touching no worktree
+#
+# Fetching is already a step inside `pull`, `sync` and `status`, but there was
+# no way to ask for JUST it. The Grove desktop app wants exactly that: it
+# refreshes every repository on a timer so ahead/behind counts stay honest
+# between manual actions, and it must not check anything out to do it. It had
+# been calling `grove fetch` all along, against a command that did not exist —
+# every call failed, and the counts silently went stale.
+#
+# Read-only by design: `--all --prune --quiet` updates remote refs and drops
+# refs for branches deleted upstream. No working tree is touched, nothing is
+# merged or rebased, so this is safe to run on a timer against a repo somebody
+# is actively working in.
+#
+# Goes through cached_fetch, so GROVE_FETCH_CACHE_TTL still collapses a burst
+# of calls into one network round trip; `--no-cache` or `--refresh` forces it.
+cmd_fetch() {
+  local repo="${1:-}"
+
+  # Auto-detect from the current directory, matching pull/sync — running
+  # `grove fetch` inside a worktree should mean "this repo".
+  if [[ -z "$repo" ]] && detect_current_worktree; then
+    repo="$DETECTED_REPO"
+    [[ "$JSON_OUTPUT" == true ]] || dim "  Detected: $repo"
+  fi
+
+  [[ -n "$repo" ]] || error_exit "INVALID_INPUT" "Usage: grove fetch [<repo>] - Run from within a worktree to auto-detect, or name the repository." 2
+
+  validate_name "$repo" "repository"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  # A fetch that fails is reported as a failure. Unlike pull and sync — which
+  # warn and carry on against local refs because they still have useful work to
+  # do — refreshing refs IS the whole job here, so a caller polling on a timer
+  # must be able to tell a real refresh from a silent no-op.
+  if ! cached_fetch "$git_dir" --all --prune --quiet; then
+    error_exit "GIT_ERROR" "Failed to fetch $repo. Check the remote is reachable." 1
+  fi
+
+  [[ "$JSON_OUTPUT" == true ]] || ok "Fetched $repo"
+  return 0
+}
+
 # cmd_pull — Pull latest changes for a single worktree with rebase
 cmd_pull() {
   local repo="${1:-}"; local branch="${2:-}"
@@ -12076,6 +12121,7 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}GIT COMMANDS${C_RESET} ${C_DIM}(auto-detect repo/branch when run from worktree)${C_RESET}"
   print -r -- "  ${C_GREEN}status${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Dashboard view of all worktrees"
+  print -r -- "  ${C_GREEN}fetch${C_RESET}    ${C_DIM}[repo]${C_RESET}                     Refresh remote refs only (no checkout)"
   print -r -- "  ${C_GREEN}pull${C_RESET}     ${C_DIM}[repo] [branch]${C_RESET}            Pull latest changes"
   print -r -- "  ${C_GREEN}pull-all${C_RESET} ${C_DIM}<repo>${C_RESET}                     Pull all worktrees (parallel)"
   print -r -- "  ${C_GREEN}sync${C_RESET}     ${C_DIM}[repo] [branch] [base]${C_RESET}     Rebase onto base branch"
@@ -12374,6 +12420,7 @@ main() {
     move)         cmd_move "$@" ;;
     ls)           cmd_ls "$@" ;;
     status)       cmd_status "$@" ;;
+    fetch)        cmd_fetch "$@" ;;
     pull)         cmd_pull "$@" ;;
     pull-all)     cmd_pull_all "$@" ;;
     sync)         cmd_sync "$@" ;;
