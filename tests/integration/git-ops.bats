@@ -40,6 +40,13 @@ url_for() { print -r -- "https://example.test"; }
 db_name_for() { print -r -- "db"; }
 run_hooks() { :; }
 error_exit() { print -r -- "ERR:$2" >&2; return "${3:-1}"; }
+# Cross-module dependencies of cmd_fetch. Each is overridable per test: one that
+# wants auto-detection redefines detect_current_worktree, and GROVE_TEST_GIT_DIR
+# points git_dir_for at whichever temp repo that test built.
+detect_current_worktree() { return 1; }
+validate_name() { :; }
+git_dir_for() { print -r -- "${GROVE_TEST_GIT_DIR:-}"; }
+ensure_bare_repo() { :; }
 # Minimal faithful re-implementations of the two JSON readers from lib/01-core.sh
 # (sourcing all of 01-core pulls in colour/config machinery we don't need here).
 json_get_string() {
@@ -190,4 +197,120 @@ assert "\n" in w["message"], w["message"]
 
   # The summary notification reports all five as succeeded, none failed.
   [[ "$output" == *"5 success, 0 failed"* ]]
+}
+
+# ============================================================================
+# cmd_fetch — refresh remote refs, touch nothing else
+#
+# The Grove desktop app calls this on a timer to keep ahead/behind counts
+# honest. It had been calling `grove fetch` against a command that did not
+# exist, so every call failed and the counts silently went stale.
+# ============================================================================
+
+# A grove-style bare repo with a real remote and one linked worktree, where the
+# remote has moved on since the bare repo last fetched.
+_setup_fetchable_repo() {
+  local root="$1"
+
+  git init -q -b main --bare "$root/remote.git"
+  git clone -q "$root/remote.git" "$root/seed"
+  git -C "$root/seed" config user.email t@t.t
+  git -C "$root/seed" config user.name Test
+  printf 'one\n' > "$root/seed/f.txt"
+  git -C "$root/seed" add f.txt
+  git -C "$root/seed" commit -qm first
+  git -C "$root/seed" push -q origin HEAD:main
+
+  # `git clone --bare` adds an origin with NO fetch refspec, so nothing would
+  # ever land in refs/remotes/*. `grove clone` sets this line straight after
+  # cloning (lifecycle.sh), so the fixture has to as well or it is not testing
+  # the layout grove actually produces.
+  git clone -q --bare "$root/remote.git" "$root/repo.git"
+  git -C "$root/repo.git" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+  git -C "$root/repo.git" fetch -q origin
+  git -C "$root/repo.git" worktree add -q "$root/wt" main 2>/dev/null
+
+  # The remote gains a commit the bare repo has not seen yet.
+  printf 'two\n' >> "$root/seed/f.txt"
+  git -C "$root/seed" commit -qam second
+  git -C "$root/seed" push -q origin HEAD:main
+}
+
+@test "cmd_fetch: updates remote-tracking refs to the new remote tip" {
+  local root="$TEST_TEMP_DIR/fetchable"
+  mkdir -p "$root"
+  _setup_fetchable_repo "$root"
+
+  local remote_tip; remote_tip="$(git -C "$root/seed" rev-parse HEAD)"
+  local before; before="$(git -C "$root/repo.git" rev-parse refs/remotes/origin/main 2>/dev/null || echo none)"
+  [ "$before" != "$remote_tip" ]   # precondition: genuinely behind
+
+  run zsh -c "source '$GIT_OPS_FNS'; GROVE_TEST_GIT_DIR='$root/repo.git'; GROVE_FETCH_CACHE_TTL=0; cmd_fetch myrepo"
+  [ "$status" -eq 0 ]
+
+  local after; after="$(git -C "$root/repo.git" rev-parse refs/remotes/origin/main)"
+  [ "$after" = "$remote_tip" ]
+}
+
+@test "cmd_fetch: leaves the worktree's HEAD and working tree untouched" {
+  # This is what makes it safe on a timer against a repo somebody is working
+  # in: it refreshes refs without checking anything out.
+  local root="$TEST_TEMP_DIR/untouched"
+  mkdir -p "$root"
+  _setup_fetchable_repo "$root"
+
+  printf 'uncommitted\n' > "$root/wt/scratch.txt"
+  local head_before; head_before="$(git -C "$root/wt" rev-parse HEAD)"
+  local status_before; status_before="$(git -C "$root/wt" status --porcelain)"
+
+  run zsh -c "source '$GIT_OPS_FNS'; GROVE_TEST_GIT_DIR='$root/repo.git'; GROVE_FETCH_CACHE_TTL=0; cmd_fetch myrepo"
+  [ "$status" -eq 0 ]
+
+  [ "$(git -C "$root/wt" rev-parse HEAD)" = "$head_before" ]
+  [ "$(git -C "$root/wt" status --porcelain)" = "$status_before" ]
+  [ -f "$root/wt/scratch.txt" ]
+}
+
+@test "cmd_fetch: a failed fetch is reported as failure, not a silent success" {
+  # pull and sync warn and carry on against local refs, because they still have
+  # useful work to do. Here refreshing IS the job, so a caller polling on a
+  # timer must be able to tell a real refresh from a no-op — precisely the
+  # blindness that let the missing command go unnoticed.
+  local root="$TEST_TEMP_DIR/broken"
+  mkdir -p "$root"
+  git init -q -b main --bare "$root/repo.git"
+  git -C "$root/repo.git" remote add origin "$root/does-not-exist.git"
+
+  # The shared stub makes error_exit RETURN so other tests can inspect it; the
+  # real one exits. Restore exiting here, or execution would fall past the
+  # error straight into the success line and report the failure as a success.
+  run zsh -c "source '$GIT_OPS_FNS'
+    error_exit() { print -r -- \"ERR:\$2\" >&2; exit \"\${3:-1}\"; }
+    GROVE_TEST_GIT_DIR='$root/repo.git'; GROVE_FETCH_CACHE_TTL=0; cmd_fetch myrepo"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERR:Failed to fetch myrepo"* ]]
+  [[ "$output" != *"OK:Fetched"* ]]
+}
+
+@test "cmd_fetch: no repo and nothing to detect is a usage error" {
+  run zsh -c "source '$GIT_OPS_FNS'
+    error_exit() { print -r -- \"ERR:\$2\" >&2; exit \"\${3:-1}\"; }
+    cmd_fetch"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERR:Usage: grove fetch"* ]]
+}
+
+@test "cmd_fetch: with no argument it fetches the detected repository" {
+  local root="$TEST_TEMP_DIR/detected"
+  mkdir -p "$root"
+  _setup_fetchable_repo "$root"
+
+  local remote_tip; remote_tip="$(git -C "$root/seed" rev-parse HEAD)"
+
+  run zsh -c "source '$GIT_OPS_FNS'
+    detect_current_worktree() { DETECTED_REPO=myrepo; return 0; }
+    GROVE_TEST_GIT_DIR='$root/repo.git'; GROVE_FETCH_CACHE_TTL=0; cmd_fetch"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK:Fetched myrepo"* ]]
+  [ "$(git -C "$root/repo.git" rev-parse refs/remotes/origin/main)" = "$remote_tip" ]
 }

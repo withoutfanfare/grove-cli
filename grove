@@ -4678,7 +4678,92 @@ ledger_moved() {
   return 0
 }
 
+# ── Batch overlay ────────────────────────────────────────────────────────────
+#
+# `way worktree overlay --json` (Waypoint's way-worktree-overlay-v1 contract)
+# answers for EVERY worktree of a repository in one process. A listing primes
+# the batch once, each row looks itself up by path, and the per-row
+# three-process path below survives only as the fallback for an older `way`
+# without the subcommand. The batch lands in a temp file, not a variable,
+# because parallel_collect renders rows in subshells.
+
+typeset -g _LEDGER_BATCH_FILE=""
+
+# ledger_overlay_prime — Fetch the whole repository's overlay in one `way` call
+#
+# $1 is any directory inside the repository — the bare git dir works. On ANY
+# failure (older `way`, no ledger root, integration off) the batch file is
+# absent and every row falls back to ledger_overlay_json_legacy, so behaviour
+# degrades to exactly what shipped before this function existed.
+ledger_overlay_prime() {
+  local git_dir="$1"
+  _LEDGER_BATCH_FILE=""
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$git_dir" ]] || return 0
+
+  local out=""
+  out="$(mktemp "${TMPDIR:-/tmp}/grove-ledger-batch.XXXXXX")" || return 0
+  if ( cd "$git_dir" && "$way_bin" worktree overlay --json >"$out" 2>/dev/null ); then
+    _LEDGER_BATCH_FILE="$out"
+  else
+    rm -f "$out"
+  fi
+  return 0
+}
+
+# ledger_overlay_done — Drop the batch, returning rows to the legacy path
+ledger_overlay_done() {
+  [[ -n "$_LEDGER_BATCH_FILE" ]] && rm -f "$_LEDGER_BATCH_FILE"
+  _LEDGER_BATCH_FILE=""
+  return 0
+}
+
 # ledger_overlay_json — Build the optional `ledger` object for a worktree
+#
+# Sets REPLY exactly as ledger_overlay_json_legacy always has: a JSON object,
+# or the empty string when the integration is off or `way` is absent. When a
+# batch is primed, the row is one file lookup instead of three `way`
+# processes; a row the batch does not carry is a worktree the ledger has no
+# record of, which is the same "unavailable, with the reason" answer a failed
+# `resume` produces today — never silently safe, never silently omitted.
+ledger_overlay_json() {
+  REPLY=""
+  if [[ -z "$_LEDGER_BATCH_FILE" || ! -r "$_LEDGER_BATCH_FILE" ]]; then
+    ledger_overlay_json_legacy "$1"
+    return 0
+  fi
+
+  REPLY="$(python3 -c '
+import json, os, sys
+
+batch_path, wt_path = sys.argv[1], sys.argv[2]
+try:
+    with open(batch_path, encoding="utf-8") as handle:
+        batch = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+wanted = os.path.realpath(wt_path)
+for row in batch.get("worktrees") or []:
+    path = row.get("path")
+    if path and os.path.realpath(path) == wanted:
+        print(json.dumps(row))
+        raise SystemExit(0)
+
+# Registered nowhere in the batch: the same answer a failed resume gives on
+# the per-row path — unavailable, with the reason, never rendered as safe.
+print(json.dumps({
+    "available": False,
+    "unavailable_reason": "not registered in the worktree ledger",
+}))
+' "$_LEDGER_BATCH_FILE" "$1" 2>/dev/null)" || REPLY=""
+  [[ -n "$REPLY" ]] || ledger_overlay_json_legacy "$1"
+  return 0
+}
+
+# ledger_overlay_json_legacy — The per-worktree overlay, three processes
 #
 # Sets REPLY to a JSON object, or to the empty string when the integration is
 # off or `way` is absent — in which case callers omit the key entirely and an
@@ -4713,7 +4798,7 @@ ledger_moved() {
 # must never be a side effect of listing worktrees.
 #
 # Grove never parses ledger Markdown: this is Waypoint's own JSON, relayed.
-ledger_overlay_json() {
+ledger_overlay_json_legacy() {
   REPLY=""
 
   ledger_enabled || return 0
@@ -5848,6 +5933,51 @@ cmd_restructure() {
 }
 
 # git-ops.sh - Git operation commands
+
+# cmd_fetch — Refresh a repository's remote-tracking refs, touching no worktree
+#
+# Fetching is already a step inside `pull`, `sync` and `status`, but there was
+# no way to ask for JUST it. The Grove desktop app wants exactly that: it
+# refreshes every repository on a timer so ahead/behind counts stay honest
+# between manual actions, and it must not check anything out to do it. It had
+# been calling `grove fetch` all along, against a command that did not exist —
+# every call failed, and the counts silently went stale.
+#
+# Read-only by design: `--all --prune --quiet` updates remote refs and drops
+# refs for branches deleted upstream. No working tree is touched, nothing is
+# merged or rebased, so this is safe to run on a timer against a repo somebody
+# is actively working in.
+#
+# Goes through cached_fetch, so GROVE_FETCH_CACHE_TTL still collapses a burst
+# of calls into one network round trip; `--no-cache` or `--refresh` forces it.
+cmd_fetch() {
+  local repo="${1:-}"
+
+  # Auto-detect from the current directory, matching pull/sync — running
+  # `grove fetch` inside a worktree should mean "this repo".
+  if [[ -z "$repo" ]] && detect_current_worktree; then
+    repo="$DETECTED_REPO"
+    [[ "$JSON_OUTPUT" == true ]] || dim "  Detected: $repo"
+  fi
+
+  [[ -n "$repo" ]] || error_exit "INVALID_INPUT" "Usage: grove fetch [<repo>] - Run from within a worktree to auto-detect, or name the repository." 2
+
+  validate_name "$repo" "repository"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  # A fetch that fails is reported as a failure. Unlike pull and sync — which
+  # warn and carry on against local refs because they still have useful work to
+  # do — refreshing refs IS the whole job here, so a caller polling on a timer
+  # must be able to tell a real refresh from a silent no-op.
+  if ! cached_fetch "$git_dir" --all --prune --quiet; then
+    error_exit "GIT_ERROR" "Failed to fetch $repo. Check the remote is reachable." 1
+  fi
+
+  [[ "$JSON_OUTPUT" == true ]] || ok "Fetched $repo"
+  return 0
+}
 
 # cmd_pull — Pull latest changes for a single worktree with rebase
 cmd_pull() {
@@ -7393,6 +7523,11 @@ cmd_ls() {
     return 0
   fi
 
+  # One `way` process for the whole listing; rows look themselves up. On any
+  # failure the batch is simply absent and each row falls back to the
+  # three-process path, exactly as shipped before.
+  ledger_overlay_prime "$git_dir"
+
   local json_items=()
 
   # Render rows CONCURRENTLY. Each row is independent — its own git calls plus,
@@ -7417,6 +7552,8 @@ cmd_ls() {
   for _ls_row in "${_ls_rows[@]}"; do
     [[ -n "$_ls_row" ]] && json_items+=("$_ls_row")
   done
+
+  ledger_overlay_done
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     format_json "[${(j:, :)json_items}]"
@@ -7580,6 +7717,10 @@ cmd_status() {
     return 0
   fi
 
+  # One `way` process for the whole table; rows look themselves up, and the
+  # absence of a batch falls back to the per-row path.
+  ledger_overlay_prime "$git_dir"
+
   # JSON output mode
   local json_items=()
 
@@ -7602,6 +7743,8 @@ cmd_status() {
     [[ -n "$REPLY" ]] && json_items+=("$REPLY")
     [[ -n "$REPLY2" ]] && mismatches+=("$REPLY2")
   done
+
+  ledger_overlay_done
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -12096,6 +12239,7 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}GIT COMMANDS${C_RESET} ${C_DIM}(auto-detect repo/branch when run from worktree)${C_RESET}"
   print -r -- "  ${C_GREEN}status${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Dashboard view of all worktrees"
+  print -r -- "  ${C_GREEN}fetch${C_RESET}    ${C_DIM}[repo]${C_RESET}                     Refresh remote refs only (no checkout)"
   print -r -- "  ${C_GREEN}pull${C_RESET}     ${C_DIM}[repo] [branch]${C_RESET}            Pull latest changes"
   print -r -- "  ${C_GREEN}pull-all${C_RESET} ${C_DIM}<repo>${C_RESET}                     Pull all worktrees (parallel)"
   print -r -- "  ${C_GREEN}sync${C_RESET}     ${C_DIM}[repo] [branch] [base]${C_RESET}     Rebase onto base branch"
@@ -12394,6 +12538,7 @@ main() {
     move)         cmd_move "$@" ;;
     ls)           cmd_ls "$@" ;;
     status)       cmd_status "$@" ;;
+    fetch)        cmd_fetch "$@" ;;
     pull)         cmd_pull "$@" ;;
     pull-all)     cmd_pull_all "$@" ;;
     sync)         cmd_sync "$@" ;;
