@@ -221,6 +221,29 @@ ledger_moved() {
 # the whole reason this is a nested object rather than a handful of flat fields
 # that default to false.
 #
+# THREE questions, three commands, because no single `way` command answers all
+# of them:
+#   - `resume`        — identity, checkpoint, next action, drift. Without it
+#                       there is no worktree_id, so a failure here is the only
+#                       thing that makes the WHOLE overlay unavailable.
+#   - `removal-check` — the risk. `resume` has never carried one, which is why
+#                       `risk` was hardcoded null and the overlay could never
+#                       show it.
+#   - `lease status`  — who, if anyone, is working here.
+#
+# Risk and lease carry their OWN availability flags rather than folding into
+# `available`, so "resume answered but the risk could not be established" stays
+# distinguishable from "no risk found". A consumer that cannot tell those apart
+# renders unknown as safe, which is the failure this whole system exists to
+# prevent.
+#
+# The three run CONCURRENTLY. Sequentially they more than double `grove ls`
+# (measured: resume ~440ms, removal-check ~410ms, lease ~110ms per worktree).
+# Rows are processed one at a time, so this is at most three `way` processes at
+# once. All three are read-only — no `--acknowledge`, no `--override-token`,
+# ever. Issuing or spending an override is a deliberate command-line act and
+# must never be a side effect of listing worktrees.
+#
 # Grove never parses ledger Markdown: this is Waypoint's own JSON, relayed.
 ledger_overlay_json() {
   REPLY=""
@@ -230,47 +253,163 @@ ledger_overlay_json() {
   way_bin="$(way_binary)" || return 0
   [[ -d "$1" ]] || return 0
 
-  local output="" exit_code=0
-  output="$(cd "$1" && "$way_bin" worktree resume --format json 2>&1)" || exit_code=$?
-
-  if (( exit_code != 0 )); then
-    json_escape "${output%%$'\n'*}"
-    REPLY="{\"available\": false, \"unavailable_reason\": \"$REPLY\"}"
+  local scratch=""
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/grove-ledger.XXXXXX")" || {
+    REPLY='{"available": false, "unavailable_reason": "could not create a temporary directory for the ledger overlay"}'
     return 0
-  fi
+  }
 
-  # Reshape Waypoint's brief into the published overlay. Done with a single
-  # python pass rather than shell string-mangling because a malformed object
-  # here would corrupt the whole status document.
+  # stdout and stderr are kept apart on purpose: `removal-check` prints its JSON
+  # to stdout and still exits 1 when it blocks, so a block is an ANSWER whose
+  # body must survive. Merging the streams would let a stderr warning corrupt it.
+  local resume_pid removal_pid lease_pid
+  ( cd "$1" && "$way_bin" worktree resume --format json \
+      >"$scratch/resume.out" 2>"$scratch/resume.err" ) &
+  resume_pid=$!
+  ( cd "$1" && "$way_bin" worktree removal-check --json \
+      >"$scratch/removal.out" 2>"$scratch/removal.err" ) &
+  removal_pid=$!
+  ( cd "$1" && "$way_bin" worktree lease status --json \
+      >"$scratch/lease.out" 2>"$scratch/lease.err" ) &
+  lease_pid=$!
+
+  # `set -e` is in force: a non-zero `wait` would abort grove outright, and
+  # exit 1 from removal-check is an ordinary, expected answer.
+  local resume_rc=0 removal_rc=0 lease_rc=0
+  wait "$resume_pid" || resume_rc=$?
+  wait "$removal_pid" || removal_rc=$?
+  wait "$lease_pid" || lease_rc=$?
+
+  # Reshape Waypoint's three answers into the published overlay. Done with a
+  # single python pass rather than shell string-mangling because a malformed
+  # object here would corrupt the whole status document.
   local overlay=""
-  overlay="$(print -r -- "$output" | python3 -c '
+  overlay="$(python3 -c '
 import json, sys
 
+scratch = sys.argv[1]
+resume_rc, removal_rc, lease_rc = (int(code) for code in sys.argv[2:5])
+
+
+def read(name):
+    try:
+        with open(f"{scratch}/{name}", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def first_line(text, fallback):
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return fallback
+
+
+# --- resume: identity, and the whole overlay stands or falls on it ----------
+if resume_rc != 0:
+    reason = first_line(
+        read("resume.err") + read("resume.out"),
+        f"way worktree resume exited {resume_rc}",
+    )
+    print(json.dumps({"available": False, "unavailable_reason": reason}))
+    raise SystemExit(0)
+
 try:
-    brief = json.load(sys.stdin)
+    brief = json.loads(read("resume.out"))
 except Exception as error:
     print(json.dumps({"available": False, "unavailable_reason": f"unreadable resume JSON: {error}"}))
     raise SystemExit(0)
 
 view = brief.get("view", {})
 narrative = view.get("narrative") or {}
+
+# --- removal-check: the risk ------------------------------------------------
+# Exit 0 (clear) and exit 1 (blocked) are both answers, and both print the
+# RemovalCheck document to stdout. Exit 2 (usage) and exit 3 (could not answer)
+# are not answers, and must not read as "no risk".
+risk = None
+risk_available = False
+risk_unavailable_reason = None
+removal_blocked = None
+
+if removal_rc in (0, 1):
+    try:
+        check = json.loads(read("removal.out"))
+    except Exception as error:
+        check = None
+        risk_unavailable_reason = f"unreadable removal-check JSON: {error}"
+    # A document that does not carry a removal decision has not answered the
+    # question asked, whatever else is in it.
+    if isinstance(check, dict) and isinstance(check.get("removal_blocked"), bool):
+        risk_available = True
+        risk = check.get("highest_risk")
+        removal_blocked = check["removal_blocked"]
+    elif risk_unavailable_reason is None:
+        risk_unavailable_reason = "removal-check returned no removal decision"
+else:
+    risk_unavailable_reason = first_line(
+        read("removal.err") + read("removal.out"),
+        f"way worktree removal-check exited {removal_rc}",
+    )
+
+# --- lease status: who is working here --------------------------------------
+# `lease status` reports rather than gates, so it exits 0 whether or not a
+# lease is held; anything non-zero means it could not tell us.
+lease = None
+lease_held = None
+lease_available = False
+lease_unavailable_reason = None
+
+if lease_rc == 0:
+    try:
+        status = json.loads(read("lease.out"))
+    except Exception as error:
+        status = None
+        lease_unavailable_reason = f"unreadable lease JSON: {error}"
+    if isinstance(status, dict) and isinstance(status.get("held"), bool):
+        lease_available = True
+        lease_held = status["held"]
+        holder = status.get("lease")
+        lease = holder if isinstance(holder, dict) else None
+    elif lease_unavailable_reason is None:
+        lease_unavailable_reason = "lease status did not say whether the worktree is held"
+else:
+    lease_unavailable_reason = first_line(
+        read("lease.err") + read("lease.out"),
+        f"way worktree lease status exited {lease_rc}",
+    )
+
 print(json.dumps({
     "available": True,
     "worktree_id": view.get("worktree_id"),
     "workstream_id": view.get("workstream_id"),
-    # Slice 2 populates risk through `removal-check`; resume does not carry it,
-    # so it is explicitly null here rather than guessed.
-    "risk": None,
+    # Populated from removal-check. Null means EITHER no risk found (when
+    # risk_available is true) OR the risk could not be established (when it is
+    # false) — the flag is what tells them apart, and null alone never means safe.
+    "risk": risk,
+    "risk_available": risk_available,
+    "risk_unavailable_reason": risk_unavailable_reason,
+    # Relayed, never derived. Whether a risk blocks removal is a rule the
+    # ledger states and Grove only repeats.
+    "removal_blocked": removal_blocked,
+    "lease_available": lease_available,
+    "lease_unavailable_reason": lease_unavailable_reason,
+    "lease_held": lease_held,
+    "lease": lease,
     "checkpoint_at": view.get("last_checkpoint_at"),
     "next_action": narrative.get("next_action"),
     "narrative_status": brief.get("narrative_status"),
     "drift": (brief.get("drift") or {}).get("since_checkpoint"),
     "unavailable_reason": None,
 }))
-' 2>/dev/null)" || overlay=""
+' "$scratch" "$resume_rc" "$removal_rc" "$lease_rc" 2>/dev/null)" || overlay=""
+
+  rm -rf "$scratch"
 
   if [[ -z "$overlay" ]]; then
-    REPLY="{\"available\": false, \"unavailable_reason\": \"could not read the ledger overlay\"}"
+    REPLY='{"available": false, "unavailable_reason": "could not read the ledger overlay"}'
   else
     REPLY="$overlay"
   fi

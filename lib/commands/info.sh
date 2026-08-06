@@ -157,6 +157,16 @@ _display_worktree() {
     fi
     json_item+="\"merged\": $merged, "
     json_item+="\"stale\": $stale"
+    # The optional ledger overlay, exactly as `grove status --json` carries it.
+    # It has to be on BOTH: Grove desktop reads `ls --json` (see get_worktrees
+    # in grove's src-tauri/src/wt.rs), never `status --json`, so while this key
+    # existed only on `status` the overlay never reached the app and its badges
+    # had nothing to render. Additive and last: an empty REPLY omits the key
+    # entirely, and an older consumer sees precisely the document it always saw.
+    local ledger_json=""
+    ledger_overlay_json "$wt_path"
+    [[ -n "$REPLY" ]] && ledger_json=", \"ledger\": $REPLY"
+    json_item+="$ledger_json"
     json_item+="}"
 
     REPLY="$json_item"
