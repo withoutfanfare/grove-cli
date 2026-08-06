@@ -402,6 +402,238 @@ assert d['available'] is False, d
   [[ "$output" == "[]" ]]
 }
 
+# ============================================================================
+# Risk and lease in the overlay
+#
+# `resume` has never carried a risk, so `risk` was hardcoded null and Grove's
+# overlay could not show one however dangerous the worktree was. It now also
+# asks `removal-check` (which computes risk) and `lease status` (who is working
+# here). Both are read-only, and both carry their OWN availability flag: a null
+# risk from an answered check means "nothing found", a null risk from a check
+# that could not run means "unknown", and rendering those the same way is
+# exactly how a safety gate silently stops mattering.
+# ============================================================================
+
+# Stub a `way` that answers each subcommand differently.
+#   $1 - resume stdout        $2 - resume exit
+#   $3 - removal-check stdout $4 - removal-check exit
+#   $5 - lease stdout         $6 - lease exit
+# Non-zero exits print their body on stderr, as the real `way` does for errors;
+# removal-check is the exception the code cares about, and it is covered
+# explicitly below.
+stub_way_dispatch() {
+  cat > "$STUB_BIN/way" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TEST_TEMP_DIR/way-argv.log"
+case "\$*" in
+  *resume*)
+    printf '%s\n' '$1'; exit $2 ;;
+  *removal-check*)
+    if [ "$4" -eq 0 ] || [ "$4" -eq 1 ]; then printf '%s\n' '$3'; else printf '%s\n' '$3' >&2; fi
+    exit $4 ;;
+  *lease*)
+    if [ "$6" -eq 0 ]; then printf '%s\n' '$5'; else printf '%s\n' '$5' >&2; fi
+    exit $6 ;;
+esac
+exit 2
+EOF
+  chmod +x "$STUB_BIN/way"
+}
+
+overlay_of() {
+  run env PATH="$STUB_BIN:$PATH" GROVE_WAY_BIN="" zsh -c \
+    "source '$OVERLAY_FNS'; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\""
+}
+
+RESUME_OK='{"view":{"worktree_id":"wt_abc","last_checkpoint_at":"2026-08-04T14:30:00Z"},"narrative_status":"present","drift":{"since_checkpoint":false}}'
+CHECK_BLOCKED='{"worktree_id":"wt_abc","removal_blocked":true,"highest_risk":"critical","risks":[{"level":"critical","code":"dirty-uncheckpointed","detail":"d","remedy":"r"}],"freshness":"live"}'
+CHECK_CLEAR='{"worktree_id":"wt_abc","removal_blocked":false,"highest_risk":null,"risks":[],"freshness":"live"}'
+LEASE_NONE='{"worktree_id":"wt_abc","held":false,"lease":null}'
+
+@test "json: a BLOCKED removal-check is an answer — its risk reaches the overlay" {
+  setup_overlay_harness
+  # Exit 1 with the document on stdout. Treating a block as a failure would
+  # throw away the one answer that matters most.
+  stub_way_dispatch "$RESUME_OK" 0 "$CHECK_BLOCKED" 1 "$LEASE_NONE" 0
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['available'] is True, d
+assert d['risk'] == 'critical', d
+assert d['risk_available'] is True, d
+assert d['removal_blocked'] is True, d
+assert d['risk_unavailable_reason'] is None, d
+"
+}
+
+@test "json: a clear removal-check reports no risk as an ANSWER, not as unknown" {
+  setup_overlay_harness
+  stub_way_dispatch "$RESUME_OK" 0 "$CHECK_CLEAR" 0 "$LEASE_NONE" 0
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+# risk null AND risk_available true is the only combination that means safe.
+assert d['risk'] is None, d
+assert d['risk_available'] is True, d
+assert d['removal_blocked'] is False, d
+"
+}
+
+@test "json: a removal-check that could not answer leaves risk UNKNOWN, never clear" {
+  setup_overlay_harness
+  stub_way_dispatch "$RESUME_OK" 0 "no worktree ledger root configured" 3 "$LEASE_NONE" 0
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['risk'] is None, d
+assert d['risk_available'] is False, d
+assert d['risk_unavailable_reason'], d
+# Not derivable either: Grove must not infer 'not blocked' from silence.
+assert d['removal_blocked'] is None, d
+# The rest of the overlay still stands — resume answered.
+assert d['available'] is True, d
+assert d['worktree_id'] == 'wt_abc', d
+"
+}
+
+@test "json: a usage error from removal-check is unknown risk, not clear risk" {
+  setup_overlay_harness
+  stub_way_dispatch "$RESUME_OK" 0 "unrecognised option" 2 "$LEASE_NONE" 0
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['risk_available'] is False, d
+assert d['removal_blocked'] is None, d
+"
+}
+
+@test "json: a removal-check reply carrying no decision is not an answer" {
+  setup_overlay_harness
+  # Exit 0 and valid JSON, but no removal_blocked field — an older `way`, or a
+  # different command's output. Shape is what makes it an answer, not exit 0.
+  stub_way_dispatch "$RESUME_OK" 0 '{"worktree_id":"wt_abc"}' 0 "$LEASE_NONE" 0
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['risk_available'] is False, d
+assert d['risk_unavailable_reason'], d
+"
+}
+
+@test "json: a live lease names its holder so Grove can show an agent is working here" {
+  setup_overlay_harness
+  stub_way_dispatch "$RESUME_OK" 0 "$CHECK_CLEAR" 0 \
+    '{"worktree_id":"wt_abc","held":true,"lease":{"tool":"claude","session_id":"s1","machine_id":"machine_x","acquired_at":"2026-08-06T08:00:00Z","last_heartbeat_at":"2026-08-06T08:20:00Z","expires_at":"2026-08-06T08:50:00Z"}}' 0
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['lease_available'] is True, d
+assert d['lease_held'] is True, d
+assert d['lease']['tool'] == 'claude', d
+assert d['lease']['session_id'] == 's1', d
+assert d['lease']['machine_id'] == 'machine_x', d
+assert d['lease']['expires_at'] == '2026-08-06T08:50:00Z', d
+"
+}
+
+@test "json: an EXPIRED lease still names who held it, and is not reported as held" {
+  setup_overlay_harness
+  stub_way_dispatch "$RESUME_OK" 0 "$CHECK_CLEAR" 0 \
+    '{"worktree_id":"wt_abc","held":false,"lease":{"tool":"codex","session_id":"s9","machine_id":"machine_y","acquired_at":"2026-08-05T08:00:00Z","last_heartbeat_at":"2026-08-05T08:20:00Z","expires_at":"2026-08-05T08:50:00Z"}}' 0
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['lease_available'] is True, d
+assert d['lease_held'] is False, d
+# Expired is not absent: the last holder is still a fact worth showing.
+assert d['lease']['tool'] == 'codex', d
+"
+}
+
+@test "json: a lease that could not be read is unknown, not 'nobody is working here'" {
+  setup_overlay_harness
+  stub_way_dispatch "$RESUME_OK" 0 "$CHECK_CLEAR" 0 'wt_abc is not registered' 1
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['lease_available'] is False, d
+assert d['lease_unavailable_reason'], d
+assert d['lease_held'] is None, d
+assert d['lease'] is None, d
+"
+}
+
+@test "json: building the overlay NEVER acknowledges or overrides anything" {
+  setup_overlay_harness
+  stub_way_dispatch "$RESUME_OK" 0 "$CHECK_BLOCKED" 1 "$LEASE_NONE" 0
+  overlay_of
+  [ "$status" -eq 0 ]
+
+  # Listing worktrees must never issue or spend an override. That is a
+  # deliberate command-line act, recorded and single-use, and it must not be
+  # reachable as a side effect of drawing a row.
+  run cat "$TEST_TEMP_DIR/way-argv.log"
+  [[ "$output" != *"--acknowledge"* ]]
+  [[ "$output" != *"--override-token"* ]]
+  # And it really did ask all three questions.
+  [[ "$output" == *"resume"* ]]
+  [[ "$output" == *"removal-check"* ]]
+  [[ "$output" == *"lease status"* ]]
+}
+
+@test "json: BOTH row builders carry the overlay — ls is the one Grove desktop reads" {
+  # The overlay was wired into `grove status --json` only, while Grove desktop
+  # calls `grove ls <repo> --json` (get_worktrees, grove/src-tauri/src/wt.rs).
+  # The result was an overlay that no consumer ever saw and badges that could
+  # never render. Whichever row builder gains a field, the other needs it too.
+  local ls_row status_row
+  ls_row="$(awk '/^_display_worktree\(\)/,/^}$/' "$GROVE_ROOT/lib/commands/info.sh" | grep -c 'ledger_overlay_json' || true)"
+  status_row="$(awk '/^_display_status_row\(\)/,/^}$/' "$GROVE_ROOT/lib/commands/info.sh" | grep -c 'ledger_overlay_json' || true)"
+  [ "$ls_row" -ge 1 ]
+  [ "$status_row" -ge 1 ]
+}
+
+@test "json: a failing resume makes the WHOLE overlay unavailable, risk included" {
+  setup_overlay_harness
+  # resume is where the identity comes from; without it there is nothing to
+  # hang a risk on, so this stays the one failure that unavailables everything.
+  stub_way_dispatch "not registered" 3 "$CHECK_BLOCKED" 1 "$LEASE_NONE" 0
+  overlay_of
+
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['available'] is False, d
+assert d['unavailable_reason'], d
+assert 'risk' not in d or d['risk'] is None, d
+"
+}
+
 # --- archiving on removal --------------------------------------------------
 #
 # Slice 2 specified a `post-rm` archive and it was never written, so every

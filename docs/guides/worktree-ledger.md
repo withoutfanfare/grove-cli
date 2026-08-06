@@ -121,7 +121,9 @@ ever and `way worktree doctor` keeps counting folders that no longer exist.
 
 ## The `ledger` object in JSON
 
-Additive and nested, so every existing consumer keeps working:
+Additive and nested, so every existing consumer keeps working. It appears on
+**both** `grove ls <repo> --json` and `grove status <repo> --json` — Grove
+desktop reads `ls`, so an overlay present only on `status` reaches nobody:
 
 ```json
 {
@@ -133,7 +135,21 @@ Additive and nested, so every existing consumer keeps working:
     "available": true,
     "worktree_id": "wt_019887c4",
     "workstream_id": "ws_2fa_enrolment",
-    "risk": null,
+    "risk": "critical",
+    "risk_available": true,
+    "risk_unavailable_reason": null,
+    "removal_blocked": true,
+    "lease_available": true,
+    "lease_unavailable_reason": null,
+    "lease_held": true,
+    "lease": {
+      "tool": "claude",
+      "session_id": "01H…",
+      "machine_id": "machine_019fcd4d",
+      "acquired_at": "2026-08-06T08:00:00Z",
+      "last_heartbeat_at": "2026-08-06T08:20:00Z",
+      "expires_at": "2026-08-06T08:50:00Z"
+    },
     "checkpoint_at": "2026-08-04T14:30:00Z",
     "next_action": "Run focused UAT on the 2FA enrolment path",
     "narrative_status": "present",
@@ -150,6 +166,34 @@ installed. When `way` is present but could not answer, the object appears with
 > `available: false` means **unknown**, not "nothing at risk". A consumer must
 > never render it as safe. That distinction is why this is a nested object
 > rather than flat fields that would default to `false`.
+
+### Where each field comes from, and why there are three calls
+
+No single `way` command answers everything, so building one overlay runs three,
+concurrently (sequentially they would more than double `grove ls`):
+
+| Command | Fields |
+|---|---|
+| `way worktree resume --format json` | `worktree_id`, `workstream_id`, `checkpoint_at`, `next_action`, `narrative_status`, `drift` |
+| `way worktree removal-check --json` | `risk` (its `highest_risk`), `removal_blocked` |
+| `way worktree lease status --json` | `lease_held`, `lease` |
+
+`resume` is the identity source, so only a failure there makes the **whole**
+overlay unavailable. Risk and lease carry their own flags instead:
+
+- `risk_available: true` with `risk: null` means **checked, nothing found**.
+- `risk_available: false` means **unknown** — render it as unknown, never as
+  clear, and `removal_blocked` stays `null` rather than being inferred.
+- `lease_available: false` means **unknown**, not "nobody is working here".
+- `lease_held: false` with a `lease` object means the claim **expired**; the
+  holder it names is still a fact worth showing.
+
+`removal-check` prints its document to stdout **and exits 1** when it blocks, so
+a block is an answer and its risk is kept. Only exit 2 (usage) and exit 3 (could
+not answer) leave the risk unknown. None of these calls ever passes
+`--acknowledge` or `--override-token`: issuing or spending an override is a
+deliberate, recorded command-line act and must never be a side effect of listing
+worktrees.
 
 The schema is owned by Waypoint at
 `docs/contracts/grove-worktree-status-v2.schema.json`.
