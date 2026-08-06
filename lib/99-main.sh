@@ -132,6 +132,7 @@ usage() {
   print -r -- "  ${C_YELLOW}GROVE_URL_SUBDOMAIN${C_RESET}  Optional URL subdomain ${C_DIM}(e.g., api -> api.feature.test)${C_RESET}"
   print -r -- "  ${C_YELLOW}GROVE_HOOKS_DIR${C_RESET}      Hooks directory ${C_DIM}(default: ~/.grove/hooks)${C_RESET}"
   print -r -- "  ${C_YELLOW}GROVE_MAX_PARALLEL${C_RESET}   Max parallel operations ${C_DIM}(default: 4)${C_RESET}"
+  print -r -- "  ${C_YELLOW}GROVE_STATUS_PARALLEL${C_RESET} Max parallel status lookups in ls ${C_DIM}(default: 8, 1 to disable)${C_RESET}"
   print -r -- "  ${C_YELLOW}GROVE_FETCH_CACHE_TTL${C_RESET} Fetch cache TTL in seconds ${C_DIM}(default: 30, 0 to disable)${C_RESET}"
   print -r -- "  ${C_YELLOW}GROVE_DB_HOST${C_RESET}        MySQL host ${C_DIM}(default: 127.0.0.1)${C_RESET}"
   print -r -- "  ${C_YELLOW}GROVE_DB_USER${C_RESET}        MySQL user ${C_DIM}(default: root)${C_RESET}"
