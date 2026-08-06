@@ -184,6 +184,70 @@ EOF
 }
 
 # ============================================================================
+# Batch overlay: one `way` process per listing
+# ============================================================================
+
+# A `way` that answers `worktree overlay --json` with one known row and
+# refuses everything else the way an older binary would (exit 2).
+stub_way_with_overlay() {
+  cat > "$STUB_BIN/way" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TEST_TEMP_DIR/way-argv.log"
+case "\$*" in
+  *"worktree overlay"*)
+    printf '%s' '{"schema_version":1,"repository":"app","worktrees":[{"available":true,"worktree_id":"wt_batch01","path":"$WT","risk":"warning","risk_available":true,"risk_unavailable_reason":null,"removal_blocked":true,"lease_available":true,"lease_held":false,"lease":null,"unavailable_reason":null}]}'
+    exit 0
+    ;;
+  *)
+    printf 'unknown subcommand\n' >&2
+    exit 2
+    ;;
+esac
+EOF
+  chmod +x "$STUB_BIN/way"
+}
+
+@test "ledger: a primed batch answers a row with no further way processes" {
+  stub_way_with_overlay
+  run_zsh "ledger_overlay_prime '$TEST_TEMP_DIR'; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"worktree_id": "wt_batch01"'* || "$output" == *'"worktree_id":"wt_batch01"'* ]]
+  # Exactly one way invocation: the batch. No resume, removal-check or lease.
+  [ "$(wc -l < "$TEST_TEMP_DIR/way-argv.log")" -eq 1 ]
+  [[ "$(cat "$TEST_TEMP_DIR/way-argv.log")" == *"worktree overlay"* ]]
+}
+
+@test "ledger: a row the batch does not carry is unavailable, never omitted" {
+  stub_way_with_overlay
+  mkdir -p "$TEST_TEMP_DIR/unregistered"
+  run_zsh "ledger_overlay_prime '$TEST_TEMP_DIR'; ledger_overlay_json '$TEST_TEMP_DIR/unregistered'; print -r -- \"\$REPLY\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"available": false'* ]]
+  [[ "$output" == *"not registered in the worktree ledger"* ]]
+}
+
+@test "ledger: an older way without the overlay subcommand falls back per row" {
+  stub_way 2 "unknown subcommand 'overlay'"
+  run_zsh "ledger_overlay_prime '$TEST_TEMP_DIR'; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\""
+  [ "$status" -eq 0 ]
+  # The legacy three-process path answered: resume failed (exit 2), so the
+  # overlay is unavailable with the reason — not silently absent.
+  [[ "$output" == *'"available": false'* ]]
+  [[ "$(cat "$TEST_TEMP_DIR/way-argv.log")" == *"worktree resume"* ]]
+}
+
+@test "ledger: dropping the batch returns rows to the legacy path" {
+  stub_way_with_overlay
+  run_zsh "ledger_overlay_prime '$TEST_TEMP_DIR'; _batch=\"\$_LEDGER_BATCH_FILE\"; ledger_overlay_done; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\"; if [[ -e \"\$_batch\" ]]; then print -r -- 'batch file leaked'; else print -r -- 'batch file removed'; fi"
+  [ "$status" -eq 0 ]
+  # After done, the legacy path runs (resume via the stub exits 2 for
+  # non-overlay calls, so the row reads unavailable) and the file is gone.
+  [[ "$output" == *'"available": false'* ]]
+  [[ "$output" == *"batch file removed"* ]]
+  [[ "$(cat "$TEST_TEMP_DIR/way-argv.log")" == *"worktree resume"* ]]
+}
+
+# ============================================================================
 # cmd_rm: the gate as the lifecycle actually uses it
 # ============================================================================
 

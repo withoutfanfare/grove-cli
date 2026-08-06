@@ -223,6 +223,11 @@ cmd_ls() {
     return 0
   fi
 
+  # One `way` process for the whole listing; rows look themselves up. On any
+  # failure the batch is simply absent and each row falls back to the
+  # three-process path, exactly as shipped before.
+  ledger_overlay_prime "$git_dir"
+
   local json_items=()
 
   # Render rows CONCURRENTLY. Each row is independent — its own git calls plus,
@@ -247,6 +252,8 @@ cmd_ls() {
   for _ls_row in "${_ls_rows[@]}"; do
     [[ -n "$_ls_row" ]] && json_items+=("$_ls_row")
   done
+
+  ledger_overlay_done
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     format_json "[${(j:, :)json_items}]"
@@ -410,6 +417,10 @@ cmd_status() {
     return 0
   fi
 
+  # One `way` process for the whole table; rows look themselves up, and the
+  # absence of a batch falls back to the per-row path.
+  ledger_overlay_prime "$git_dir"
+
   # JSON output mode
   local json_items=()
 
@@ -432,6 +443,8 @@ cmd_status() {
     [[ -n "$REPLY" ]] && json_items+=("$REPLY")
     [[ -n "$REPLY2" ]] && mismatches+=("$REPLY2")
   done
+
+  ledger_overlay_done
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
