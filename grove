@@ -1542,13 +1542,23 @@ iterate_worktrees() {
 }
 
 # collect_worktree_statuses — Gather SHA, dirty, ahead/behind for all worktrees into cache
+#
+# The per-worktree git calls run CONCURRENTLY (see parallel_collect). Walking
+# them one at a time cost roughly 0.65s per worktree on a large repo, so this
+# alone spent ~10s on a repo with fifteen worktrees before anything was printed
+# — the dominant half of a `grove ls` that felt like a hang from the desktop app.
 collect_worktree_statuses() {
   local git_dir="$1"
   _GROVE_STATUS_CACHE=()
 
-  # Callback that gathers status for a single worktree
+  # Callback that gathers status for a single worktree.
+  #
+  # Sets REPLY rather than writing the cache directly: it runs in a subshell,
+  # so an assignment to _GROVE_STATUS_CACHE here would be discarded on exit.
+  # The parent does the cache write once every worker has reported.
   _collect_status_cb() {
     local wt_path="$1"
+    REPLY=""
     # Verify the worktree has a .git reference (file or directory)
     [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || return 0
 
@@ -1578,10 +1588,29 @@ collect_worktree_statuses() {
 
     wt_timestamp="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || wt_timestamp="0"
 
-    _GROVE_STATUS_CACHE[$wt_path]="$wt_sha|$wt_dirty|$wt_ahead|$wt_behind|$wt_timestamp"
+    REPLY="$wt_sha|$wt_dirty|$wt_ahead|$wt_behind|$wt_timestamp"
   }
 
-  iterate_worktrees "$git_dir" _collect_status_cb
+  # Gather the paths first — one cheap `git worktree list` — so the expensive
+  # per-worktree work can be fanned out. Names are `_cws_`-prefixed: zsh scopes
+  # `local` dynamically, so a plain name would be visible to the callback.
+  local -a _cws_paths=()
+  _collect_path_cb() { _cws_paths+=("$1") }
+  iterate_worktrees "$git_dir" _collect_path_cb || return 1
+
+  local -a _cws_values=()
+  parallel_collect _collect_status_cb _cws_paths _cws_values
+
+  # A worker that found no .git reference (or failed outright) reports an empty
+  # string; leaving it out of the cache preserves the old behaviour exactly,
+  # where such a worktree was never written and callers fall back to direct git.
+  local _cws_i=0 _cws_path=""
+  for _cws_path in "${_cws_paths[@]}"; do
+    _cws_i=$(( _cws_i + 1 ))
+    [[ -n "${_cws_values[$_cws_i]}" ]] && _GROVE_STATUS_CACHE[$_cws_path]="${_cws_values[$_cws_i]}"
+  done
+
+  return 0
 }
 
 # get_cached_status — Retrieve a single status field from the worktree cache
@@ -3245,6 +3274,131 @@ parallel_run() {
   "$result_handler" "$success" "$failed" "$total"
 
   return $(( failed > 0 ? 1 : 0 ))
+}
+
+# Bounded concurrency for READ-ONLY status fan-out.
+#
+# Deliberately separate from GROVE_MAX_PARALLEL, which bounds MUTATING
+# operations (pull, remove) where a low limit exists to avoid hammering a
+# remote and to keep a failure easy to attribute. Gathering status is
+# read-only and local, so it can safely run wider.
+GROVE_STATUS_PARALLEL="${GROVE_STATUS_PARALLEL:-8}"
+
+# parallel_collect — Run a callback once per item, bounded, results IN ORDER
+#
+# Arguments:
+#   $1 - callback function name; invoked as: callback "$item" "$index"
+#   $2 - name of the input array
+#   $3 - name of the output array, filled with each item's REPLY in ITEM order
+#
+# The callback runs in a subshell and so cannot mutate parent state. Anything
+# it wants to return it either prints (captured, then replayed on stdout in
+# item order) or leaves in REPLY (captured into the named output array).
+#
+# Order is the whole point. `grove ls` output must not depend on which
+# worktree's git calls happened to finish first, so results are indexed by
+# input position and read back in that order, never in completion order.
+#
+# A callback that fails records no reply, which reads back as the empty string
+# — the same signal callers already treat as "no row", so a failed worktree is
+# skipped rather than emitting a half-built JSON object.
+#
+# Locals are `_pc_`-prefixed because zsh scopes `local` dynamically: a plain
+# name here would shadow the caller's variable of the same name for the whole
+# call, including inside the callback.
+parallel_collect() {
+  local _pc_cb="$1" _pc_items_name="$2" _pc_replies_name="$3"
+  local -a _pc_items=("${(@P)_pc_items_name}")
+  local _pc_total=${#_pc_items[@]}
+
+  set -A "$_pc_replies_name"
+  (( _pc_total > 0 )) || return 0
+
+  local _pc_limit="$GROVE_STATUS_PARALLEL"
+  if [[ ! "$_pc_limit" =~ ^[0-9]+$ ]] || (( _pc_limit < 1 )); then
+    _pc_limit=1
+  fi
+
+  local _pc_tmpdir=""
+  _pc_tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/grove-collect.XXXXXX" 2>/dev/null)" || _pc_tmpdir=""
+
+  local -a _pc_replies=()
+  local _pc_item="" _pc_i=0
+
+  # No temp directory means no way to carry results back out of the subshells.
+  # Run serially in-process rather than failing the command outright: slower is
+  # a far better outcome here than `grove ls` refusing to list anything.
+  if [[ -z "$_pc_tmpdir" || ! -d "$_pc_tmpdir" ]]; then
+    for _pc_item in "${_pc_items[@]}"; do
+      _pc_i=$(( _pc_i + 1 ))
+      REPLY=""
+      if "$_pc_cb" "$_pc_item" "$_pc_i"; then
+        _pc_replies+=("$REPLY")
+      else
+        _pc_replies+=("")
+      fi
+    done
+    set -A "$_pc_replies_name" "${_pc_replies[@]}"
+    return 0
+  fi
+
+  # Publish the temp dir and worker PIDs into the globals the INT/TERM trap in
+  # 08-spinner.sh already drains via parallel_stop. Without this a Ctrl-C during
+  # `grove ls` would exit the shell and leave every worker — and the temp
+  # directory — behind. parallel_run and parallel_collect never run at the same
+  # time, so sharing these is safe.
+  PARALLEL_TMPDIR="$_pc_tmpdir"
+  PARALLEL_PIDS=()
+
+  local -a _pc_pids=()
+  for _pc_item in "${_pc_items[@]}"; do
+    _pc_i=$(( _pc_i + 1 ))
+
+    # Throttle on the OLDEST outstanding job. Cheaper and more predictable than
+    # polling with `kill -0` + sleep, and with roughly uniform per-worktree work
+    # the difference from reaping the first-to-finish is negligible.
+    #
+    # Drain with `shift`, NOT `_pc_pids=("${_pc_pids[2,-1]}")`: on a one-element
+    # array that slice expands to a single EMPTY word, so the array never
+    # shrinks below one and the loop spins forever. It only bites when the limit
+    # is 1, which is why a default of 8 hid it.
+    while (( ${#_pc_pids[@]} >= _pc_limit )); do
+      wait "${_pc_pids[1]}" 2>/dev/null || true
+      shift _pc_pids
+    done
+
+    # stdin from /dev/null: these jobs are non-interactive, and one inheriting
+    # the parent's stdin can contend on it and hang the `wait` below.
+    (
+      REPLY=""
+      if "$_pc_cb" "$_pc_item" "$_pc_i" </dev/null >"$_pc_tmpdir/$_pc_i.out"; then
+        print -rn -- "$REPLY" >"$_pc_tmpdir/$_pc_i.reply"
+      fi
+    ) &
+    _pc_pids+=($!)
+    PARALLEL_PIDS+=($!)
+  done
+
+  local _pc_pid=""
+  for _pc_pid in "${_pc_pids[@]}"; do
+    wait "$_pc_pid" 2>/dev/null || true
+  done
+
+  local _pc_n=0
+  for (( _pc_n = 1; _pc_n <= _pc_total; _pc_n++ )); do
+    [[ -s "$_pc_tmpdir/$_pc_n.out" ]] && cat "$_pc_tmpdir/$_pc_n.out"
+    if [[ -f "$_pc_tmpdir/$_pc_n.reply" ]]; then
+      _pc_replies+=("$(<"$_pc_tmpdir/$_pc_n.reply")")
+    else
+      _pc_replies+=("")
+    fi
+  done
+
+  rm -rf "$_pc_tmpdir"
+  PARALLEL_TMPDIR=""
+  PARALLEL_PIDS=()
+  set -A "$_pc_replies_name" "${_pc_replies[@]}"
+  return 0
 }
 
 # 10-interactive.sh - Interactive worktree creation wizard
@@ -7221,15 +7375,27 @@ cmd_ls() {
 
   local json_items=()
 
-  local wt_path="" branch="" idx=0 wt_entry
-  for wt_entry in "${ls_worktrees[@]}"; do
-    wt_path="${wt_entry%%|*}"
-    branch="${wt_entry##*|}"
-    idx=$((idx + 1))
+  # Render rows CONCURRENTLY. Each row is independent — its own git calls plus,
+  # when the integration is on, three `way` processes for the ledger overlay —
+  # and at roughly 1.5s apiece a repo with fifteen worktrees took ~30s to list,
+  # which reads as a hang in the desktop app rather than as slowness.
+  #
+  # parallel_collect replays both stdout and REPLY in INPUT order, so the text
+  # table and the JSON array keep exactly the ordering the serial loop produced.
+  # Row numbering comes from the input index, not from completion order.
+  _ls_row_cb() {
+    local wt_entry="$1" idx="$2"
     # _display_worktree normalises the "(detached)" sentinel itself; head is
     # resolved there when needed, so we pass an empty head.
-    _display_worktree "$idx" "$wt_path" "$branch" "" "$repo"
-    [[ -n "$REPLY" ]] && json_items+=("$REPLY")
+    _display_worktree "$idx" "${wt_entry%%|*}" "${wt_entry##*|}" "" "$repo"
+  }
+
+  local -a _ls_rows=()
+  parallel_collect _ls_row_cb ls_worktrees _ls_rows
+
+  local _ls_row=""
+  for _ls_row in "${_ls_rows[@]}"; do
+    [[ -n "$_ls_row" ]] && json_items+=("$_ls_row")
   done
 
   if [[ "$JSON_OUTPUT" == true ]]; then

@@ -143,13 +143,23 @@ iterate_worktrees() {
 }
 
 # collect_worktree_statuses — Gather SHA, dirty, ahead/behind for all worktrees into cache
+#
+# The per-worktree git calls run CONCURRENTLY (see parallel_collect). Walking
+# them one at a time cost roughly 0.65s per worktree on a large repo, so this
+# alone spent ~10s on a repo with fifteen worktrees before anything was printed
+# — the dominant half of a `grove ls` that felt like a hang from the desktop app.
 collect_worktree_statuses() {
   local git_dir="$1"
   _GROVE_STATUS_CACHE=()
 
-  # Callback that gathers status for a single worktree
+  # Callback that gathers status for a single worktree.
+  #
+  # Sets REPLY rather than writing the cache directly: it runs in a subshell,
+  # so an assignment to _GROVE_STATUS_CACHE here would be discarded on exit.
+  # The parent does the cache write once every worker has reported.
   _collect_status_cb() {
     local wt_path="$1"
+    REPLY=""
     # Verify the worktree has a .git reference (file or directory)
     [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || return 0
 
@@ -179,10 +189,29 @@ collect_worktree_statuses() {
 
     wt_timestamp="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || wt_timestamp="0"
 
-    _GROVE_STATUS_CACHE[$wt_path]="$wt_sha|$wt_dirty|$wt_ahead|$wt_behind|$wt_timestamp"
+    REPLY="$wt_sha|$wt_dirty|$wt_ahead|$wt_behind|$wt_timestamp"
   }
 
-  iterate_worktrees "$git_dir" _collect_status_cb
+  # Gather the paths first — one cheap `git worktree list` — so the expensive
+  # per-worktree work can be fanned out. Names are `_cws_`-prefixed: zsh scopes
+  # `local` dynamically, so a plain name would be visible to the callback.
+  local -a _cws_paths=()
+  _collect_path_cb() { _cws_paths+=("$1") }
+  iterate_worktrees "$git_dir" _collect_path_cb || return 1
+
+  local -a _cws_values=()
+  parallel_collect _collect_status_cb _cws_paths _cws_values
+
+  # A worker that found no .git reference (or failed outright) reports an empty
+  # string; leaving it out of the cache preserves the old behaviour exactly,
+  # where such a worktree was never written and callers fall back to direct git.
+  local _cws_i=0 _cws_path=""
+  for _cws_path in "${_cws_paths[@]}"; do
+    _cws_i=$(( _cws_i + 1 ))
+    [[ -n "${_cws_values[$_cws_i]}" ]] && _GROVE_STATUS_CACHE[$_cws_path]="${_cws_values[$_cws_i]}"
+  done
+
+  return 0
 }
 
 # get_cached_status — Retrieve a single status field from the worktree cache
