@@ -210,7 +210,92 @@ ledger_moved() {
   return 0
 }
 
+# ── Batch overlay ────────────────────────────────────────────────────────────
+#
+# `way worktree overlay --json` (Waypoint's way-worktree-overlay-v1 contract)
+# answers for EVERY worktree of a repository in one process. A listing primes
+# the batch once, each row looks itself up by path, and the per-row
+# three-process path below survives only as the fallback for an older `way`
+# without the subcommand. The batch lands in a temp file, not a variable,
+# because parallel_collect renders rows in subshells.
+
+typeset -g _LEDGER_BATCH_FILE=""
+
+# ledger_overlay_prime — Fetch the whole repository's overlay in one `way` call
+#
+# $1 is any directory inside the repository — the bare git dir works. On ANY
+# failure (older `way`, no ledger root, integration off) the batch file is
+# absent and every row falls back to ledger_overlay_json_legacy, so behaviour
+# degrades to exactly what shipped before this function existed.
+ledger_overlay_prime() {
+  local git_dir="$1"
+  _LEDGER_BATCH_FILE=""
+  ledger_enabled || return 0
+  local way_bin=""
+  way_bin="$(way_binary)" || return 0
+  [[ -d "$git_dir" ]] || return 0
+
+  local out=""
+  out="$(mktemp "${TMPDIR:-/tmp}/grove-ledger-batch.XXXXXX")" || return 0
+  if ( cd "$git_dir" && "$way_bin" worktree overlay --json >"$out" 2>/dev/null ); then
+    _LEDGER_BATCH_FILE="$out"
+  else
+    rm -f "$out"
+  fi
+  return 0
+}
+
+# ledger_overlay_done — Drop the batch, returning rows to the legacy path
+ledger_overlay_done() {
+  [[ -n "$_LEDGER_BATCH_FILE" ]] && rm -f "$_LEDGER_BATCH_FILE"
+  _LEDGER_BATCH_FILE=""
+  return 0
+}
+
 # ledger_overlay_json — Build the optional `ledger` object for a worktree
+#
+# Sets REPLY exactly as ledger_overlay_json_legacy always has: a JSON object,
+# or the empty string when the integration is off or `way` is absent. When a
+# batch is primed, the row is one file lookup instead of three `way`
+# processes; a row the batch does not carry is a worktree the ledger has no
+# record of, which is the same "unavailable, with the reason" answer a failed
+# `resume` produces today — never silently safe, never silently omitted.
+ledger_overlay_json() {
+  REPLY=""
+  if [[ -z "$_LEDGER_BATCH_FILE" || ! -r "$_LEDGER_BATCH_FILE" ]]; then
+    ledger_overlay_json_legacy "$1"
+    return 0
+  fi
+
+  REPLY="$(python3 -c '
+import json, os, sys
+
+batch_path, wt_path = sys.argv[1], sys.argv[2]
+try:
+    with open(batch_path, encoding="utf-8") as handle:
+        batch = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+wanted = os.path.realpath(wt_path)
+for row in batch.get("worktrees") or []:
+    path = row.get("path")
+    if path and os.path.realpath(path) == wanted:
+        print(json.dumps(row))
+        raise SystemExit(0)
+
+# Registered nowhere in the batch: the same answer a failed resume gives on
+# the per-row path — unavailable, with the reason, never rendered as safe.
+print(json.dumps({
+    "available": False,
+    "unavailable_reason": "not registered in the worktree ledger",
+}))
+' "$_LEDGER_BATCH_FILE" "$1" 2>/dev/null)" || REPLY=""
+  [[ -n "$REPLY" ]] || ledger_overlay_json_legacy "$1"
+  return 0
+}
+
+# ledger_overlay_json_legacy — The per-worktree overlay, three processes
 #
 # Sets REPLY to a JSON object, or to the empty string when the integration is
 # off or `way` is absent — in which case callers omit the key entirely and an
@@ -245,7 +330,7 @@ ledger_moved() {
 # must never be a side effect of listing worktrees.
 #
 # Grove never parses ledger Markdown: this is Waypoint's own JSON, relayed.
-ledger_overlay_json() {
+ledger_overlay_json_legacy() {
   REPLY=""
 
   ledger_enabled || return 0
