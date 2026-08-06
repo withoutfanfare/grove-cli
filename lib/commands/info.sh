@@ -225,15 +225,27 @@ cmd_ls() {
 
   local json_items=()
 
-  local wt_path="" branch="" idx=0 wt_entry
-  for wt_entry in "${ls_worktrees[@]}"; do
-    wt_path="${wt_entry%%|*}"
-    branch="${wt_entry##*|}"
-    idx=$((idx + 1))
+  # Render rows CONCURRENTLY. Each row is independent — its own git calls plus,
+  # when the integration is on, three `way` processes for the ledger overlay —
+  # and at roughly 1.5s apiece a repo with fifteen worktrees took ~30s to list,
+  # which reads as a hang in the desktop app rather than as slowness.
+  #
+  # parallel_collect replays both stdout and REPLY in INPUT order, so the text
+  # table and the JSON array keep exactly the ordering the serial loop produced.
+  # Row numbering comes from the input index, not from completion order.
+  _ls_row_cb() {
+    local wt_entry="$1" idx="$2"
     # _display_worktree normalises the "(detached)" sentinel itself; head is
     # resolved there when needed, so we pass an empty head.
-    _display_worktree "$idx" "$wt_path" "$branch" "" "$repo"
-    [[ -n "$REPLY" ]] && json_items+=("$REPLY")
+    _display_worktree "$idx" "${wt_entry%%|*}" "${wt_entry##*|}" "" "$repo"
+  }
+
+  local -a _ls_rows=()
+  parallel_collect _ls_row_cb ls_worktrees _ls_rows
+
+  local _ls_row=""
+  for _ls_row in "${_ls_rows[@]}"; do
+    [[ -n "$_ls_row" ]] && json_items+=("$_ls_row")
   done
 
   if [[ "$JSON_OUTPUT" == true ]]; then

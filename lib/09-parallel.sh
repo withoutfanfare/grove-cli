@@ -206,3 +206,128 @@ parallel_run() {
 
   return $(( failed > 0 ? 1 : 0 ))
 }
+
+# Bounded concurrency for READ-ONLY status fan-out.
+#
+# Deliberately separate from GROVE_MAX_PARALLEL, which bounds MUTATING
+# operations (pull, remove) where a low limit exists to avoid hammering a
+# remote and to keep a failure easy to attribute. Gathering status is
+# read-only and local, so it can safely run wider.
+GROVE_STATUS_PARALLEL="${GROVE_STATUS_PARALLEL:-8}"
+
+# parallel_collect — Run a callback once per item, bounded, results IN ORDER
+#
+# Arguments:
+#   $1 - callback function name; invoked as: callback "$item" "$index"
+#   $2 - name of the input array
+#   $3 - name of the output array, filled with each item's REPLY in ITEM order
+#
+# The callback runs in a subshell and so cannot mutate parent state. Anything
+# it wants to return it either prints (captured, then replayed on stdout in
+# item order) or leaves in REPLY (captured into the named output array).
+#
+# Order is the whole point. `grove ls` output must not depend on which
+# worktree's git calls happened to finish first, so results are indexed by
+# input position and read back in that order, never in completion order.
+#
+# A callback that fails records no reply, which reads back as the empty string
+# — the same signal callers already treat as "no row", so a failed worktree is
+# skipped rather than emitting a half-built JSON object.
+#
+# Locals are `_pc_`-prefixed because zsh scopes `local` dynamically: a plain
+# name here would shadow the caller's variable of the same name for the whole
+# call, including inside the callback.
+parallel_collect() {
+  local _pc_cb="$1" _pc_items_name="$2" _pc_replies_name="$3"
+  local -a _pc_items=("${(@P)_pc_items_name}")
+  local _pc_total=${#_pc_items[@]}
+
+  set -A "$_pc_replies_name"
+  (( _pc_total > 0 )) || return 0
+
+  local _pc_limit="$GROVE_STATUS_PARALLEL"
+  if [[ ! "$_pc_limit" =~ ^[0-9]+$ ]] || (( _pc_limit < 1 )); then
+    _pc_limit=1
+  fi
+
+  local _pc_tmpdir=""
+  _pc_tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/grove-collect.XXXXXX" 2>/dev/null)" || _pc_tmpdir=""
+
+  local -a _pc_replies=()
+  local _pc_item="" _pc_i=0
+
+  # No temp directory means no way to carry results back out of the subshells.
+  # Run serially in-process rather than failing the command outright: slower is
+  # a far better outcome here than `grove ls` refusing to list anything.
+  if [[ -z "$_pc_tmpdir" || ! -d "$_pc_tmpdir" ]]; then
+    for _pc_item in "${_pc_items[@]}"; do
+      _pc_i=$(( _pc_i + 1 ))
+      REPLY=""
+      if "$_pc_cb" "$_pc_item" "$_pc_i"; then
+        _pc_replies+=("$REPLY")
+      else
+        _pc_replies+=("")
+      fi
+    done
+    set -A "$_pc_replies_name" "${_pc_replies[@]}"
+    return 0
+  fi
+
+  # Publish the temp dir and worker PIDs into the globals the INT/TERM trap in
+  # 08-spinner.sh already drains via parallel_stop. Without this a Ctrl-C during
+  # `grove ls` would exit the shell and leave every worker — and the temp
+  # directory — behind. parallel_run and parallel_collect never run at the same
+  # time, so sharing these is safe.
+  PARALLEL_TMPDIR="$_pc_tmpdir"
+  PARALLEL_PIDS=()
+
+  local -a _pc_pids=()
+  for _pc_item in "${_pc_items[@]}"; do
+    _pc_i=$(( _pc_i + 1 ))
+
+    # Throttle on the OLDEST outstanding job. Cheaper and more predictable than
+    # polling with `kill -0` + sleep, and with roughly uniform per-worktree work
+    # the difference from reaping the first-to-finish is negligible.
+    #
+    # Drain with `shift`, NOT `_pc_pids=("${_pc_pids[2,-1]}")`: on a one-element
+    # array that slice expands to a single EMPTY word, so the array never
+    # shrinks below one and the loop spins forever. It only bites when the limit
+    # is 1, which is why a default of 8 hid it.
+    while (( ${#_pc_pids[@]} >= _pc_limit )); do
+      wait "${_pc_pids[1]}" 2>/dev/null || true
+      shift _pc_pids
+    done
+
+    # stdin from /dev/null: these jobs are non-interactive, and one inheriting
+    # the parent's stdin can contend on it and hang the `wait` below.
+    (
+      REPLY=""
+      if "$_pc_cb" "$_pc_item" "$_pc_i" </dev/null >"$_pc_tmpdir/$_pc_i.out"; then
+        print -rn -- "$REPLY" >"$_pc_tmpdir/$_pc_i.reply"
+      fi
+    ) &
+    _pc_pids+=($!)
+    PARALLEL_PIDS+=($!)
+  done
+
+  local _pc_pid=""
+  for _pc_pid in "${_pc_pids[@]}"; do
+    wait "$_pc_pid" 2>/dev/null || true
+  done
+
+  local _pc_n=0
+  for (( _pc_n = 1; _pc_n <= _pc_total; _pc_n++ )); do
+    [[ -s "$_pc_tmpdir/$_pc_n.out" ]] && cat "$_pc_tmpdir/$_pc_n.out"
+    if [[ -f "$_pc_tmpdir/$_pc_n.reply" ]]; then
+      _pc_replies+=("$(<"$_pc_tmpdir/$_pc_n.reply")")
+    else
+      _pc_replies+=("")
+    fi
+  done
+
+  rm -rf "$_pc_tmpdir"
+  PARALLEL_TMPDIR=""
+  PARALLEL_PIDS=()
+  set -A "$_pc_replies_name" "${_pc_replies[@]}"
+  return 0
+}
