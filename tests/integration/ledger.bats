@@ -209,7 +209,7 @@ EOF
 
 @test "ledger: a primed batch answers a row with no further way processes" {
   stub_way_with_overlay
-  run_zsh "ledger_overlay_prime '$TEST_TEMP_DIR'; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\""
+  run_zsh "ledger_overlay_prime '$TEST_TEMP_DIR'; ledger_overlay_json '$WT'; print -r -- \"\$REPLY\"; ledger_overlay_done"
   [ "$status" -eq 0 ]
   [[ "$output" == *'"worktree_id": "wt_batch01"'* || "$output" == *'"worktree_id":"wt_batch01"'* ]]
   # Exactly one way invocation: the batch. No resume, removal-check or lease.
@@ -220,7 +220,7 @@ EOF
 @test "ledger: a row the batch does not carry is unavailable, never omitted" {
   stub_way_with_overlay
   mkdir -p "$TEST_TEMP_DIR/unregistered"
-  run_zsh "ledger_overlay_prime '$TEST_TEMP_DIR'; ledger_overlay_json '$TEST_TEMP_DIR/unregistered'; print -r -- \"\$REPLY\""
+  run_zsh "ledger_overlay_prime '$TEST_TEMP_DIR'; ledger_overlay_json '$TEST_TEMP_DIR/unregistered'; print -r -- \"\$REPLY\"; ledger_overlay_done"
   [ "$status" -eq 0 ]
   [[ "$output" == *'"available": false'* ]]
   [[ "$output" == *"not registered in the worktree ledger"* ]]
