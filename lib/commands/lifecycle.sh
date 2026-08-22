@@ -170,6 +170,7 @@ cmd_add() {
       print -r -- "  ${C_DIM}GROVE_SKIP_BUILD${C_RESET}=${GROVE_SKIP_BUILD:-false}"
       print -r -- "  ${C_DIM}GROVE_SKIP_MIGRATE${C_RESET}=${GROVE_SKIP_MIGRATE:-false}"
       print -r -- "  ${C_DIM}GROVE_SKIP_HERD${C_RESET}=${GROVE_SKIP_HERD:-false}"
+      print -r -- "  ${C_DIM}GROVE_SKIP_PUSH${C_RESET}=${GROVE_SKIP_PUSH:-false}"
       print -r -- ""
     fi
     print -r -- "${C_BOLD}Actions:${C_RESET}"
@@ -184,7 +185,11 @@ cmd_add() {
       print -r -- "  2. Create worktree from existing remote branch: origin/$branch (tracking, no push)"
     else
       print -r -- "  2. Create new branch '$branch' from '$base'"
-      print -r -- "  3. Push branch to remote and set up tracking"
+      if [[ "${GROVE_SKIP_PUSH:-}" == "true" ]]; then
+        print -r -- "  3. Skip the push (GROVE_SKIP_PUSH=true) - branch stays local"
+      else
+        print -r -- "  3. Push branch to remote and set up tracking"
+      fi
     fi
     print -r -- "  4. Run pre-add hooks"
     print -r -- "  5. Run post-add hooks (environment setup)"
@@ -300,6 +305,9 @@ cmd_add() {
     # Branch already exists on remote, just set up tracking
     dim "  Branch already exists on remote - setting up tracking"
     /usr/bin/git -C "$wt_path" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1 || true
+  elif [[ "${GROVE_SKIP_PUSH:-}" == "true" ]]; then
+    # The template asked for a local-only branch - leave pushing to the caller
+    dim "  Skipping push (GROVE_SKIP_PUSH=true): git push -u origin $branch"
   else
     # New branch - push to remote
     info "Pushing new branch to remote..."

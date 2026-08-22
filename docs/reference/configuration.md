@@ -332,6 +332,7 @@ GROVE_SKIP_DB=true GROVE_SKIP_COMPOSER=true grove add example-app feature/ui
 | `GROVE_SKIP_CURRENT_LINK=true` | `{repo}-current` symlink update | `post-add.d/09-update-current-link.sh`, `post-switch.d/01-update-current-link.sh` |
 | `GROVE_SKIP_HOOKS_PATH=true` | Git hooks-path configuration | `post-add.d/10-set-hooks-path.sh` |
 | `GROVE_SKIP_SERVICES=true` | Service restart on switch | `post-switch.d/02-services-restart.sh` |
+| `GROVE_SKIP_PUSH=true` | Pushing a brand-new branch to `origin` during `grove add` | built into `grove add` itself, not a hook |
 | `GROVE_SKIP_PREFLIGHT=true` | Laravel preflight checks | `pre-add.d/00-laravel-preflight.sh` |
 
 > Because each hook runs in its own subshell, exporting a skip variable *from inside one hook* will not affect later hooks. Set it on the `grove` command line (as above) so the whole run sees it.
