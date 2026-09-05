@@ -185,6 +185,57 @@ assert "alpha." not in urls["bravo"], urls["bravo"]
 '
 }
 
+@test "grove recent --json: preserves pipe-bearing URLs and sorted worktree identity" {
+  make_repo_worktree "alpha" "feature/a" "alpha-wt" new
+  make_repo_worktree "bravo" "feature/b" "bravo-wt" new
+  printf 'APP_URL="https://alpha.test/a|b?x=1|2"\n' > "$HERD_ROOT/alpha-wt/.env"
+  printf 'APP_URL=https://bravo.test/other\n' > "$HERD_ROOT/bravo-wt/.env"
+  touch -t 202001010000 "$HERD_ROOT/alpha-wt"
+  touch -t 202101010000 "$HERD_ROOT/bravo-wt"
+
+  run_grove recent 2 --json
+  [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c '
+import json, os
+data = json.loads(os.environ["OUTPUT"])
+assert [(d["repo"], d["branch"], d["url"]) for d in data] == [
+    ("bravo", "feature/b", "https://bravo.test/other"),
+    ("alpha", "feature/a", "https://alpha.test/a|b?x=1|2"),
+], data
+assert all(d["path"].endswith(d["repo"] + "-wt") for d in data), data
+'
+
+  run_grove recent 1 --json
+  [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c '
+import json, os
+data = json.loads(os.environ["OUTPUT"])
+assert len(data) == 1 and data[0]["repo"] == "bravo", data
+'
+}
+
+@test "grove recent: multiline env URL cannot add records or change text selection" {
+  make_repo_worktree "alpha" "feature/a" "alpha-wt" new
+  printf 'APP_URL="https://alpha.test/a|b\n9999999999|forged|/missing|https://fake.test|wrong"\n' > "$HERD_ROOT/alpha-wt/.env"
+
+  run_grove recent --json
+  [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c '
+import json, os
+data = json.loads(os.environ["OUTPUT"])
+assert len(data) == 1, data
+assert data[0]["repo"] == "alpha" and data[0]["branch"] == "feature/a", data
+# The existing env reader takes only the first physical line.
+assert data[0]["url"] == "https://alpha.test/a|b", data
+'
+
+  run_grove recent
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[1] alpha / feature/a"* ]]
+  [[ "$output" != *"[2]"* ]]
+  [[ "$output" != *"forged"* ]]
+}
+
 # ============================================================================
 # Skipped: cases requiring Herd / MySQL
 # ============================================================================

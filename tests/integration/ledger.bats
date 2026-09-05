@@ -276,7 +276,9 @@ format_json() { print -r -- "$1"; }
 to_json_bool() { case "${1:l}" in true|1|yes|on) print -r -- true ;; *) print -r -- false ;; esac }
 validate_name() { return 0; }
 ensure_bare_repo() { return 0; }
+load_repo_config() { return 0; }
 restart_herd_service() { return 0; }
+worktree_url() { url_for "$1" "$2"; }
 count_lines() { print -r -- 0; }
 run_hooks() { return 0; }
 is_protected_branch() { return 1; }

@@ -2,9 +2,8 @@
 # laravel.bats - Integration tests for grove Laravel commands (migrate, tinker)
 #
 # These tests exercise the artisan wrappers' guards and exit-status
-# propagation. They build a fake worktree under HERD_ROOT (no git setup is
-# needed — resolve_worktree_path falls back to the computed path when no git
-# worktree is registered) and put a stub `artisan` file in it.
+# propagation. They create a registered worktree under HERD_ROOT and put a
+# stub `artisan` file in it.
 
 load '../test-helper'
 
@@ -13,11 +12,14 @@ setup() {
 
   export GROVE_SCRIPT="$GROVE_ROOT/grove"
 
-  # Build a fake worktree the artisan wrappers will resolve to.
+  # Build a registered worktree the artisan wrappers will resolve to.
   # worktree_path_for() = $HERD_ROOT/<repo>-worktrees/<site_name>
   # For branch "feature/test" the site name slugifies to "feature-test".
   WT_PATH="$HERD_ROOT/testrepo-worktrees/feature-test"
-  mkdir -p "$WT_PATH"
+  git init -q -b main "$TEST_TEMP_DIR/seed"
+  git -C "$TEST_TEMP_DIR/seed" -c user.name=Test -c user.email=test@example.invalid commit -q --allow-empty -m init
+  git clone -q --bare "$TEST_TEMP_DIR/seed" "$HERD_ROOT/testrepo.git"
+  git --git-dir="$HERD_ROOT/testrepo.git" worktree add -q -b feature/test "$WT_PATH" main
   # A stub artisan file so the "not a Laravel project" guard passes.
   printf '#!/usr/bin/env php\n' > "$WT_PATH/artisan"
 

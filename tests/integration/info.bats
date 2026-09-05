@@ -37,7 +37,7 @@ setup() {
   git clone -q --bare "$seed" "$GIT_DIR_PATH"
 
   # Create a worktree on the main branch under the worktrees root.
-  WT_PATH="$HERD_ROOT/${REPO_NAME}-worktrees/main"
+  WT_PATH="$HERD_ROOT/${REPO_NAME}-worktrees/${REPO_NAME}"
   export WT_PATH
   mkdir -p "$HERD_ROOT/${REPO_NAME}-worktrees"
   git --git-dir="$GIT_DIR_PATH" worktree add -q "$WT_PATH" main

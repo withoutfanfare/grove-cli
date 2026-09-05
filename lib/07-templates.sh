@@ -115,7 +115,7 @@ load_template() {
   # one, so a stale exported GROVE_SKIP_*=true doesn't bleed into hooks here. Each
   # template starts from the pristine default (absent == false).
   unset GROVE_SKIP_DB GROVE_SKIP_COMPOSER GROVE_SKIP_NPM \
-        GROVE_SKIP_BUILD GROVE_SKIP_MIGRATE GROVE_SKIP_HERD
+        GROVE_SKIP_BUILD GROVE_SKIP_MIGRATE GROVE_SKIP_HERD GROVE_SKIP_PUSH
 
   # Check if template exists
   if [[ ! -f "$template_file" ]]; then

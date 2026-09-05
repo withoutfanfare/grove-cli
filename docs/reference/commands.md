@@ -8,6 +8,7 @@ A few conventions used throughout:
 
 - `<arg>` is required, `[arg]` is optional.
 - Many git, navigation and Laravel commands **auto-detect** the repo/branch when run from inside a worktree under `HERD_ROOT`; their synopses show `[repo] [branch]` and say so explicitly.
+- Commands acting on an existing worktree require an exact registered Git worktree for the requested branch. Computed folder names are used only when creating a worktree, so similar branch slugs cannot select the wrong checkout.
 - The `--json` output is a **data contract** consumed by the grove-app desktop application — the shapes here are authoritative. The `--pretty` flag colourises and indents JSON (except for `grove config`).
 - `grove` itself is a generated artifact built from `lib/` via `./build.sh` — contributors edit the modular sources in `lib/`, never the `grove` file directly.
 
@@ -88,7 +89,7 @@ grove add example-app feature/new-work --dry-run
 2. Runs `pre-add` lifecycle hooks (a non-zero exit aborts the operation)
 3. Creates the worktree directory at `~/Herd/<repo>-worktrees/<site-name>/`
 4. Pushes new branches to remote and sets up tracking
-5. Stores the base ref (`git config --local grove.base`) so later `sync`/`diff`/`summary` default to the same base
+5. Stores the base ref and database identity in the worktree's Git administrative directory so they survive folder moves
 6. Runs `post-add` lifecycle hooks
 
 > `--force` only affects the new-branch case: without it, `add` refuses to create a branch that exists neither locally nor on remote. It does **not** bypass `BRANCH_PATTERN` validation, which is enforced separately.
@@ -100,6 +101,8 @@ Object: `{path, url, branch, database}`.
 ```json
 {"path": "/Users/you/Herd/example-app-worktrees/login", "url": "https://login.test", "branch": "feature/login", "database": "example_app__feature_login"}
 ```
+
+New-branch notices are written to stderr, so successful and refused `--json` requests each leave one parseable JSON document on stdout. The object shape is unchanged.
 
 ---
 
@@ -165,7 +168,9 @@ grove rm -f --delete-branch --drop-db example-app feature/done
 **Safety**
 
 - Protected branches (`staging`, `main`, `master`) require `-f` to remove
-- Warns if there are uncommitted changes (override with `-f`)
+- Requires the requested branch to match an exact registered Git worktree
+- Warns if there are uncommitted changes (override with `-f`); with `--json`, a dirty worktree fails without prompting and returns `DIRTY_WORKTREE`
+- `-f` retains the separate Worktree Ledger gate; use `--ledger-ack` when the ledger requires an acknowledgement
 - `--delete-branch` only removes the local branch, not the remote
 
 **JSON output**
@@ -175,6 +180,20 @@ Object: `{success, repo, branch, path, branch_deleted, db_drop_requested}`. `bra
 ```json
 {"success": true, "repo": "example-app", "branch": "feature/done", "path": "/Users/you/Herd/example-app-worktrees/done", "branch_deleted": true, "db_drop_requested": false}
 ```
+
+The JSON shape is unchanged. Errors continue to use Grove's standard structured JSON error object.
+
+**Database identity for existing worktrees**
+
+New worktrees record their database name in the per-worktree Git administrative file returned by:
+
+```bash
+git rev-parse --git-path grove-database
+```
+
+That identity survives `grove move`. For a legacy worktree without this file, Grove first parses a literal `DB_DATABASE` value from `.env`; it never sources or evaluates the file. If neither exists, Grove uses the canonical branch-derived database only when the worktree still has its canonical folder. A renamed or aliased legacy folder is ambiguous and operations needing the database (`info`, `pull`, `sync`, `move` and `rm`) fail with `DATABASE_UNKNOWN` rather than guessing.
+
+Resolve the ambiguity by confirming the real database, then either set `DB_DATABASE` in the worktree's `.env` or write the confirmed name to the path printed by `git rev-parse --git-path grove-database`. Database names must contain only letters, numbers, underscores, dots, and be at most 64 characters.
 
 **See also:** [grove add](#grove-add), [grove move](#grove-move)
 
@@ -1631,14 +1650,16 @@ grove exec-all @<group> <command>
 ```bash
 grove exec-all example-app npm test
 grove exec-all example-app php artisan cache:clear
-grove exec-all --all-repos "php artisan cache:clear"
-grove exec-all @backend "php artisan queue:restart"
+grove exec-all --all-repos php artisan cache:clear
+grove exec-all @backend php artisan queue:restart
 
 # Pass a command containing leading dashes — use -- as an end-of-options sentinel
 grove exec-all example-app -- ls -la
 ```
 
 > **Note:** Warns about potentially destructive commands (e.g., `migrate:fresh`, `db:drop`). Use `--` before the command to pass arguments that begin with a dash.
+
+In `--all-repos` mode, the first word after the global flags is the executable. The executable is retained when constructing the command for every discovered worktree.
 
 ---
 

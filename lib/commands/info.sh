@@ -24,9 +24,9 @@ _display_worktree() {
   fi
   local url=""
   if [[ -n "$GROVE_URL_SUBDOMAIN" && -n "$branch" ]]; then
-    # When a subdomain is configured, always use url_for() for the browser URL
+    # When a subdomain is configured, use the actual folder's browser URL
     # (.env APP_URL is a Laravel internal config without subdomain prefix)
-    url="$(url_for "$repo" "$branch")"
+    url="$(worktree_site_url "$wt_path")"
   elif [[ -f "$wt_path/.env" ]]; then
     # Extract APP_URL using pure Zsh (no subprocess spawns)
     local line
@@ -45,7 +45,7 @@ _display_worktree() {
     fi
   fi
   # Fall back to the canonical derived URL when no trusted .env URL was found.
-  [[ -z "$url" && -n "$branch" ]] && url="$(url_for "$repo" "$branch")"
+  [[ -z "$url" && -n "$branch" ]] && url="$(worktree_site_url "$wt_path")"
   [[ -z "$url" ]] && url="https://${folder}.test"
 
   # Use cached status if available, fallback to direct git calls
@@ -1201,7 +1201,11 @@ cmd_health() {
         # Reuse already-collected worktrees instead of calling git worktree list per database
         for wt_entry in "${health_worktrees[@]}"; do
           hw_branch="${wt_entry##*|}"
-          wt_db="$(db_name_for "$repo" "$hw_branch")"
+          wt_db="$(db_name_for "$repo" "$hw_branch" "${wt_entry%%|*}")" || {
+            warn "Database identity unknown for $hw_branch"
+            found=true
+            break
+          }
           [[ "$wt_db" == "$db" ]] && found=true && break
         done
 

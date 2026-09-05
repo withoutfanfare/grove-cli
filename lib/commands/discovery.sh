@@ -31,15 +31,17 @@ cmd_info() {
 
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
 
   if [[ ! -d "$wt_path" ]]; then
     error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
   fi
 
   # Collect all data first (shared between JSON and text output)
-  local url; url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+  local url; url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
   local sha; sha="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || sha=""
   local short_sha; short_sha="$(git -C "$wt_path" rev-parse --short HEAD 2>/dev/null)" || short_sha=""
   local last_msg; last_msg="$(git -C "$wt_path" log -1 --format='%s' 2>/dev/null)" || last_msg=""
@@ -304,9 +306,10 @@ cmd_recent() {
 
   # Find all worktrees and sort by access time
   local worktrees=()
+  local -A worktree_urls=()
 
   # Declare loop-scoped variables BEFORE the loop to avoid zsh local re-declaration bug
-  local repo_name wt_path wt_branch atime wt_url
+  local repo_name wt_path wt_branch atime
   local entry rest repo branch url now age age_str
 
   local repo_wts wt_entry
@@ -326,10 +329,10 @@ cmd_recent() {
       atime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
       # Resolve the URL HERE, while this repo's config (GROVE_URL_SUBDOMAIN) is
       # loaded — resolving it later would apply the last repo's subdomain to
-      # every entry. wt_path/wt_branch contain no '|', so it is the safe field
-      # to widen the record with.
-      wt_url="$(url_for "$repo_name" "$wt_branch")"
-      worktrees+=("$atime|$repo_name|$wt_path|$wt_url|$wt_branch")
+      # every entry. Keep URLs outside the delimited records: APP_URL may
+      # contain characters that would otherwise change their framing.
+      worktree_urls[$wt_path]="$(worktree_url "$repo_name" "$wt_branch" "$wt_path")"
+      worktrees+=("$atime|$repo_name|$wt_path|$wt_branch")
     done
   done
 
@@ -359,8 +362,7 @@ cmd_recent() {
       repo="${rest%%|*}"
       rest="${rest#*|}"
       wt_path="${rest%%|*}"
-      rest="${rest#*|}"
-      url="${rest%%|*}"
+      url="${worktree_urls[$wt_path]}"
       branch="${rest##*|}"
 
       # Check dirty status
@@ -404,8 +406,6 @@ cmd_recent() {
     repo="${rest%%|*}"
     rest="${rest#*|}"
     wt_path="${rest%%|*}"
-    rest="${rest#*|}"
-    url="${rest%%|*}"
     branch="${rest##*|}"
 
     # Format time
