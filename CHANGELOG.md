@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hook environment gains `GROVE_FORCE` and `GROVE_LEDGER_ACK`** - so a hook can report that a removal was forced, and receive an acknowledgement token
 
 ### Fixed
+- **Recent worktrees preserve custom URLs containing pipes** - URLs are kept outside the sortable records, preserving complete values and worktree identity without changing the JSON shape
 - **Existing worktree commands require exact Git identity** - Commands no longer fall back to a computed folder for existing worktrees. Slash/dash, case, missing-branch, detached, and folder-alias mismatches now fail before hooks or mutations; computed paths remain available for creation
 - **Database identity survives worktree aliases and moves** - New worktrees persist the selected database in their per-worktree Git administrative directory. Legacy worktrees use a literal `DB_DATABASE` from `.env`, or the canonical branch-derived value only when the folder is unambiguous; renamed or aliased legacy folders without either record now fail closed with `DATABASE_UNKNOWN`
 - **Lifecycle JSON remains parseable** - New-branch `add --json` notices no longer contaminate stdout, and dirty `rm --json` requests return `DIRTY_WORKTREE` without prompting. Successful result and error shapes remain unchanged, while explicit `--force` continues to retain the separate Worktree Ledger gate

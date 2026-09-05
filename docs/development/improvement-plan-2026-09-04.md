@@ -76,6 +76,15 @@ The test-helper migration, bounded worker diagnostics, and a macOS CI gate remai
 
 ## Verification
 
+### Follow-up review: recent URL records, 5 September 2026
+
+- Handled `job-23684100685087a75e2fb43fc61f5054d817fc472a1ea06b0bb788666e5ea7d4.md` and `job-f8bde141b3d183cb7fc708b18f9688aef75336ee5499b507e30da141e9e1fb97.md`. Both report the same issue; one shared fix addresses both.
+- Valid: an `APP_URL` containing `|` was truncated by `recent` when the URL was included in its delimited sorting records. Reproduced with the real CLI and disposable Git worktrees before changing production code.
+- Implemented: retain URLs in a worktree-path lookup outside those records, resolving each under its own repository configuration. Sorting, limits and the published JSON shape are unchanged.
+- Qualification: embedded newlines are not returned by the current line-based `.env` reader. No multiline parsing change is warranted. Regression coverage confirms the existing first-line behaviour, without extra records or altered text selection. No distinct finding was skipped; the second report is a duplicate.
+- Verification: `./run-tests.sh discovery.bats` passed 10 tests with one intentional MySQL skip; both new regressions failed before the fix. `./run-tests.sh lint` reported `Static analysis passed`; `git diff --check` passed. Rebuilt `grove` from source. No background service was started.
+- Delivery verification on 5 September: a complete `./run-tests.sh` run passed 620 tests, skipped nine environment-dependent integrations, and reported no failures; lint ran and passed. The installed CLI matched the rebuilt source, passed a real pipe-bearing URL regression and parsed all 17 commands in the disposable JSON matrix. `grove doctor` passed with the existing Herd tools on `PATH`; the agent shell's default path omitted Composer. Grove has no daemon requiring a restart. Delivery proceeds through `develop` and a pull request; the repository rules reserve the merge into `main` for a human.
+
 ### Implementation verification
 
 - `./run-tests.sh lint`: passed with `Static analysis passed`, including Zsh parsing and ShellCheck.
