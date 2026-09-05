@@ -126,7 +126,6 @@ cmd_exec_all() {
 
   # Multi-repo mode
   if [[ "${ALL_REPOS:-false}" == true ]]; then
-    shift || true
     local cmd=("$@")
     (( ${#cmd[@]} > 0 )) || error_exit "INVALID_INPUT" "Usage: grove exec-all --all-repos <command...>" 2
 

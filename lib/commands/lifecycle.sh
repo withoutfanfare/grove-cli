@@ -245,18 +245,18 @@ cmd_add() {
     fi
 
     warn "Branch ${C_MAGENTA}$branch${C_RESET} does not exist locally or on remote"
-    print -r -- ""
-    print -r -- "  ${C_BOLD}This will CREATE a new branch${C_RESET} from ${C_DIM}$base${C_RESET}"
-    print -r -- ""
+    print -r -- "" >&2
+    print -r -- "  ${C_BOLD}This will CREATE a new branch${C_RESET} from ${C_DIM}$base${C_RESET}" >&2
+    print -r -- "" >&2
 
     # In non-interactive mode, show how to check out existing branches
     if [[ "$INTERACTIVE" != true && "$FORCE" != true ]]; then
-      print -r -- "  ${C_DIM}If you meant to check out an existing branch:${C_RESET}"
-      print -r -- "    1. Check available branches: git --git-dir=\"$git_dir\" branch -r"
-      print -r -- "    2. Ensure the branch has been pushed to origin"
-      print -r -- "    3. Use the exact branch name without 'origin/' prefix"
-      print -r -- ""
-      print -r -- "  ${C_DIM}To create the new branch anyway, run with --force${C_RESET}"
+      print -r -- "  ${C_DIM}If you meant to check out an existing branch:${C_RESET}" >&2
+      print -r -- "    1. Check available branches: git --git-dir=\"$git_dir\" branch -r" >&2
+      print -r -- "    2. Ensure the branch has been pushed to origin" >&2
+      print -r -- "    3. Use the exact branch name without 'origin/' prefix" >&2
+      print -r -- "" >&2
+      print -r -- "  ${C_DIM}To create the new branch anyway, run with --force${C_RESET}" >&2
       error_exit "BRANCH_NOT_FOUND" "aborted: use --force to create new branch, or check the branch name" 3
     fi
   fi
@@ -299,6 +299,9 @@ cmd_add() {
 
   # Ensure config.worktree exists when bare repo uses extensions.worktreeConfig
   ensure_worktree_config "$git_dir" "$wt_path"
+
+  set_worktree_database "$wt_path" "$db_name" ||
+    error_exit "IO_ERROR" "could not save the worktree database identity" 5
 
   # Set up remote tracking (only push if creating new branch)
   if [[ "$branch_on_remote" == true ]]; then
@@ -372,9 +375,12 @@ cmd_rm() {
   validate_name "$branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
-  local app_url; app_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+  load_repo_config "$git_dir"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
+  local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
   local site_name="${wt_path:t}"
 
   ensure_bare_repo "$git_dir"
@@ -403,8 +409,12 @@ cmd_rm() {
 
   # Check for uncommitted changes and confirm (unless --force)
   if [[ "$FORCE" == false ]]; then
-    local wt_status; wt_status="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || wt_status=""
+    local wt_status; wt_status="$(git -C "$wt_path" status --porcelain 2>/dev/null)" ||
+      error_exit "GIT_ERROR" "could not check worktree changes; removal aborted" 4
     if [[ -n "$wt_status" ]]; then
+      if [[ "$JSON_OUTPUT" == true ]]; then
+        error_exit "DIRTY_WORKTREE" "worktree has uncommitted changes; preserve them or explicitly use --force" 4
+      fi
       local changes; changes="$(count_lines "$wt_status")"
       warn "Worktree has ${C_BOLD}$changes${C_RESET}${C_YELLOW} uncommitted change(s):${C_RESET}"
       git -C "$wt_path" status --short
@@ -538,15 +548,18 @@ cmd_move() {
   fi
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  load_repo_config "$git_dir"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   local wt_parent="${wt_path:h}"
   local old_site_name="${wt_path:t}"
   local new_wt_path="$wt_parent/$new_name"
   local new_site_name="$new_name"
 
   # Get old URL and database name for hooks
-  local old_url; old_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+  local old_url; old_url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
 
   ensure_bare_repo "$git_dir"
   [[ -d "$wt_path" ]] || error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
@@ -584,6 +597,9 @@ cmd_move() {
   # Move the worktree FIRST — before tearing down the old Herd site — so that a move
   # failure leaves the old site intact rather than unsecured with no worktree to serve.
   info "Moving worktree..."
+  # Migrate legacy identities before changing the folder used by the fallback.
+  set_worktree_database "$wt_path" "$db_name" ||
+    error_exit "IO_ERROR" "could not save the worktree database identity" 5
   if [[ "$FORCE" == true ]]; then
     git --git-dir="$git_dir" worktree move --force "$wt_path" "$new_wt_path"
   else
@@ -782,7 +798,8 @@ cmd_fresh() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   pushd "$wt_path" >/dev/null || error_exit "IO_ERROR" "failed to cd into '$wt_path'" 5

@@ -8,7 +8,7 @@
 # only for unquoted values strip a trailing " #..." comment (whitespace then #)
 # — never a bare mid-value '#'. The .env is untrusted, so the value must match
 # ^https?:// to be used. On a missing, empty, or non-http(s) APP_URL it falls
-# back to url_for (which honours GROVE_URL_SUBDOMAIN).
+# back to the actual folder's URL (honouring GROVE_URL_SUBDOMAIN).
 #
 # Arguments:
 #   $1 - repo name
@@ -20,6 +20,13 @@
 worktree_url() {
   local repo="$1" branch="$2" wt_path="$3"
   local url="" line value was_quoted
+
+  # The configured browser subdomain takes precedence over Laravel's internal
+  # APP_URL, consistently with the worktree listing.
+  if [[ -n "$GROVE_URL_SUBDOMAIN" ]]; then
+    worktree_site_url "$wt_path"
+    return 0
+  fi
 
   if [[ -f "$wt_path/.env" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -50,7 +57,7 @@ worktree_url() {
   if [[ "$url" =~ ^https?:// ]]; then
     print -r -- "$url"
   else
-    url_for "$repo" "$branch"
+    worktree_site_url "$wt_path"
   fi
 }
 
@@ -118,7 +125,8 @@ cmd_code() {
 
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   local editor="$DEFAULT_EDITOR"
@@ -172,7 +180,8 @@ cmd_open() {
   validate_name "$branch" "branch"
 
   # Get actual worktree path
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # Resolve the URL (shared with switch): .env APP_URL when valid, else url_for
@@ -222,7 +231,8 @@ cmd_cd() {
 
   validate_name "$branch" "branch"
 
-  resolve_worktree_path "$repo" "$branch"
+  resolve_worktree_path "$repo" "$branch" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
 }
 
 # cmd_switch — Switch to a worktree, opening editor and browser
@@ -255,7 +265,8 @@ cmd_switch() {
 
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # Resolve the URL (shared with open): .env APP_URL when valid, else url_for
@@ -295,7 +306,8 @@ cmd_exec() {
   validate_name "$branch" "branch"
 
   local wt_path
-  wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
 
   pushd "$wt_path" >/dev/null || error_exit "IO_ERROR" "failed to cd into '$wt_path'" 5

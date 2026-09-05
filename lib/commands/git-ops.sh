@@ -70,10 +70,16 @@ cmd_pull() {
   validate_name "$branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
 
   ensure_bare_repo "$git_dir"
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+
+  load_repo_config "$git_dir"
+  local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
 
   # Capture pull output and exit code for JSON support
   local pull_output pull_exit_code=0
@@ -102,8 +108,6 @@ cmd_pull() {
 
     # Run post-pull hooks even for JSON output (only on success)
     if (( pull_exit_code == 0 )); then
-      local app_url; app_url="$(url_for "$repo" "$branch")"
-      local db_name; db_name="$(db_name_for "$repo" "$branch")"
       run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
     fi
     # Normalise the failure exit to grove's curated GIT_ERROR code (4) so JSON and text
@@ -121,8 +125,6 @@ cmd_pull() {
   ok "Pull complete"
 
   # Run post-pull hooks
-  local app_url; app_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
   run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 }
 
@@ -365,8 +367,13 @@ cmd_sync() {
   # Load repo-specific config (may override DEFAULT_BASE)
   load_repo_config "$git_dir"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+
+  local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
 
   # Use provided base, or the worktree's configured base, or default
   [[ -n "$base" ]] || base="$(worktree_base_for "$wt_path" "$DEFAULT_BASE")"
@@ -417,8 +424,6 @@ cmd_sync() {
 
     # Run post-sync hooks even for JSON output (only on success)
     if (( sync_exit_code == 0 )); then
-      local app_url; app_url="$(url_for "$repo" "$branch")"
-      local db_name; db_name="$(db_name_for "$repo" "$branch")"
       run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
     fi
     # Normalise the failure exit to grove's curated GIT_ERROR code (4) so JSON and text
@@ -437,8 +442,6 @@ cmd_sync() {
   ok "Sync complete"
 
   # Run post-sync hooks
-  local app_url; app_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
   run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 }
 
@@ -639,7 +642,8 @@ cmd_log() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # JSON output mode
@@ -700,7 +704,8 @@ cmd_diff() {
   validate_name "$branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
 
   ensure_bare_repo "$git_dir"
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
@@ -783,7 +788,8 @@ cmd_summary() {
   # Load repo-specific config (may override DEFAULT_BASE)
   load_repo_config "$git_dir"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # Use provided base, or the worktree's configured base, or default
@@ -967,7 +973,8 @@ cmd_changes() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # Get git status in porcelain format

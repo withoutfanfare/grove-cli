@@ -144,20 +144,25 @@ lookup_worktree_path() {
   return 0
 }
 
-# resolve_worktree_path — Get worktree path via git lookup, falling back to computed path
+# resolve_worktree_path — Resolve an existing worktree by its exact Git identity.
+# Creation uses worktree_path_for instead: a computed slug cannot prove which
+# branch a directory belongs to (feature/foo and feature-foo share a slug).
+# Returns 1 without output when the record is missing, detached, or replaced.
 resolve_worktree_path() {
   local repo="$1"
   local branch="$2"
 
-  # First try to look up actual path from git
   local actual_path; actual_path="$(lookup_worktree_path "$repo" "$branch")"
-  if [[ -n "$actual_path" ]]; then
-    print -r -- "$actual_path"
-    return 0
-  fi
+  [[ -n "$actual_path" && -d "$actual_path" ]] || return 1
 
-  # Fall back to computed path (for new worktrees)
-  worktree_path_for "$repo" "$branch"
+  local actual_branch common_dir git_dir
+  actual_branch="$(git -C "$actual_path" symbolic-ref --quiet HEAD 2>/dev/null)" || return 1
+  [[ "$actual_branch" == "refs/heads/$branch" ]] || return 1
+  common_dir="$(git -C "$actual_path" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ "$common_dir" == /* ]] || common_dir="$actual_path/$common_dir"
+  git_dir="$(git_dir_for "$repo")"
+  [[ "${common_dir:A}" == "${git_dir:A}" ]] || return 1
+  print -r -- "$actual_path"
 }
 
 # detect_current_worktree — Auto-detect repo and branch from cwd (sets DETECTED_REPO/BRANCH)
@@ -269,6 +274,12 @@ url_for() {
   else
     print -r -- "https://${site_name}.test"
   fi
+}
+
+# Existing worktrees may have an alias or have moved since creation.
+worktree_site_url() {
+  local wt_path="$1"
+  print -r -- "https://${GROVE_URL_SUBDOMAIN:+${GROVE_URL_SUBDOMAIN}.}${wt_path:t}.test"
 }
 
 # resolve_recent_shortcut — Resolve @N shortcut to branch name by modification time

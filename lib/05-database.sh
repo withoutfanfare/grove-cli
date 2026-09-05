@@ -12,6 +12,10 @@
 db_name_for() {
   local repo="$1"
   local branch="$2"
+  if [[ -n "${3:-}" ]]; then
+    worktree_database_for "$repo" "$branch" "$3"
+    return $?
+  fi
   # Defence-in-depth: strip backticks so the name can never break out of a
   # `quoted` MySQL identifier even if a caller bypasses upstream validation.
   repo="${repo//\`/}"
@@ -48,6 +52,60 @@ db_name_for() {
   fi
 
   print -r -- "$db_name"
+}
+
+# The database belongs to the worktree, not its current folder name. Store it
+# beside Git's per-worktree index so git worktree move preserves the identity.
+worktree_database_file() {
+  local wt_path="$1" raw
+  raw="$(git -C "$wt_path" rev-parse --git-path grove-database 2>/dev/null)" || return 1
+  [[ "$raw" == /* ]] || raw="$wt_path/$raw"
+  print -r -- "$raw"
+}
+
+_database_env_pair() {
+  [[ "$1" == DB_DATABASE ]] && print -r -- "$2"
+  return 0
+}
+
+worktree_database_for() {
+  local repo="$1" branch="$2" wt_path="$3"
+  local sidecar db_name="" expected
+  sidecar="$(worktree_database_file "$wt_path")" || return 1
+  if [[ -e "$sidecar" || -L "$sidecar" ]]; then
+    [[ -f "$sidecar" && -r "$sidecar" ]] || return 1
+    db_name="$(<"$sidecar")"
+    _validate_database_name "$db_name" || return 1
+    print -r -- "$db_name"
+    return 0
+  fi
+
+  # Legacy worktrees may already have an explicitly selected database. Parse
+  # literal values only; never source .env or evaluate shell substitutions.
+  db_name="$(_read_config_pairs "$wt_path/.env" _database_env_pair)" || return 1
+  if [[ -n "$db_name" ]]; then
+    _validate_database_name "$db_name" || return 1
+    print -r -- "$db_name"
+    return 0
+  fi
+
+  expected="$(worktree_path_for "$repo" "$branch")"
+  # Without recorded metadata, a custom folder could be an alias OR a move.
+  # Guessing either name could select an unrelated database for backup/drop.
+  [[ "${wt_path:A}" == "${expected:A}" ]] || return 1
+  db_name_for "$repo" "$branch"
+}
+
+set_worktree_database() {
+  local wt_path="$1" db_name="$2" sidecar tmp
+  _validate_database_name "$db_name" || return 1
+  sidecar="$(worktree_database_file "$wt_path")" || return 1
+  tmp="$(mktemp "${sidecar}.tmp.XXXXXX")" || return 1
+  if print -r -- "$db_name" > "$tmp" && mv -f "$tmp" "$sidecar"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 # _validate_database_name — Reject unsafe MySQL identifiers supplied by hooks

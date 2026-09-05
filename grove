@@ -1070,20 +1070,25 @@ lookup_worktree_path() {
   return 0
 }
 
-# resolve_worktree_path — Get worktree path via git lookup, falling back to computed path
+# resolve_worktree_path — Resolve an existing worktree by its exact Git identity.
+# Creation uses worktree_path_for instead: a computed slug cannot prove which
+# branch a directory belongs to (feature/foo and feature-foo share a slug).
+# Returns 1 without output when the record is missing, detached, or replaced.
 resolve_worktree_path() {
   local repo="$1"
   local branch="$2"
 
-  # First try to look up actual path from git
   local actual_path; actual_path="$(lookup_worktree_path "$repo" "$branch")"
-  if [[ -n "$actual_path" ]]; then
-    print -r -- "$actual_path"
-    return 0
-  fi
+  [[ -n "$actual_path" && -d "$actual_path" ]] || return 1
 
-  # Fall back to computed path (for new worktrees)
-  worktree_path_for "$repo" "$branch"
+  local actual_branch common_dir git_dir
+  actual_branch="$(git -C "$actual_path" symbolic-ref --quiet HEAD 2>/dev/null)" || return 1
+  [[ "$actual_branch" == "refs/heads/$branch" ]] || return 1
+  common_dir="$(git -C "$actual_path" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ "$common_dir" == /* ]] || common_dir="$actual_path/$common_dir"
+  git_dir="$(git_dir_for "$repo")"
+  [[ "${common_dir:A}" == "${git_dir:A}" ]] || return 1
+  print -r -- "$actual_path"
 }
 
 # detect_current_worktree — Auto-detect repo and branch from cwd (sets DETECTED_REPO/BRANCH)
@@ -1195,6 +1200,12 @@ url_for() {
   else
     print -r -- "https://${site_name}.test"
   fi
+}
+
+# Existing worktrees may have an alias or have moved since creation.
+worktree_site_url() {
+  local wt_path="$1"
+  print -r -- "https://${GROVE_URL_SUBDOMAIN:+${GROVE_URL_SUBDOMAIN}.}${wt_path:t}.test"
 }
 
 # resolve_recent_shortcut — Resolve @N shortcut to branch name by modification time
@@ -2126,6 +2137,10 @@ check_worktree_mismatches() {
 db_name_for() {
   local repo="$1"
   local branch="$2"
+  if [[ -n "${3:-}" ]]; then
+    worktree_database_for "$repo" "$branch" "$3"
+    return $?
+  fi
   # Defence-in-depth: strip backticks so the name can never break out of a
   # `quoted` MySQL identifier even if a caller bypasses upstream validation.
   repo="${repo//\`/}"
@@ -2162,6 +2177,60 @@ db_name_for() {
   fi
 
   print -r -- "$db_name"
+}
+
+# The database belongs to the worktree, not its current folder name. Store it
+# beside Git's per-worktree index so git worktree move preserves the identity.
+worktree_database_file() {
+  local wt_path="$1" raw
+  raw="$(git -C "$wt_path" rev-parse --git-path grove-database 2>/dev/null)" || return 1
+  [[ "$raw" == /* ]] || raw="$wt_path/$raw"
+  print -r -- "$raw"
+}
+
+_database_env_pair() {
+  [[ "$1" == DB_DATABASE ]] && print -r -- "$2"
+  return 0
+}
+
+worktree_database_for() {
+  local repo="$1" branch="$2" wt_path="$3"
+  local sidecar db_name="" expected
+  sidecar="$(worktree_database_file "$wt_path")" || return 1
+  if [[ -e "$sidecar" || -L "$sidecar" ]]; then
+    [[ -f "$sidecar" && -r "$sidecar" ]] || return 1
+    db_name="$(<"$sidecar")"
+    _validate_database_name "$db_name" || return 1
+    print -r -- "$db_name"
+    return 0
+  fi
+
+  # Legacy worktrees may already have an explicitly selected database. Parse
+  # literal values only; never source .env or evaluate shell substitutions.
+  db_name="$(_read_config_pairs "$wt_path/.env" _database_env_pair)" || return 1
+  if [[ -n "$db_name" ]]; then
+    _validate_database_name "$db_name" || return 1
+    print -r -- "$db_name"
+    return 0
+  fi
+
+  expected="$(worktree_path_for "$repo" "$branch")"
+  # Without recorded metadata, a custom folder could be an alias OR a move.
+  # Guessing either name could select an unrelated database for backup/drop.
+  [[ "${wt_path:A}" == "${expected:A}" ]] || return 1
+  db_name_for "$repo" "$branch"
+}
+
+set_worktree_database() {
+  local wt_path="$1" db_name="$2" sidecar tmp
+  _validate_database_name "$db_name" || return 1
+  sidecar="$(worktree_database_file "$wt_path")" || return 1
+  tmp="$(mktemp "${sidecar}.tmp.XXXXXX")" || return 1
+  if print -r -- "$db_name" > "$tmp" && mv -f "$tmp" "$sidecar"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 # _validate_database_name — Reject unsafe MySQL identifiers supplied by hooks
@@ -5195,18 +5264,18 @@ cmd_add() {
     fi
 
     warn "Branch ${C_MAGENTA}$branch${C_RESET} does not exist locally or on remote"
-    print -r -- ""
-    print -r -- "  ${C_BOLD}This will CREATE a new branch${C_RESET} from ${C_DIM}$base${C_RESET}"
-    print -r -- ""
+    print -r -- "" >&2
+    print -r -- "  ${C_BOLD}This will CREATE a new branch${C_RESET} from ${C_DIM}$base${C_RESET}" >&2
+    print -r -- "" >&2
 
     # In non-interactive mode, show how to check out existing branches
     if [[ "$INTERACTIVE" != true && "$FORCE" != true ]]; then
-      print -r -- "  ${C_DIM}If you meant to check out an existing branch:${C_RESET}"
-      print -r -- "    1. Check available branches: git --git-dir=\"$git_dir\" branch -r"
-      print -r -- "    2. Ensure the branch has been pushed to origin"
-      print -r -- "    3. Use the exact branch name without 'origin/' prefix"
-      print -r -- ""
-      print -r -- "  ${C_DIM}To create the new branch anyway, run with --force${C_RESET}"
+      print -r -- "  ${C_DIM}If you meant to check out an existing branch:${C_RESET}" >&2
+      print -r -- "    1. Check available branches: git --git-dir=\"$git_dir\" branch -r" >&2
+      print -r -- "    2. Ensure the branch has been pushed to origin" >&2
+      print -r -- "    3. Use the exact branch name without 'origin/' prefix" >&2
+      print -r -- "" >&2
+      print -r -- "  ${C_DIM}To create the new branch anyway, run with --force${C_RESET}" >&2
       error_exit "BRANCH_NOT_FOUND" "aborted: use --force to create new branch, or check the branch name" 3
     fi
   fi
@@ -5249,6 +5318,9 @@ cmd_add() {
 
   # Ensure config.worktree exists when bare repo uses extensions.worktreeConfig
   ensure_worktree_config "$git_dir" "$wt_path"
+
+  set_worktree_database "$wt_path" "$db_name" ||
+    error_exit "IO_ERROR" "could not save the worktree database identity" 5
 
   # Set up remote tracking (only push if creating new branch)
   if [[ "$branch_on_remote" == true ]]; then
@@ -5322,9 +5394,12 @@ cmd_rm() {
   validate_name "$branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
-  local app_url; app_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+  load_repo_config "$git_dir"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
+  local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
   local site_name="${wt_path:t}"
 
   ensure_bare_repo "$git_dir"
@@ -5353,8 +5428,12 @@ cmd_rm() {
 
   # Check for uncommitted changes and confirm (unless --force)
   if [[ "$FORCE" == false ]]; then
-    local wt_status; wt_status="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || wt_status=""
+    local wt_status; wt_status="$(git -C "$wt_path" status --porcelain 2>/dev/null)" ||
+      error_exit "GIT_ERROR" "could not check worktree changes; removal aborted" 4
     if [[ -n "$wt_status" ]]; then
+      if [[ "$JSON_OUTPUT" == true ]]; then
+        error_exit "DIRTY_WORKTREE" "worktree has uncommitted changes; preserve them or explicitly use --force" 4
+      fi
       local changes; changes="$(count_lines "$wt_status")"
       warn "Worktree has ${C_BOLD}$changes${C_RESET}${C_YELLOW} uncommitted change(s):${C_RESET}"
       git -C "$wt_path" status --short
@@ -5488,15 +5567,18 @@ cmd_move() {
   fi
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  load_repo_config "$git_dir"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   local wt_parent="${wt_path:h}"
   local old_site_name="${wt_path:t}"
   local new_wt_path="$wt_parent/$new_name"
   local new_site_name="$new_name"
 
   # Get old URL and database name for hooks
-  local old_url; old_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+  local old_url; old_url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
 
   ensure_bare_repo "$git_dir"
   [[ -d "$wt_path" ]] || error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
@@ -5534,6 +5616,9 @@ cmd_move() {
   # Move the worktree FIRST — before tearing down the old Herd site — so that a move
   # failure leaves the old site intact rather than unsecured with no worktree to serve.
   info "Moving worktree..."
+  # Migrate legacy identities before changing the folder used by the fallback.
+  set_worktree_database "$wt_path" "$db_name" ||
+    error_exit "IO_ERROR" "could not save the worktree database identity" 5
   if [[ "$FORCE" == true ]]; then
     git --git-dir="$git_dir" worktree move --force "$wt_path" "$new_wt_path"
   else
@@ -5732,7 +5817,8 @@ cmd_fresh() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   pushd "$wt_path" >/dev/null || error_exit "IO_ERROR" "failed to cd into '$wt_path'" 5
@@ -5991,10 +6077,16 @@ cmd_pull() {
   validate_name "$branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
 
   ensure_bare_repo "$git_dir"
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+
+  load_repo_config "$git_dir"
+  local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
 
   # Capture pull output and exit code for JSON support
   local pull_output pull_exit_code=0
@@ -6023,8 +6115,6 @@ cmd_pull() {
 
     # Run post-pull hooks even for JSON output (only on success)
     if (( pull_exit_code == 0 )); then
-      local app_url; app_url="$(url_for "$repo" "$branch")"
-      local db_name; db_name="$(db_name_for "$repo" "$branch")"
       run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
     fi
     # Normalise the failure exit to grove's curated GIT_ERROR code (4) so JSON and text
@@ -6042,8 +6132,6 @@ cmd_pull() {
   ok "Pull complete"
 
   # Run post-pull hooks
-  local app_url; app_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
   run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 }
 
@@ -6286,8 +6374,13 @@ cmd_sync() {
   # Load repo-specific config (may override DEFAULT_BASE)
   load_repo_config "$git_dir"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+
+  local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
 
   # Use provided base, or the worktree's configured base, or default
   [[ -n "$base" ]] || base="$(worktree_base_for "$wt_path" "$DEFAULT_BASE")"
@@ -6338,8 +6431,6 @@ cmd_sync() {
 
     # Run post-sync hooks even for JSON output (only on success)
     if (( sync_exit_code == 0 )); then
-      local app_url; app_url="$(url_for "$repo" "$branch")"
-      local db_name; db_name="$(db_name_for "$repo" "$branch")"
       run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
     fi
     # Normalise the failure exit to grove's curated GIT_ERROR code (4) so JSON and text
@@ -6358,8 +6449,6 @@ cmd_sync() {
   ok "Sync complete"
 
   # Run post-sync hooks
-  local app_url; app_url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
   run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 }
 
@@ -6560,7 +6649,8 @@ cmd_log() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # JSON output mode
@@ -6621,7 +6711,8 @@ cmd_diff() {
   validate_name "$branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
 
   ensure_bare_repo "$git_dir"
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
@@ -6704,7 +6795,8 @@ cmd_summary() {
   # Load repo-specific config (may override DEFAULT_BASE)
   load_repo_config "$git_dir"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # Use provided base, or the worktree's configured base, or default
@@ -6888,7 +6980,8 @@ cmd_changes() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # Get git status in porcelain format
@@ -6990,7 +7083,7 @@ cmd_changes() {
 # only for unquoted values strip a trailing " #..." comment (whitespace then #)
 # — never a bare mid-value '#'. The .env is untrusted, so the value must match
 # ^https?:// to be used. On a missing, empty, or non-http(s) APP_URL it falls
-# back to url_for (which honours GROVE_URL_SUBDOMAIN).
+# back to the actual folder's URL (honouring GROVE_URL_SUBDOMAIN).
 #
 # Arguments:
 #   $1 - repo name
@@ -7002,6 +7095,13 @@ cmd_changes() {
 worktree_url() {
   local repo="$1" branch="$2" wt_path="$3"
   local url="" line value was_quoted
+
+  # The configured browser subdomain takes precedence over Laravel's internal
+  # APP_URL, consistently with the worktree listing.
+  if [[ -n "$GROVE_URL_SUBDOMAIN" ]]; then
+    worktree_site_url "$wt_path"
+    return 0
+  fi
 
   if [[ -f "$wt_path/.env" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -7032,7 +7132,7 @@ worktree_url() {
   if [[ "$url" =~ ^https?:// ]]; then
     print -r -- "$url"
   else
-    url_for "$repo" "$branch"
+    worktree_site_url "$wt_path"
   fi
 }
 
@@ -7100,7 +7200,8 @@ cmd_code() {
 
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   local editor="$DEFAULT_EDITOR"
@@ -7154,7 +7255,8 @@ cmd_open() {
   validate_name "$branch" "branch"
 
   # Get actual worktree path
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # Resolve the URL (shared with switch): .env APP_URL when valid, else url_for
@@ -7204,7 +7306,8 @@ cmd_cd() {
 
   validate_name "$branch" "branch"
 
-  resolve_worktree_path "$repo" "$branch"
+  resolve_worktree_path "$repo" "$branch" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
 }
 
 # cmd_switch — Switch to a worktree, opening editor and browser
@@ -7237,7 +7340,8 @@ cmd_switch() {
 
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   # Resolve the URL (shared with open): .env APP_URL when valid, else url_for
@@ -7277,7 +7381,8 @@ cmd_exec() {
   validate_name "$branch" "branch"
 
   local wt_path
-  wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
 
   pushd "$wt_path" >/dev/null || error_exit "IO_ERROR" "failed to cd into '$wt_path'" 5
@@ -7312,9 +7417,9 @@ _display_worktree() {
   fi
   local url=""
   if [[ -n "$GROVE_URL_SUBDOMAIN" && -n "$branch" ]]; then
-    # When a subdomain is configured, always use url_for() for the browser URL
+    # When a subdomain is configured, use the actual folder's browser URL
     # (.env APP_URL is a Laravel internal config without subdomain prefix)
-    url="$(url_for "$repo" "$branch")"
+    url="$(worktree_site_url "$wt_path")"
   elif [[ -f "$wt_path/.env" ]]; then
     # Extract APP_URL using pure Zsh (no subprocess spawns)
     local line
@@ -7333,7 +7438,7 @@ _display_worktree() {
     fi
   fi
   # Fall back to the canonical derived URL when no trusted .env URL was found.
-  [[ -z "$url" && -n "$branch" ]] && url="$(url_for "$repo" "$branch")"
+  [[ -z "$url" && -n "$branch" ]] && url="$(worktree_site_url "$wt_path")"
   [[ -z "$url" ]] && url="https://${folder}.test"
 
   # Use cached status if available, fallback to direct git calls
@@ -8489,7 +8594,11 @@ cmd_health() {
         # Reuse already-collected worktrees instead of calling git worktree list per database
         for wt_entry in "${health_worktrees[@]}"; do
           hw_branch="${wt_entry##*|}"
-          wt_db="$(db_name_for "$repo" "$hw_branch")"
+          wt_db="$(db_name_for "$repo" "$hw_branch" "${wt_entry%%|*}")" || {
+            warn "Database identity unknown for $hw_branch"
+            found=true
+            break
+          }
           [[ "$wt_db" == "$db" ]] && found=true && break
         done
 
@@ -9697,7 +9806,6 @@ cmd_exec_all() {
 
   # Multi-repo mode
   if [[ "${ALL_REPOS:-false}" == true ]]; then
-    shift || true
     local cmd=("$@")
     (( ${#cmd[@]} > 0 )) || error_exit "INVALID_INPUT" "Usage: grove exec-all --all-repos <command...>" 2
 
@@ -9828,15 +9936,17 @@ cmd_info() {
 
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
 
   if [[ ! -d "$wt_path" ]]; then
     error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
   fi
 
   # Collect all data first (shared between JSON and text output)
-  local url; url="$(url_for "$repo" "$branch")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+  local url; url="$(worktree_url "$repo" "$branch" "$wt_path")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
   local sha; sha="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || sha=""
   local short_sha; short_sha="$(git -C "$wt_path" rev-parse --short HEAD 2>/dev/null)" || short_sha=""
   local last_msg; last_msg="$(git -C "$wt_path" log -1 --format='%s' 2>/dev/null)" || last_msg=""
@@ -10125,7 +10235,7 @@ cmd_recent() {
       # loaded — resolving it later would apply the last repo's subdomain to
       # every entry. wt_path/wt_branch contain no '|', so it is the safe field
       # to widen the record with.
-      wt_url="$(url_for "$repo_name" "$wt_branch")"
+      wt_url="$(worktree_url "$repo_name" "$wt_branch" "$wt_path")"
       worktrees+=("$atime|$repo_name|$wt_path|$wt_url|$wt_branch")
     done
   done
@@ -11199,7 +11309,8 @@ _run_artisan() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
   [[ -f "$wt_path/artisan" ]] || error_exit "INVALID_INPUT" "not a Laravel project (no artisan file)" 2
 

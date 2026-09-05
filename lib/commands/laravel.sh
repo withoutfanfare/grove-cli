@@ -32,7 +32,8 @@ _run_artisan() {
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")"
+  local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
   [[ -f "$wt_path/artisan" ]] || error_exit "INVALID_INPUT" "not a Laravel project (no artisan file)" 2
 

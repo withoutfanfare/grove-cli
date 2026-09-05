@@ -12,7 +12,10 @@ load '../test-helper'
 setup() {
   setup_test_environment
 
-  export GROVE_SCRIPT="$GROVE_ROOT/grove"
+  # Build an isolated artefact so these tests exercise the modular sources
+  # without modifying the checked-in distribution file.
+  export GROVE_SCRIPT="$TEST_TEMP_DIR/grove"
+  zsh "$GROVE_ROOT/build.sh" --output "$GROVE_SCRIPT" >/dev/null
 
   # GROVE_GROUPS_FILE is "$HOME/.grove/groups", resolved at script load, so we
   # point HOME at the test temp dir and seed the groups file there.
@@ -168,6 +171,45 @@ seed_group() {
   run_grove exec-all apphome "touch .grove-exec-ran"
   [ "$status" -eq 0 ]
   [ -f "$HERD_ROOT/apphome-worktrees/main/.grove-exec-ran" ]
+}
+
+# Regression coverage for --all-repos: parse_flags removes the flag before
+# cmd_exec_all is called, so the executable must remain the first argument.
+@test "exec-all --all-repos: runs a single-word command" {
+  seed_repo_with_worktree apphome main
+  seed_repo_with_worktree appauth main
+
+  run_grove exec-all --all-repos true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"apphome"* ]]
+  [[ "$output" == *"appauth"* ]]
+}
+
+@test "exec-all --all-repos: runs a multiword command in every worktree" {
+  seed_repo_with_worktree apphome main
+  seed_repo_with_worktree appauth main
+
+  run_grove exec-all --all-repos touch .grove-all-repos-ran
+  [ "$status" -eq 0 ]
+  [ -f "$HERD_ROOT/apphome-worktrees/main/.grove-all-repos-ran" ]
+  [ -f "$HERD_ROOT/appauth-worktrees/main/.grove-all-repos-ran" ]
+}
+
+@test "exec-all --all-repos: preserves commands after the -- sentinel" {
+  seed_repo_with_worktree apphome main
+  seed_repo_with_worktree appauth main
+
+  run_grove exec-all --all-repos -- touch .grove-sentinel-ran
+  [ "$status" -eq 0 ]
+  [ -f "$HERD_ROOT/apphome-worktrees/main/.grove-sentinel-ran" ]
+  [ -f "$HERD_ROOT/appauth-worktrees/main/.grove-sentinel-ran" ]
+}
+
+@test "exec-all --all-repos: reports a failing command" {
+  seed_repo_with_worktree apphome main
+
+  run_grove exec-all --all-repos false
+  [[ "$output" == *"failed"* ]]
 }
 
 # ============================================================================

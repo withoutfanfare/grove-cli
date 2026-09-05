@@ -50,7 +50,7 @@ STUB
   awk '/^resolve_repo_arg\(\) \{/,/^\}/' "$GROVE_ROOT/lib/commands/navigation.sh" >> "$NAV_FNS"
 
   # A worktree directory whose .env we vary per test.
-  WT="$TEST_TEMP_DIR/wt"
+  WT="$TEST_TEMP_DIR/feature-login"
   export WT
   mkdir -p "$WT"
 }

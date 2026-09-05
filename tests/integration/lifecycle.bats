@@ -59,7 +59,9 @@ to_json_bool() {
 # --- cross-module path/validation helpers used by cmd_rm ---
 validate_name() { return 0; }
 ensure_bare_repo() { return 0; }
+load_repo_config() { return 0; }
 restart_herd_service() { return 0; }
+worktree_url() { url_for "$1" "$2"; }
 run_hooks() { return 0; }
 cleanup_herd_site() { return 0; }
 count_lines() { print -r -- 1; }
