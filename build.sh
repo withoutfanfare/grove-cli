@@ -64,7 +64,7 @@ MODULES=(
   "10-interactive.sh"
   "11-resilience.sh"
   "12-deps.sh"
-  "13-ledger.sh"
+  "13-removal-gate.sh"
 )
 
 COMMAND_MODULES=(

@@ -157,16 +157,6 @@ _display_worktree() {
     fi
     json_item+="\"merged\": $merged, "
     json_item+="\"stale\": $stale"
-    # The optional ledger overlay, exactly as `grove status --json` carries it.
-    # It has to be on BOTH: Grove desktop reads `ls --json` (see get_worktrees
-    # in grove's src-tauri/src/wt.rs), never `status --json`, so while this key
-    # existed only on `status` the overlay never reached the app and its badges
-    # had nothing to render. Additive and last: an empty REPLY omits the key
-    # entirely, and an older consumer sees precisely the document it always saw.
-    local ledger_json=""
-    ledger_overlay_json "$wt_path"
-    [[ -n "$REPLY" ]] && ledger_json=", \"ledger\": $REPLY"
-    json_item+="$ledger_json"
     json_item+="}"
 
     REPLY="$json_item"
@@ -223,17 +213,11 @@ cmd_ls() {
     return 0
   fi
 
-  # One `way` process for the whole listing; rows look themselves up. On any
-  # failure the batch is simply absent and each row falls back to the
-  # three-process path, exactly as shipped before.
-  ledger_overlay_prime "$git_dir"
-
   local json_items=()
 
-  # Render rows CONCURRENTLY. Each row is independent — its own git calls plus,
-  # when the integration is on, three `way` processes for the ledger overlay —
-  # and at roughly 1.5s apiece a repo with fifteen worktrees took ~30s to list,
-  # which reads as a hang in the desktop app rather than as slowness.
+  # Render rows CONCURRENTLY. Each row is independent — its own git calls —
+  # and walked serially a repo with fifteen worktrees read as a hang in the
+  # desktop app rather than as slowness.
   #
   # parallel_collect replays both stdout and REPLY in INPUT order, so the text
   # table and the JSON array keep exactly the ordering the serial loop produced.
@@ -252,8 +236,6 @@ cmd_ls() {
   for _ls_row in "${_ls_rows[@]}"; do
     [[ -n "$_ls_row" ]] && json_items+=("$_ls_row")
   done
-
-  ledger_overlay_done
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     format_json "[${(j:, :)json_items}]"
@@ -371,12 +353,7 @@ _display_status_row() {
     json_escape "$b"; local _je_b="$REPLY"
     json_escape "$p"; local _je_p="$REPLY"
     json_escape "$sha"; local _je_sha="$REPLY"
-    # Optional, nested and additive: every field an existing consumer reads
-    # keeps its meaning, so today's Grove desktop parses this unchanged.
-    local ledger_json=""
-    ledger_overlay_json "$p"
-    [[ -n "$REPLY" ]] && ledger_json=", \"ledger\": $REPLY"
-    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged$ledger_json}"
+    REPLY="{\"branch\": \"$_je_b\", \"path\": \"$_je_p\", \"sha\": \"$_je_sha\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead_json, \"behind\": $behind_json, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}"
   else
     printf "  %-28s ${state_color}%-10s${C_RESET} %-14s %-6s %-7s ${C_DIM}%-10s${C_RESET}\n" \
       "$branch_display" "$state_icon" "$sync_display" "$age_display" "$merged_icon" "$sha"
@@ -417,10 +394,6 @@ cmd_status() {
     return 0
   fi
 
-  # One `way` process for the whole table; rows look themselves up, and the
-  # absence of a batch falls back to the per-row path.
-  ledger_overlay_prime "$git_dir"
-
   # JSON output mode
   local json_items=()
 
@@ -443,8 +416,6 @@ cmd_status() {
     [[ -n "$REPLY" ]] && json_items+=("$REPLY")
     [[ -n "$REPLY2" ]] && mismatches+=("$REPLY2")
   done
-
-  ledger_overlay_done
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then

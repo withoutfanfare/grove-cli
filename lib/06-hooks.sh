@@ -94,8 +94,6 @@ _run_single_hook() {
     # forced — never so it can skip its own checks. Forcing git and accepting
     # the loss of unrecorded work are different decisions.
     [[ "$FORCE" == true ]] && export GROVE_FORCE="true"
-    # A one-use ledger acknowledgement token, when the operator supplied one.
-    [[ -n "${LEDGER_ACK:-}" ]] && export GROVE_LEDGER_ACK="$LEDGER_ACK"
 
     # Run hook from the worktree directory
     cd "$wt_path" 2>/dev/null || cd "$HOME"
