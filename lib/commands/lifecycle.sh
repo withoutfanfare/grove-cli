@@ -333,10 +333,6 @@ cmd_add() {
   transaction_commit
 
   # Run post-add hooks
-  # Register before the post-add hooks so a hook can already resume the ledger.
-  # Best effort: a failure here never undoes a successful add.
-  ledger_register "$wt_path"
-
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   # Restart Herd services to pick up new site
@@ -391,38 +387,21 @@ cmd_rm() {
     error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use -f to force removal" 4
   fi
 
-  # Worktree Ledger gate. Deliberately BEFORE the pre-rm hooks and before git
+  # The removal gate. Deliberately BEFORE the pre-rm hooks and before git
   # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
-  # it does not accept the loss of work nobody has recorded. The only way past
-  # this is a one-use token from `way worktree removal-check --acknowledge`,
-  # supplied as --ledger-ack.
-  if ! ledger_check_removal "$wt_path" "$LEDGER_ACK"; then
-    error_exit "LEDGER_BLOCKED" "removal blocked by the worktree ledger (see above). To proceed, run 'way worktree removal-check --acknowledge' in the worktree and pass the token with --ledger-ack" 6
-  fi
-
-  # Read the ledger id while the worktree still exists — it is the only handle
-  # left on the record once the folder has gone, and without it the removed
-  # worktree stays `active` in the ledger for ever.
-  local ledger_id=""
-  ledger_worktree_id "$wt_path"
-  ledger_id="$REPLY"
-
-  # Check for uncommitted changes and confirm (unless --force)
-  if [[ "$FORCE" == false ]]; then
-    local wt_status; wt_status="$(git -C "$wt_path" status --porcelain 2>/dev/null)" ||
-      error_exit "GIT_ERROR" "could not check worktree changes; removal aborted" 4
-    if [[ -n "$wt_status" ]]; then
-      if [[ "$JSON_OUTPUT" == true ]]; then
-        error_exit "DIRTY_WORKTREE" "worktree has uncommitted changes; preserve them or explicitly use --force" 4
-      fi
-      local changes; changes="$(count_lines "$wt_status")"
-      warn "Worktree has ${C_BOLD}$changes${C_RESET}${C_YELLOW} uncommitted change(s):${C_RESET}"
-      git -C "$wt_path" status --short
-      print -n "${C_YELLOW}Continue with removal? [y/N]${C_RESET} "
-      local response
-      read -r response
-      [[ "$response" =~ ^[Yy]$ ]] || error_exit "INVALID_INPUT" "aborted by user" 2
+  # it does not accept the loss of unsaved work. The gate says exactly what
+  # would go — uncommitted changes, commits no remote has, a live agent session
+  # — and the only way past it is to read that and confirm in person. --json
+  # has no bypass: a script cannot accept a loss on anyone's behalf.
+  if ! removal_gate "$wt_path"; then
+    if [[ "$JSON_OUTPUT" == true ]]; then
+      error_exit "REMOVAL_BLOCKED" "$REPLY" 6
     fi
+    print -r -- "${C_YELLOW}$REPLY${C_RESET}" >&2
+    print -n "${C_YELLOW}Remove anyway? [y/N]${C_RESET} "
+    local response
+    read -r response
+    [[ "$response" =~ ^[Yy]$ ]] || error_exit "INVALID_INPUT" "aborted by user" 2
   fi
 
   # Run pre-rm hooks
@@ -487,12 +466,6 @@ cmd_rm() {
 
   info "Pruning stale worktrees..."
   git --git-dir="$git_dir" worktree prune
-
-  # Close the ledger record now the worktree is genuinely gone. Best effort: the
-  # removal has already succeeded, so a bookkeeping failure must not report it
-  # as a failure. Refs are retained — archiving records the end of the work, it
-  # does not destroy anything.
-  ledger_archive "$ledger_id" "removed by grove"
 
   # Run post-rm hooks
   run_hooks "post-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
@@ -649,9 +622,6 @@ cmd_move() {
   transaction_commit
 
   # Run post-move hooks (with new path, URL, and db_name)
-  # The worktree id is unchanged; only its observed path moves.
-  ledger_moved "$new_wt_path"
-
   run_hooks "post-move" "$repo" "$branch" "$new_wt_path" "$new_url" "$db_name"
 
   print -r -- ""

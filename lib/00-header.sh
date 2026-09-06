@@ -43,12 +43,6 @@ GROVE_DIR=""
 # Global flags
 QUIET=false
 FORCE=false
-# A one-use Worktree Ledger acknowledgement token (--ledger-ack). Separate from
-# FORCE on purpose: -f forces git, a token accepts the loss of recorded risk.
-LEDGER_ACK=""
-# Worktree Ledger integration: auto (use it when `way` is present), off, or
-# required (an unavailable ledger blocks removal).
-LEDGER_INTEGRATION="${LEDGER_INTEGRATION:-auto}"
 JSON_OUTPUT=false
 PRETTY_JSON=false
 DRY_RUN=false

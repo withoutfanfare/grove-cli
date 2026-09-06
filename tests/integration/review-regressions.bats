@@ -112,7 +112,10 @@ HOOK
   record_hooks
   grove_run rm demo feature/dirty --json
   assert_json_error
-  [[ "$output" == *DIRTY_WORKTREE* ]]
+  [[ "$output" == *REMOVAL_BLOCKED* ]]
+  # The gate's account of the loss travels in the message, newlines intact.
+  [[ "$output" == *'would lose:'* ]]
+  [[ "$output" == *'\n'* ]]
   [ -f "$HERD_ROOT/demo-worktrees/feature-dirty/untracked" ]
   [ ! -e "$HERD_ROOT/hook-events" ]
 }
@@ -142,6 +145,9 @@ HOOK
   grove_run info demo feature/long --json
   [ "$status" -eq 0 ]
   OUTPUT="$output" python3 -c 'import json,os; d=json.loads(os.environ["OUTPUT"]); assert d["database"]["name"] == "demo__short"; assert d["url"] == "https://api.renamed.test"'
+  # The move rewrote APP_URL in .env. The removal gate blocks on any
+  # uncommitted change and --force does not bypass it, so save that first.
+  git -C "$HERD_ROOT/demo-worktrees/renamed" -c user.name=Test -c user.email=test@example.invalid commit -q -am env-moved
   grove_run rm demo feature/long --force --drop-db --json
   [ "$status" -eq 0 ]
   [ ! -d "$HERD_ROOT/demo-worktrees/renamed" ]

@@ -113,7 +113,7 @@ Removes a worktree with cleanup of associated resources.
 **Usage**
 
 ```bash
-grove rm [-f] [--delete-branch] [--drop-db] [--no-backup] [--ledger-ack <token>] <repo> [branch]
+grove rm [-f] [--delete-branch] [--drop-db] [--no-backup] <repo> [branch]
 ```
 
 If `branch` is omitted and `fzf` is installed, an interactive picker is shown.
@@ -122,7 +122,7 @@ If `branch` is omitted and `fzf` is installed, an interactive picker is shown.
 
 | Flag | Description |
 |------|-------------|
-| `-f`, `--force` | Skip uncommitted changes warning and protected branch check |
+| `-f`, `--force` | Skip the protected branch check (never the removal gate) |
 | `--delete-branch` | Also delete the local git branch |
 | `--drop-db` | Request that the database be dropped (delegated to hooks) |
 | `--no-backup` | Request that the database backup be skipped (delegated to hooks) |
@@ -137,12 +137,7 @@ grove rm example-app
 # Explicit branch
 grove rm example-app feature/done
 
-# When the Worktree Ledger refuses a removal, `-f` does NOT override it.
-# Issue a one-use code first, then pass it:
-way worktree removal-check --acknowledge      # run inside the worktree
-grove rm -f --ledger-ack ack1.ack_019f… example-app feature/done
-
-# Force remove (bypass warnings)
+# Force remove (protected branch; the removal gate still runs)
 grove rm -f example-app feature/done
 
 # Remove worktree and delete the local branch
@@ -169,8 +164,8 @@ grove rm -f --delete-branch --drop-db example-app feature/done
 
 - Protected branches (`staging`, `main`, `master`) require `-f` to remove
 - Requires the requested branch to match an exact registered Git worktree
-- Warns if there are uncommitted changes (override with `-f`); with `--json`, a dirty worktree fails without prompting and returns `DIRTY_WORKTREE`
-- `-f` retains the separate Worktree Ledger gate; use `--ledger-ack` when the ledger requires an acknowledgement
+- Runs the removal gate (`wt-removal-check`) before the pre-rm hooks and before git touches anything. Uncommitted changes, commits no remote has, or a live agent session block the removal, and the gate prints exactly what would be lost. `-f` does not bypass it: interactively you are asked `Remove anyway? [y/N]`; with `--json` the removal fails with `REMOVAL_BLOCKED` and the loss in the message, and there is no override
+- A missing `wt-removal-check` also blocks (`REMOVAL_BLOCKED`): unsaved work cannot be ruled out without it. Set `GROVE_REMOVAL_CHECK_BIN` if it lives somewhere unusual
 - `--delete-branch` only removes the local branch, not the remote
 
 **JSON output**

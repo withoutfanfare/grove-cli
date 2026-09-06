@@ -26,11 +26,24 @@ setup_test_environment() {
   # Disable colours for testing
   export NO_COLOR=1
 
-  # Keep the suite hermetic from whichever `way` binary happens to be installed
-  # on the developer's machine. The ledger integration is exercised deliberately
-  # by tests/integration/ledger.bats, which turns it on with its own stub; every
-  # other test must behave as it did before the integration existed.
-  export LEDGER_INTEGRATION=off
+  # Keep the suite hermetic from whichever `wt-removal-check` is installed on
+  # the developer's machine: `grove rm` refuses to run without the gate, so
+  # every test gets this stand-in. It blocks on uncommitted changes only. The
+  # real gate also blocks on commits no remote has, and a bare clone of a
+  # local seed carries no remote-tracking refs, so under it every test
+  # worktree would look unsaved. The gate itself is exercised by
+  # tests/integration/removal-gate.bats with stubs each test controls.
+  export GROVE_REMOVAL_CHECK_BIN="$TEST_TEMP_DIR/wt-removal-check"
+  cat > "$GROVE_REMOVAL_CHECK_BIN" <<'GATE'
+#!/bin/sh
+dir="${1:-.}"
+git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+changes="$(git -C "$dir" status --porcelain 2>/dev/null)"
+[ -n "$changes" ] || exit 0
+printf 'Removing %s would lose:\n  - uncommitted change(s):\n%s\n' "$dir" "$changes"
+exit 1
+GATE
+  chmod +x "$GROVE_REMOVAL_CHECK_BIN"
 
   # Set test defaults
   export DEFAULT_BASE="origin/main"

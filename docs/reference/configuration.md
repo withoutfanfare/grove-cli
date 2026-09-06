@@ -230,7 +230,7 @@ See [Hooks](#hooks) below for resolution order, gating behaviour, and the enviro
 | Key | Type | Default | Env override | Path | Repo | Description |
 |---|---|---|---|:--:|:--:|---|
 | `GROVE_MAX_PARALLEL` | integer | `4` | `GROVE_MAX_PARALLEL` | | | Maximum concurrent operations for parallel commands (`pull-all`, `build-all`, `exec-all`, `prune --all-repos`). Validated as a positive integer. |
-| `GROVE_STATUS_PARALLEL` | integer | `8` | `GROVE_STATUS_PARALLEL` | | | Maximum concurrent per-worktree status lookups in `grove ls` (git status, ahead/behind, health, and the ledger overlay). Deliberately separate from `GROVE_MAX_PARALLEL`, which bounds *mutating* work against a remote; gathering status is read-only and local, so it runs wider. Set to `1` for a serial walk. A non-numeric or zero value falls back to serial rather than failing. |
+| `GROVE_STATUS_PARALLEL` | integer | `8` | `GROVE_STATUS_PARALLEL` | | | Maximum concurrent per-worktree status lookups in `grove ls` (git status, ahead/behind, and health). Deliberately separate from `GROVE_MAX_PARALLEL`, which bounds *mutating* work against a remote; gathering status is read-only and local, so it runs wider. Set to `1` for a serial walk. A non-numeric or zero value falls back to serial rather than failing. |
 | `GROVE_STALE_THRESHOLD` | integer | `50` | `GROVE_STALE_THRESHOLD` | | ✓ | Commits behind base before a branch is marked **stale** in `grove status`/`grove dashboard`. Validated as a non-negative integer; invalid values fall back to `50` with a warning. |
 | `GROVE_SHARED_DEPS_DIR` | path | `$HOME/.grove/shared-deps` | `GROVE_SHARED_DEPS_DIR` | ✓ | | Cache directory used by `grove share-deps` for shared `vendor`/`node_modules`. |
 
@@ -441,17 +441,16 @@ GROVE_URL_SUBDOMAIN=api
 4. **Mind the namespace split** — config files use names like `DEFAULT_BASE`; the matching shell environment variable is `GROVE_BASE_DEFAULT`. See the [mapping table](#config-file-keys-vs-environment-variables).
 5. **Quote values with spaces** (e.g. `PROTECTED_BRANCHES`), and remember `~`/`$HOME` only expand for path-typed keys.
 
-## Worktree Ledger
+## Removal gate
 
-Optional integration with Waypoint's Worktree Ledger, which refuses to remove a
-worktree holding work nobody has recorded. See
-[the guide](../guides/worktree-ledger.md).
+`grove rm` asks `wt-removal-check` whether removing the worktree would lose
+anything — uncommitted changes, commits no remote has, or a live agent session —
+and refuses when it would. See the `rm` entry in [Commands](commands.md).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `LEDGER_INTEGRATION` | `auto` | `auto` uses the ledger when `way` is available; `off` never does; `required` also refuses removal when the ledger cannot answer. |
-| `GROVE_WAY_BIN` | *(unset)* | Explicit path to the `way` binary. Otherwise `PATH` is searched, then the usual install locations — a GUI-launched process does not inherit the shell `PATH`. |
+| `GROVE_REMOVAL_CHECK_BIN` | *(unset)* | Explicit path to `wt-removal-check`. Otherwise `PATH` is searched, then `~/.local/bin` and `~/.claude/bin` — a GUI-launched process does not inherit the shell `PATH`. |
 
-`grove rm -f` does **not** bypass the gate. To proceed past a refusal, issue a
-one-use token with `way worktree removal-check --acknowledge` and pass it as
-`grove rm --ledger-ack <token>`.
+`grove rm -f` does **not** bypass the gate, and a gate that cannot be found
+blocks too. Interactively the loss is shown and you are asked to confirm; with
+`--json` the removal fails with `REMOVAL_BLOCKED` and there is no override.
