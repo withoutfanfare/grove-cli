@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Making Changes
 
 1. **Edit source files** in `lib/` directories:
-   - Core functionality: `lib/00-header.sh` through `lib/12-deps.sh`
+   - Core functionality: `lib/00-header.sh` through `lib/13-removal-gate.sh`
    - Commands: `lib/commands/*.sh`
    - Main entry point: `lib/99-main.sh`
 
@@ -76,6 +76,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Git operations** (fetch, sync, branch checks) → `lib/04-git.sh`
 - **Database operations** (create, backup, remove) → `lib/05-database.sh`
 - **Hook execution** → `lib/06-hooks.sh`
+- **Worktree removal gate** → `lib/13-removal-gate.sh`
 
 **Command Modules:**
 - **Worktree lifecycle** (add, rm, move, clone) → `lib/commands/lifecycle.sh`
@@ -89,28 +90,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Laravel-specific** → `lib/commands/laravel.sh`
 - **Service management** (services: status/start/stop/restart/add/remove/apps/horizon/logs/doctor — Supervisor, Horizon, Reverb, scheduler) → `lib/commands/services.sh` *(also emits the `services apps --json` and `services status --json` data contracts)*
 
-## Worktree Ledger integration (optional)
+## Worktree removal gate
 
-`lib/13-ledger.sh` is the seam to Waypoint's `way` CLI. See
-[docs/guides/worktree-ledger.md](docs/guides/worktree-ledger.md).
+`lib/13-removal-gate.sh` invokes `wt-removal-check` before every worktree
+removal.
 
-- **`-f` is not ledger consent.** `grove rm -f` forces git; it does not accept
-  the loss of work nobody has recorded. Only a one-use `--ledger-ack` token
-  from `way worktree removal-check --acknowledge` opens the gate. Never make
-  `-f` imply it, and never add a flag that does.
-- **Fails closed on risk, open on absence.** `way` exit 1 = blocked (stop);
-  exit 3 = could not answer (proceed in `auto` mode, stop in `required`). A
-  worktree grove could always remove must not become unremovable because
-  Waypoint has nothing to say about it — that is how a safety gate gets
-  switched off within a day.
-- **The degraded mode is always visible.** "No gate ran" and "the gate passed"
-  must never look alike.
-- **Grove never parses ledger Markdown** and never decides what is risky. It
-  asks, relays `way`'s answer verbatim (the remedies matter), and obeys the
-  exit code.
-- **`LEDGER_INTEGRATION=off` in `tests/test-helper.bash`** keeps the suite
-  hermetic from whichever `way` the developer has installed. Only
-  `tests/integration/ledger.bats` turns it on, with its own stub.
+- **`-f` does not bypass the gate.** It forces git and permits protected branch
+  removal; it does not accept the loss of uncommitted changes, unpushed commits,
+  or work owned by a live agent session.
+- **The gate fails closed.** A blocking verdict or missing
+  `wt-removal-check` stops JSON and non-interactive removals. In an interactive
+  terminal, Grove relays the verdict verbatim and requires an explicit
+  `Remove anyway?` confirmation.
+- **Grove does not reproduce the safety checks.** It relays the gate output and
+  uses its exit status. Set `GROVE_REMOVAL_CHECK_BIN` to select a specific
+  executable; otherwise Grove checks `PATH`, `~/.local/bin`, and `~/.claude/bin`.
+- **Tests use a hermetic gate.** `tests/test-helper.bash` points
+  `GROVE_REMOVAL_CHECK_BIN` at a local stub, and
+  `tests/integration/removal-gate.bats` covers gate behaviour.
 - The base ref lives in a per-worktree sidecar (`git rev-parse --git-path
   grove-base`), not `git config --local grove.base`, which resolves from the
   COMMON config on a bare-repo layout. Legacy config is still read and written
