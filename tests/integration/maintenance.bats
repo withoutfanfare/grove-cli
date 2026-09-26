@@ -237,3 +237,72 @@ assert d['issues_fixed'] == 0, d
 assert 'recovery' in d['message'], d
 "
 }
+
+@test "cmd_repair: a missing .git file is not pruned away and --recovery restores it" {
+  setup_repair_repo
+  rm "$TEST_TEMP_DIR/wt-feature/.git"
+  # Without --recovery the damaged worktree's metadata must survive: pruning
+  # first used to delete it and report the loss as a fix.
+  run_repair_zsh "JSON_OUTPUT=true cmd_repair myrepo 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"success": false'* ]]
+  [ -d "$HERD_ROOT/myrepo.git/worktrees/wt-feature" ]
+
+  run_repair_zsh "RECOVERY_MODE=true cmd_repair myrepo 2>&1"
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$TEST_TEMP_DIR/wt-feature" branch --show-current)" = "feature" ]
+}
+
+@test "cmd_repair --recovery: a moved worktree is linked to its own metadata, not a namesake's" {
+  setup_repair_repo
+  local gd="$HERD_ROOT/myrepo.git"
+  git --git-dir="$gd" worktree add -q -b other "$TEST_TEMP_DIR/wt-other" main
+  # Swap names: wt-feature -> wt-renamed, then wt-other -> wt-feature. The
+  # admin dir named "wt-feature" now belongs to the branch "feature" folder
+  # at wt-renamed, not to the folder called wt-feature.
+  git --git-dir="$gd" worktree move "$TEST_TEMP_DIR/wt-feature" "$TEST_TEMP_DIR/wt-renamed"
+  git --git-dir="$gd" worktree move "$TEST_TEMP_DIR/wt-other" "$TEST_TEMP_DIR/wt-feature"
+  echo "garbage" > "$TEST_TEMP_DIR/wt-feature/.git"
+
+  run_repair_zsh "RECOVERY_MODE=true cmd_repair myrepo 2>&1"
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$TEST_TEMP_DIR/wt-feature" branch --show-current)" = "other" ]
+  [ "$(git -C "$TEST_TEMP_DIR/wt-renamed" branch --show-current)" = "feature" ]
+}
+
+@test "cmd_unlock: keeps a fresh or in-use lock, removes an old unheld one" {
+  setup_repair_repo
+  local wts="$HERD_ROOT/myrepo.git/worktrees"
+  : > "$wts/wt-main/index.lock"
+  : > "$wts/wt-feature/index.lock"
+  touch -d '1 hour ago' "$wts/wt-feature/index.lock" 2>/dev/null || touch -t "$(date -v-1H +%Y%m%d%H%M)" "$wts/wt-feature/index.lock"
+
+  run zsh -c "source '$MAINT_FNS'
+source '$GROVE_ROOT/lib/01-core.sh' 2>/dev/null
+source '$GROVE_ROOT/lib/11-resilience.sh'
+info() { :; }; ok() { print -r -- \"OK: \$1\" >&2; }; warn() { print -r -- \"WARN: \$1\" >&2; }; dim() { :; }
+C_BOLD='' C_RESET='' C_CYAN='' C_MAGENTA='' C_DIM=''
+_lock_file_in_use() { return 1; }
+validate_name() { :; }; ensure_bare_repo() { :; }; detect_current_worktree() { return 1; }
+git_dir_for() { print -r -- \"\$HERD_ROOT/\$1.git\"; }
+FORCE=false
+cmd_unlock myrepo 2>&1"
+  [ "$status" -eq 0 ]
+  [ -f "$wts/wt-main/index.lock" ]
+  [ ! -f "$wts/wt-feature/index.lock" ]
+  [[ "$output" == *"under 5 minutes"* ]]
+
+  # A lock held by a running process survives even -f.
+  run zsh -c "source '$MAINT_FNS'
+source '$GROVE_ROOT/lib/01-core.sh' 2>/dev/null
+source '$GROVE_ROOT/lib/11-resilience.sh'
+info() { :; }; ok() { :; }; warn() { print -r -- \"WARN: \$1\" >&2; }; dim() { :; }
+_lock_file_in_use() { return 0; }
+validate_name() { :; }; ensure_bare_repo() { :; }; detect_current_worktree() { return 1; }
+git_dir_for() { print -r -- \"\$HERD_ROOT/\$1.git\"; }
+FORCE=true
+cmd_unlock myrepo 2>&1"
+  [ "$status" -eq 0 ]
+  [ -f "$wts/wt-main/index.lock" ]
+  [[ "$output" == *"in use"* ]]
+}

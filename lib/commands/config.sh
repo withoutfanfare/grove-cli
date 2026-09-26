@@ -428,7 +428,7 @@ cmd_setup() {
   # Test MySQL connection if credentials provided (use MYSQL_PWD for safer password handling)
   if [[ -n "$db_host" && -n "$db_user" ]]; then
     info "   Testing MySQL connection..."
-    local mysql_cmd=(mysql -h "$db_host" -u "$db_user")
+    local mysql_cmd=(mysql -h "$db_host" -P "$DB_PORT" -u "$db_user")
     if MYSQL_PWD="${db_password:-}" "${mysql_cmd[@]}" -e "SELECT 1" >/dev/null 2>&1; then
       ok "   MySQL connection successful"
     else
@@ -503,10 +503,17 @@ DB_HOST="$db_host"
 DB_USER="$db_user"
 EOF
 
-    # Only write password if provided
+    # Only write password if provided. The config parser ends a quoted value
+    # at its first matching quote, so pick the quote the password lacks.
     if [[ -n "$db_password" ]]; then
       warn "   Database password will be stored in plain text"
-      print -r -- "DB_PASSWORD=\"$db_password\"" >> "$config_file"
+      if [[ "$db_password" != *'"'* ]]; then
+        print -r -- "DB_PASSWORD=\"$db_password\"" >> "$config_file"
+      elif [[ "$db_password" != *"'"* ]]; then
+        print -r -- "DB_PASSWORD='$db_password'" >> "$config_file"
+      else
+        warn "   The password contains both ' and \" and cannot be stored; set DB_PASSWORD in the environment instead"
+      fi
     fi
 
     cat >> "$config_file" << EOF
@@ -685,8 +692,10 @@ cmd_group() {
       # Declare loop variables outside loop to avoid zsh re-declaration output
       local git_dir wt_list wt_count
       for repo in ${=repos_str}; do
-        # Validate repo name to prevent injection from tampered group file
-        validate_name "$repo" "repository" 2>/dev/null || {
+        # Validate repo name to prevent injection from tampered group file.
+        # validate_name exits on failure, so run it in a subshell to skip
+        # the bad entry instead of silently ending the whole listing.
+        ( validate_name "$repo" "repository" ) >/dev/null 2>&1 || {
           warn "Invalid repo name in group: $repo (skipping)"
           continue
         }

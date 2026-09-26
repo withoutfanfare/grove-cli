@@ -118,7 +118,8 @@ cmd_code() {
 
   # Resolve @N shortcuts and fuzzy matching
   local original_branch="$branch"
-  branch="$(resolve_branch_ref "$repo" "$branch")"
+  branch="$(resolve_branch_ref "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no worktree matches '$original_branch' in '$repo'" 3
   if [[ "$branch" != "$original_branch" ]]; then
     dim "  Matched: $branch"
   fi
@@ -172,7 +173,8 @@ cmd_open() {
 
   # Resolve @N shortcuts and fuzzy matching
   local original_branch="$branch"
-  branch="$(resolve_branch_ref "$repo" "$branch")"
+  branch="$(resolve_branch_ref "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no worktree matches '$original_branch' in '$repo'" 3
   if [[ "$branch" != "$original_branch" ]]; then
     dim "  Matched: $branch"
   fi
@@ -223,7 +225,8 @@ cmd_cd() {
 
   # Resolve @N shortcuts and fuzzy matching
   local original_branch="$branch"
-  branch="$(resolve_branch_ref "$repo" "$branch")"
+  branch="$(resolve_branch_ref "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no worktree matches '$original_branch' in '$repo'" 3
   if [[ "$branch" != "$original_branch" ]]; then
     # Output match info to stderr so it doesn't interfere with path output
     print -r -- "  Matched: $branch" >&2
@@ -257,7 +260,8 @@ cmd_switch() {
 
   # Resolve @N shortcuts and fuzzy matching
   local original_branch="$branch"
-  branch="$(resolve_branch_ref "$repo" "$branch")"
+  branch="$(resolve_branch_ref "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no worktree matches '$original_branch' in '$repo'" 3
   if [[ "$branch" != "$original_branch" ]]; then
     # Output match info to stderr so it doesn't interfere with path output
     print -r -- "  Matched: $branch" >&2

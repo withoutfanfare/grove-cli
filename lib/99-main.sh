@@ -182,10 +182,43 @@ usage() {
 }
 
 # Parse global flags (can appear anywhere in command line)
+#
+# exec and exec-all run a user command. Once their own positional arguments are
+# in, a flag grove would consume (-f, -q, -v, …) is refused rather than
+# silently taken from that command: `grove exec app main php -v` must not print
+# grove's version, and `artisan migrate --force` must not lose --force. The
+# error points at `--`. Flags grove does not know pass through to the command,
+# and --json/--pretty stay grove's output flags (the JSON contract uses them
+# after the command).
 parse_flags() {
   REMAINING_ARGS=()
   local show_version=false
+  local user_cmd_at=0
   while [[ $# -gt 0 ]]; do
+    # Positional count at which the user command starts (the command word
+    # itself counts as one): exec <repo> <branch>, exec-all <repo|@group>,
+    # or exec-all --all-repos with no repo.
+    case "${REMAINING_ARGS[1]:-}" in
+      exec)     user_cmd_at=3 ;;
+      exec-all) [[ "${ALL_REPOS:-false}" == true ]] && user_cmd_at=1 || user_cmd_at=2 ;;
+      *)        user_cmd_at=0 ;;
+    esac
+    if (( user_cmd_at > 0 && ${#REMAINING_ARGS[@]} >= user_cmd_at )) && [[ "$1" == -?* ]]; then
+      case "$1" in
+        --|--json|--pretty) ;;
+        -q|--quiet|-f|--force|-i|--interactive|--delete-branch|--drop-db|--no-backup|\
+        --dry-run|--check|--all-repos|--recovery|--no-cache|--refresh|--template=*|-t|\
+        --dir|--dir=*|--as|--as=*|-v|--version|-h|--help)
+          setup_colors
+          die "'$1' after the command is ambiguous (it is also a grove flag). Put the command after '--': grove ${REMAINING_ARGS[1]} … -- <command>"
+          ;;
+        *)
+          REMAINING_ARGS+=("$1")
+          shift
+          continue
+          ;;
+      esac
+    fi
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;

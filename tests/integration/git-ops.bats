@@ -314,3 +314,70 @@ _setup_fetchable_repo() {
   [[ "$output" == *"OK:Fetched myrepo"* ]]
   [ "$(git -C "$root/repo.git" rev-parse refs/remotes/origin/main)" = "$remote_tip" ]
 }
+
+@test "prune --json: reports and deletes every merged branch, not just one" {
+  local src="$TEST_TEMP_DIR/prune-src"
+  git init -q -b main "$src"
+  git -C "$src" commit -q --allow-empty -m init
+  git clone -q --bare "$src" "$HERD_ROOT/app.git"
+  git --git-dir="$HERD_ROOT/app.git" branch feat/one main
+  git --git-dir="$HERD_ROOT/app.git" branch feat/two main
+
+  run zsh -c "source '$GIT_OPS_FNS'
+load_repo_config() { DEFAULT_BASE=main; }
+is_protected_branch() { [[ \"\$1\" == main ]]; }
+GROVE_TEST_GIT_DIR='$HERD_ROOT/app.git'; JSON_OUTPUT=true; FORCE=true
+cmd_prune app"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+names = sorted(b['name'] for b in d['merged_branches'])
+assert names == ['feat/one', 'feat/two'], d
+assert d['summary'] == {'branches_found': 2, 'branches_deleted': 2}, d
+"
+  ! git --git-dir="$HERD_ROOT/app.git" rev-parse --verify --quiet feat/one
+}
+
+@test "log --json: a '|' in a commit subject stays in the message field" {
+  local wt="$TEST_TEMP_DIR/log-wt"
+  git init -q -b main "$wt"
+  git -C "$wt" commit -q --allow-empty -m 'fix: a | b'
+
+  run zsh -c "source '$GIT_OPS_FNS'
+resolve_worktree_path() { print -r -- '$wt'; }
+JSON_OUTPUT=true
+cmd_log app main"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+c = json.load(sys.stdin)['commits'][0]
+assert c['message'] == 'fix: a | b', c
+assert c['author'] == 'Test', c
+assert c['date'].startswith('20'), c
+"
+}
+
+@test "changes --json: renamed-then-edited, quoted and non-ASCII paths come back verbatim" {
+  local wt="$TEST_TEMP_DIR/changes-wt"
+  git init -q -b main "$wt"
+  printf 'x\n' > "$wt/old"
+  printf 'y\n' > "$wt/q\"uo te"
+  git -C "$wt" add .
+  git -C "$wt" commit -q -m init
+  git -C "$wt" mv old new
+  printf 'z\n' >> "$wt/new"
+  printf 'w\n' >> "$wt/q\"uo te"
+  printf 'n\n' > "$wt/café.txt"
+
+  run zsh -c "source '$GIT_OPS_FNS'
+resolve_worktree_path() { print -r -- '$wt'; }
+JSON_OUTPUT=true
+cmd_changes app main"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+files = {f['path']: f['status'] for f in json.load(sys.stdin)['files']}
+assert files == {'new': 'R', 'q\"uo te': 'M', 'café.txt': '?'}, files
+"
+}

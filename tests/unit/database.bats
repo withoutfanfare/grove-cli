@@ -221,7 +221,7 @@ EOF
   [[ "$output" == *"umask=0022"* || "$output" == *"umask=022"* ]]
   dump_file="$(find "$TEST_TEMP_DIR/backups" -type f -name '*.sql' -print -quit)"
   [ -n "$dump_file" ]
-  mode="$(stat -f '%Lp' "$dump_file" 2>/dev/null || stat -c '%a' "$dump_file")"
+  mode="$(stat -c '%a' "$dump_file" 2>/dev/null || stat -f '%Lp' "$dump_file")"
   [ "$mode" = "600" ]
 }
 

@@ -82,6 +82,61 @@ run_grove() {
   [[ "$output" != *"CORE COMMANDS"* ]]
 }
 
+@test "exec never silently strips a grove flag from the user command" {
+  local src="$TEST_TEMP_DIR/exec-src"
+  git init -q -b main "$src"
+  git -C "$src" -c user.email=t@t.t -c user.name=T commit -q --allow-empty -m init
+  git clone -q --bare "$src" "$HERD_ROOT/app.git"
+  git --git-dir="$HERD_ROOT/app.git" worktree add -q "$HERD_ROOT/app--main" main
+
+  # -f is also a grove flag: refuse loudly rather than run a different command.
+  run_grove exec app main printf '%s|' -f
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ambiguous"*"--"* ]]
+  run_grove exec app main php -v
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"grove version"* ]]
+
+  # Flags grove does not know pass through; `--` passes grove's own verbatim.
+  run_grove exec app main printf '%s|' -la --force-recreate
+  [ "$status" -eq 0 ]
+  [ "$output" = "-la|--force-recreate|" ]
+  run_grove exec -q app main -- printf '%s|' -i hello -f
+  [ "$status" -eq 0 ]
+  [ "$output" = "-i|hello|-f|" ]
+}
+
+@test "repos --json: no repositories is an empty array, not empty output" {
+  run --separate-stderr zsh -c "HERD_ROOT='$HERD_ROOT' NO_COLOR=1 zsh '$GROVE_SCRIPT' repos --json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+}
+
+@test "--json errors stay valid JSON when the message holds control characters" {
+  run --separate-stderr zsh -c "HERD_ROOT='$HERD_ROOT' NO_COLOR=1 zsh '$GROVE_SCRIPT' --json ls \$'ap\\x1bp'"
+  [ "$status" -ne 0 ]
+  echo "$output" | python3 -c "import json,sys; assert json.load(sys.stdin)['success'] is False"
+}
+
+@test "ls --json: an invalid per-repo DEFAULT_BASE falls back instead of corrupting the JSON" {
+  local src="$TEST_TEMP_DIR/base-src"
+  git init -q -b main "$src"
+  git -C "$src" -c user.email=t@t.t -c user.name=T commit -q --allow-empty -m init
+  git clone -q --bare "$src" "$HERD_ROOT/app.git"
+  git --git-dir="$HERD_ROOT/app.git" worktree add -q "$HERD_ROOT/app--main" main
+  printf 'DEFAULT_BASE=origin/x:y\n' > "$HERD_ROOT/app.git/.groveconfig"
+
+  run --separate-stderr zsh -c "HERD_ROOT='$HERD_ROOT' NO_COLOR=1 zsh '$GROVE_SCRIPT' ls app --json"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+row = json.load(sys.stdin)[0]
+assert isinstance(row['health_score'], int), row
+assert row['health_grade'] in 'ABCDF', row
+"
+  [[ "$stderr" == *"Invalid DEFAULT_BASE"* ]]
+}
+
 @test "grove --help: lists available templates" {
   run_grove --help
   [ "$status" -eq 0 ]
@@ -326,4 +381,44 @@ run_grove() {
   run_grove summary
   [ "$status" -ne 0 ]
   [[ "$output" == *"Usage: grove summary"* ]]
+}
+
+@test "ls/status/health agree: untracked files are dirty, staleness is measured against the base" {
+  local src="$TEST_TEMP_DIR/agree-src" i
+  git init -q -b main "$src"
+  git -C "$src" -c user.email=t@t.t -c user.name=T commit -q --allow-empty -m init
+  git -C "$src" branch feat
+  git -C "$src" checkout -q -b staging
+  for i in 1 2 3 4 5 6; do
+    git -C "$src" -c user.email=t@t.t -c user.name=T commit -q --allow-empty -m "c$i"
+  done
+  git clone -q --bare "$src" "$HERD_ROOT/app.git"
+  git --git-dir="$HERD_ROOT/app.git" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  git --git-dir="$HERD_ROOT/app.git" fetch -q origin
+  git --git-dir="$HERD_ROOT/app.git" worktree add -q "$HERD_ROOT/app-worktrees/feat" feat
+  git -C "$HERD_ROOT/app-worktrees/feat" branch -q -u origin/feat
+  touch "$HERD_ROOT/app-worktrees/feat/.env"
+  printf 'GROVE_STALE_THRESHOLD=3\n' > "$HERD_ROOT/app.git/.groveconfig"
+
+  run --separate-stderr zsh -c "HERD_ROOT='$HERD_ROOT' NO_COLOR=1 zsh '$GROVE_SCRIPT' ls app --json"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)[0]
+assert r['dirty'] is True and r['stale'] is True and r['behind'] == 0, r
+"
+  run --separate-stderr zsh -c "HERD_ROOT='$HERD_ROOT' NO_COLOR=1 zsh '$GROVE_SCRIPT' status app --json"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)[0]
+assert r['dirty'] is True and r['changes'] == 1 and r['stale'] is True, r
+"
+  run --separate-stderr zsh -c "HERD_ROOT='$HERD_ROOT' NO_COLOR=1 zsh '$GROVE_SCRIPT' health app --json"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+w = json.load(sys.stdin)['worktrees'][0]
+assert 'behind:6' in w['issues'] and 'changes:1' in w['issues'], w
+"
 }

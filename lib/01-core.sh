@@ -23,6 +23,34 @@ _get_now() {
   print -r -- "$_GROVE_NOW"
 }
 
+# File metadata via zsh's own stat module. External `stat` is not portable:
+# BSD `stat -f %m` means "filesystem status" to GNU coreutils (Linux, or macOS
+# with Homebrew gnubin first on PATH), which prints a block of text and exits
+# non-zero, so a `stat -f … || stat -c …` fallback captures both outputs.
+# `-F b:zstat` loads only zstat, so the external `stat` is never shadowed.
+zmodload -F zsh/stat b:zstat 2>/dev/null
+
+# file_mtime — Print a path's modification time (epoch seconds); returns 1 if unreadable
+file_mtime() {
+  local -a _fm
+  zstat -A _fm +mtime -- "$1" 2>/dev/null || return 1
+  print -r -- "${_fm[1]}"
+}
+
+# file_owner_uid — Print the numeric owner uid of a path (symlinks followed)
+file_owner_uid() {
+  local -a _fo
+  zstat -A _fo +uid -- "$1" 2>/dev/null || return 1
+  print -r -- "${_fo[1]}"
+}
+
+# file_perms_octal — Print permission bits in octal (e.g. 755, 4755), symlinks followed
+file_perms_octal() {
+  local -a _fp
+  zstat -A _fp +mode -- "$1" 2>/dev/null || return 1
+  printf '%o\n' $(( _fp[1] & 8#7777 ))
+}
+
 # ensure_tool_path — Append standard package-manager, Herd, and system tool
 # directories when missing. Existing entries stay first so callers retain
 # their intentionally selected tool versions.
@@ -231,6 +259,21 @@ load_repo_config() {
   }
 
   _read_config_pairs "$repo_config" _apply_repo_config
+
+  # Validate DEFAULT_BASE here, once, before any caller fans work out to
+  # parallel callbacks: validate_git_ref's error JSON raised inside a callback's
+  # command substitution was captured as a field value, and the command still
+  # exited 0 with invalid JSON. A bad per-repo override falls back to the
+  # global value (so one repo cannot break a multi-repo listing); a bad global
+  # value is a hard error.
+  if ! ( validate_git_ref "$DEFAULT_BASE" "DEFAULT_BASE" ) >/dev/null 2>&1; then
+    local global_base="${GROVE_GLOBAL_DEFAULT_BASE-$DEFAULT_BASE}"
+    if [[ "$DEFAULT_BASE" != "$global_base" ]]; then
+      warn "Invalid DEFAULT_BASE '$DEFAULT_BASE' in ${repo_config}; using '$global_base'."
+      DEFAULT_BASE="$global_base"
+    fi
+    validate_git_ref "$DEFAULT_BASE" "DEFAULT_BASE"
+  fi
 }
 
 # setup_colors — Initialise colour escape codes (disabled for non-TTY and JSON output)
@@ -287,13 +330,20 @@ die_json() {
   local exit_code="${3:-1}"
 
   if [[ "$JSON_OUTPUT" == "true" ]]; then
-    # Escape JSON special characters using pure Zsh (no subprocess spawns)
+    # Escape with json_escape (07-templates.sh), which also handles the other
+    # control characters: the message can relay gate output or user input
+    # verbatim, and one raw control byte makes the whole document invalid.
     local escaped_msg="$message"
-    escaped_msg="${escaped_msg//\\/\\\\}"   # Backslash -> \\
-    escaped_msg="${escaped_msg//\"/\\\"}"   # Double quote -> \"
-    escaped_msg="${escaped_msg//$'\t'/\\t}" # Tab -> \t
-    escaped_msg="${escaped_msg//$'\n'/\\n}" # Newline -> \n
-    escaped_msg="${escaped_msg//$'\r'/\\r}" # Carriage return -> \r
+    if (( $+functions[json_escape] )); then
+      json_escape "$message"; escaped_msg="$REPLY"
+    else
+      escaped_msg="${escaped_msg//\\/\\\\}"   # Backslash -> \\
+      escaped_msg="${escaped_msg//\"/\\\"}"   # Double quote -> \"
+      escaped_msg="${escaped_msg//$'\t'/\\t}" # Tab -> \t
+      escaped_msg="${escaped_msg//$'\n'/\\n}" # Newline -> \n
+      escaped_msg="${escaped_msg//$'\r'/\\r}" # Carriage return -> \r
+      escaped_msg="${escaped_msg//[$'\x01'-$'\x1f']/?}" # Other control chars
+    fi
     print -r -- "{\"success\": false, \"error\": {\"code\": \"$code\", \"message\": \"$escaped_msg\"}}"
   else
     print -r -- "${C_RED}✖ ERROR:${C_RESET} $message" >&2

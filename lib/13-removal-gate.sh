@@ -16,11 +16,20 @@
 #
 # A GUI-launched process does not inherit the shell PATH, so the install
 # locations are probed as well.
+#
+# An explicit GROVE_REMOVAL_CHECK_BIN is used alone: when it names nothing
+# runnable, falling back to another gate would silently drop the one the user
+# chose, so it fails instead.
 removal_check_binary() {
+  if [[ -n "${GROVE_REMOVAL_CHECK_BIN:-}" ]]; then
+    command -v "$GROVE_REMOVAL_CHECK_BIN" >/dev/null 2>&1 || return 1
+    print -r -- "$GROVE_REMOVAL_CHECK_BIN"
+    return 0
+  fi
+
   local candidate
-  for candidate in "${GROVE_REMOVAL_CHECK_BIN:-}" wt-removal-check \
+  for candidate in wt-removal-check \
     "$HOME/.local/bin/wt-removal-check" "$HOME/.claude/bin/wt-removal-check"; do
-    [[ -n "$candidate" ]] || continue
     if command -v "$candidate" >/dev/null 2>&1; then
       print -r -- "$candidate"
       return 0
@@ -48,7 +57,11 @@ removal_gate() {
 
   local gate=""
   if ! gate="$(removal_check_binary)"; then
-    REPLY="the worktree removal gate (wt-removal-check) was not found, so unsaved work cannot be ruled out"
+    if [[ -n "${GROVE_REMOVAL_CHECK_BIN:-}" ]]; then
+      REPLY="GROVE_REMOVAL_CHECK_BIN ($GROVE_REMOVAL_CHECK_BIN) is not an executable, so unsaved work cannot be ruled out"
+    else
+      REPLY="the worktree removal gate (wt-removal-check) was not found, so unsaved work cannot be ruled out"
+    fi
     return 1
   fi
 
@@ -56,4 +69,13 @@ removal_gate() {
   verdict="$("$gate" "$wt_path" 2>&1)" && return 0
   REPLY="$verdict"
   return 1
+}
+
+# removal_can_prompt — True when a person at a terminal can answer the prompt
+#
+# The "Remove anyway?" confirmation is the only way past a block, so it must
+# come from a person: piped or redirected stdin (`echo y | grove rm …`) is a
+# script accepting a loss on someone's behalf, and is refused like --json.
+removal_can_prompt() {
+  [[ -t 0 ]]
 }

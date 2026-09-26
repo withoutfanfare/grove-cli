@@ -302,7 +302,7 @@ EOF
     source \"\$PROJECT_ROOT/lib/01-core.sh\"
     source \"\$PROJECT_ROOT/lib/11-resilience.sh\"
     lock=\"\$TEST_TMPDIR/worktrees/wt/index.lock\"
-    mtime=\$(stat -f %m \"\$lock\" 2>/dev/null || stat -c %Y \"\$lock\")
+    mtime=\$(stat -c %Y \"\$lock\" 2>/dev/null || stat -f %m \"\$lock\")
     # Pretend 'now' is well past the 5-minute staleness window.
     _get_now(){ echo \$((mtime + 1000)); }
     count=\$(check_index_locks \"\$TEST_TMPDIR\" --auto-clean) || exit 1
@@ -325,7 +325,7 @@ EOF
     ( exec 9>\"\$lock\"; sleep 5 ) &
     holder=\$!
     sleep 0.3
-    mtime=\$(stat -f %m \"\$lock\" 2>/dev/null || stat -c %Y \"\$lock\")
+    mtime=\$(stat -c %Y \"\$lock\" 2>/dev/null || stat -f %m \"\$lock\")
     _get_now(){ echo \$((mtime + 1000)); }
     count=\$(check_index_locks \"\$TEST_TMPDIR\" --auto-clean)
     rc=\$?
@@ -336,4 +336,33 @@ EOF
     exit 0
   "
   [ "$status" -eq 0 ]
+}
+
+@test "TRAPEXIT: a top-level subshell does not roll back the parent's transaction" {
+  # zsh runs TRAPEXIT when a top-level $(…) exits. The undo must leave a file
+  # rather than print: a substitution's stdout is captured, not shown.
+  run zsh -c "
+    $STUBS
+    source \"\$PROJECT_ROOT/lib/11-resilience.sh\"
+    undo() { touch '$TEST_TMPDIR/rolled-back'; }
+    transaction_start
+    transaction_register undo
+    x=\"\$(print ok)\"
+    y=\"\$(false)\" || y=default
+    GROVE_TRANSACTION_ACTIVE=false
+  "
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_TMPDIR/rolled-back" ]
+}
+
+@test "TRAPEXIT: a real exit mid-transaction still rolls back" {
+  run zsh -c "
+    $STUBS
+    source \"\$PROJECT_ROOT/lib/11-resilience.sh\"
+    undo() { print -r -- ROLLED_BACK; }
+    transaction_start
+    transaction_register undo
+    exit 1
+  "
+  [[ "$output" == *ROLLED_BACK* ]]
 }

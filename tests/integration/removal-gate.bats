@@ -221,7 +221,8 @@ run_cmd_rm() {
   STDIN_FILE="$TEST_TEMP_DIR/answer"
   printf 'y\n' > "$STDIN_FILE"
 
-  run_cmd_rm "FORCE=false"
+  # bats has no terminal; stand in for a person at one.
+  run_cmd_rm "FORCE=false; removal_can_prompt() { return 0; }"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Remove anyway"* ]]
@@ -234,11 +235,38 @@ run_cmd_rm() {
   STDIN_FILE="$TEST_TEMP_DIR/answer"
   printf 'n\n' > "$STDIN_FILE"
 
-  run_cmd_rm "FORCE=false"
+  # bats has no terminal; stand in for a person at one.
+  run_cmd_rm "FORCE=false; removal_can_prompt() { return 0; }"
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"INVALID_INPUT:aborted by user"* ]]
   [ -d "$WT_FIXTURE" ]
+}
+
+@test "cmd_rm: a piped y cannot confirm a blocked removal" {
+  # Without a terminal the prompt is a script answering for a person, so the
+  # block stands however stdin answers.
+  setup_cmd_rm_harness
+  stub_gate 1 "Removing $WT_FIXTURE would lose: 1 uncommitted change(s)"
+  STDIN_FILE="$TEST_TEMP_DIR/answer"
+  printf 'y\n' > "$STDIN_FILE"
+
+  run_cmd_rm "FORCE=true"
+
+  [ "$status" -eq 6 ]
+  [[ "$output" == *"would lose"* ]]
+  [[ "$output" == *"REMOVAL_BLOCKED"*"interactive terminal"* ]]
+  [[ "$output" != *"Remove anyway"* ]]
+  [ -d "$WT_FIXTURE" ]
+}
+
+@test "gate: a GROVE_REMOVAL_CHECK_BIN that is not executable refuses, never falling back" {
+  # A permissive gate on PATH must not stand in for the one the user chose.
+  stub_gate 0 "Safe to remove"
+  run env PATH="$STUB_BIN:/usr/bin:/bin" GROVE_REMOVAL_CHECK_BIN="$TEST_TEMP_DIR/missing-gate" \
+    zsh -c "source '$GATE_FNS'; removal_gate '$WT' || { print -r -- \"\$REPLY\"; exit 1; }"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GROVE_REMOVAL_CHECK_BIN"*"not an executable"* ]]
 }
 
 @test "cmd_rm: an absent gate refuses the removal" {

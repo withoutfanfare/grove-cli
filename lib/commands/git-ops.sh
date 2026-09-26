@@ -197,33 +197,52 @@ _pull_all_for_repo() {
   [[ -n "$tmpdir" && -d "$tmpdir" ]] || { warn "Could not create temp directory for parallel pull"; return 1; }
   trap "rm -rf '$tmpdir'" EXIT
 
-  # Launch parallel pulls
+  # Launch parallel pulls, at most GROVE_MAX_PARALLEL at a time. The repo was
+  # fetched once above and every worktree shares its remote-tracking refs, so
+  # each job only rebases onto its upstream: a per-worktree `git pull` fetched
+  # from the network again, N times, with N concurrent writers to the same refs.
   local pids=()
   local idx=0
+  local max_jobs="${GROVE_MAX_PARALLEL:-4}"
+  [[ "$max_jobs" =~ ^[1-9][0-9]*$ ]] || max_jobs=4
   local wt_path wt_branch
   for wt_entry in "${worktrees[@]}"; do
     wt_path="${wt_entry%%|*}"
     wt_branch="${wt_entry##*|}"
 
+    # Sliding window: before starting job idx, wait for job idx - max_jobs.
+    (( idx >= max_jobs )) && { wait "${pids[idx - max_jobs + 1]}" 2>/dev/null || true; }
+
     (
       local pull_output pull_exit_code=0
-      pull_output="$(git -C "$wt_path" pull --rebase 2>&1)" || pull_exit_code=$?
-
       local result_status="ok"
       local already_up_to_date=false
       local commits_pulled=0
+      local before_sha after_sha
+
+      before_sha="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || before_sha=""
+      if ! git -C "$wt_path" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+        pull_output="There is no tracking information for the current branch."
+        pull_exit_code=1
+      else
+        # Upstream commits HEAD lacks: what this pull brings in.
+        commits_pulled="$(git -C "$wt_path" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)" || commits_pulled=0
+        # No upstream argument: rebase then uses the configured upstream with
+        # --fork-point, as `git pull --rebase` does.
+        pull_output="$(git -C "$wt_path" rebase 2>&1)" || pull_exit_code=$?
+        # Drop rebase's progress redraws (CR and "erase line" escapes).
+        pull_output="${pull_output//$'\e'\[K/}"
+        pull_output="${pull_output//$'\r'/}"
+      fi
+      after_sha="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || after_sha=""
+      [[ "$commits_pulled" =~ ^[0-9]+$ ]] || commits_pulled=0
 
       if (( pull_exit_code != 0 )); then
         result_status="fail"
-      elif [[ "$pull_output" == *"Already up to date"* ]]; then
+        commits_pulled=0
+      elif [[ "$before_sha" == "$after_sha" ]]; then
         already_up_to_date=true
-      fi
-
-      # Extract commit count from "Updating abc123..def456" in pull output
-      if [[ "$pull_output" =~ Updating\ ([a-f0-9]+)\.\.([a-f0-9]+) ]]; then
-        local from_sha="${match[1]}"
-        local to_sha="${match[2]}"
-        commits_pulled="$(git -C "$wt_path" rev-list --count "$from_sha".."$to_sha" 2>/dev/null)" || commits_pulled=0
+        commits_pulled=0
       fi
 
       # Write the structural fields as a JSON line for later parsing. The message is
@@ -457,16 +476,17 @@ cmd_prune() {
     print -r -- ""
 
     # Build operations for the shared parallel runner using the documented
-    # "<label>|<path>|<command>" convention (see lib/09-parallel.sh). The git command
-    # uses an absolute --git-dir, so the path field is only the run directory; HERD_ROOT
-    # is a safe, always-present choice. The runner enforces GROVE_MAX_PARALLEL correctly
-    # and counts a missing result file as a failure (total == succeeded + failed).
+    # "<label>|<path>|<command>" convention (see lib/09-parallel.sh). The run
+    # directory is the bare repo itself, so git finds it without the path ever
+    # entering the command string: the runner executes that string with sh -c,
+    # and an interpolated directory name would run as shell code. The runner
+    # enforces GROVE_MAX_PARALLEL and counts a missing result file as a failure.
     local operations=()
     local git_dir repo_name
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
       repo_name="${${git_dir:t}%.git}"
-      operations+=("$repo_name|$HERD_ROOT|git --git-dir=\"$git_dir\" worktree prune -v")
+      operations+=("$repo_name|$git_dir|git worktree prune -v")
     done
 
     if (( ${#operations[@]} == 0 )); then
@@ -480,10 +500,11 @@ cmd_prune() {
       _prune_success="$1"; _prune_failed="$2"
       report_results "$1" "$2" "$3"
     }
-    parallel_run _prune_all_results "${operations[@]}"
+    # parallel_run returns 1 when any job fails; still notify, then report it.
+    parallel_run _prune_all_results "${operations[@]}" || true
 
     notify "grove prune" "Completed: $_prune_success success, $_prune_failed failed"
-    return 0
+    (( _prune_failed == 0 ))
   fi
 
   # Single repo mode
@@ -501,7 +522,9 @@ cmd_prune() {
   local prune_output; prune_output="$(LC_ALL=C git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
   local stale_refs_pruned=0
   if [[ -n "$prune_output" ]]; then
-    stale_refs_pruned="$(print -r -- "$prune_output" | grep -c 'Removing' 2>/dev/null)" || stale_refs_pruned=0
+    # Count "Removing …" lines in zsh (no print | grep pipeline).
+    local -a prune_lines=("${(@f)prune_output}")
+    stale_refs_pruned=${#${(M)prune_lines:#*Removing*}}
   fi
   [[ "$JSON_OUTPUT" != true ]] && [[ -n "$prune_output" ]] && print -r -- "$prune_output"
 
@@ -522,7 +545,7 @@ cmd_prune() {
   # Get clean merged-branch names (no '* '/'+ ' markers), excluding protected branches
   # by exact name (is_protected_branch), not a loose substring grep.
   local merged_raw; merged_raw="$(git --git-dir="$git_dir" branch --merged "$base" --format='%(refname:short)' 2>/dev/null)" || merged_raw=""
-  local merged=""
+  local merged="" nl=$'\n'
   local branch_line
   while IFS= read -r branch_line; do
     # Trim leading/trailing whitespace using Zsh parameter expansion
@@ -530,7 +553,8 @@ cmd_prune() {
     branch_line="${branch_line%"${branch_line##*[![:space:]]}"}"
     [[ -n "$branch_line" ]] || continue
     is_protected_branch "$branch_line" && continue
-    merged+="${merged:+$'\n'}$branch_line"
+    # $'\n' stays literal inside "${…:+…}", so join with a newline variable.
+    merged+="${merged:+$nl}$branch_line"
   done <<< "$merged_raw"
 
   # JSON output mode
@@ -651,9 +675,11 @@ cmd_log() {
     local commits_json=()
     local log_output sha msg author date_iso
 
-    # Get commits with specific format for JSON parsing
-    # Format: %H|%s|%an|%aI (full sha, subject, author name, ISO date)
-    while IFS='|' read -r sha msg author date_iso; do
+    # Fields: full sha, author name, ISO date, subject. Split on the ASCII unit
+    # separator (0x1f), which cannot appear in them, and keep the subject last so
+    # even a stray separator stays inside it. A '|' in a subject used to shift
+    # text into the author and date fields.
+    while IFS=$'\x1f' read -r sha author date_iso msg; do
       [[ -z "$sha" ]] && continue
       # Truncate SHA to 7 chars for display
       local short_sha="${sha:0:7}"
@@ -662,7 +688,7 @@ cmd_log() {
       json_escape "$author"; local _je_auth="$REPLY"
       json_escape "$date_iso"; local _je_date="$REPLY"
       commits_json+=("{\"sha\": \"$_je_sha\", \"message\": \"$_je_msg\", \"author\": \"$_je_auth\", \"date\": \"$_je_date\"}")
-    done < <(git -C "$wt_path" log --format='%H|%s|%an|%aI' -n "$count" 2>/dev/null || true)
+    done < <(git -C "$wt_path" log --format='%H%x1f%an%x1f%aI%x1f%s' -n "$count" 2>/dev/null || true)
 
     format_json "{\"commits\": [${(j:, :)commits_json}]}"
     return 0
@@ -821,8 +847,9 @@ cmd_summary() {
     untracked="${rest##* }"
   fi
 
-  local ahead_total; ahead_total="$(git -C "$wt_path" rev-list --count "$base"..HEAD 2>/dev/null || print -r -- 0)"
-  local behind_total; behind_total="$(git -C "$wt_path" rev-list --count HEAD.."$base" 2>/dev/null || print -r -- 0)"
+  # get_ahead_behind's left/right counts are exactly base..HEAD and HEAD..base,
+  # so the totals reuse them rather than running rev-list twice more.
+  local ahead_total="$ahead" behind_total="$behind"
 
   local shortstat; shortstat="$(git -C "$wt_path" diff --shortstat --no-color "$base"..HEAD 2>/dev/null || true)"
   local diffstat; diffstat="$(git -C "$wt_path" diff --stat --no-color "$base"..HEAD 2>/dev/null || true)"
@@ -977,21 +1004,28 @@ cmd_changes() {
     error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
-  # Get git status in porcelain format
-  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+  # Get git status in porcelain format. core.quotePath=false keeps non-ASCII
+  # names readable instead of C-quoted octal escapes.
+  local st; st="$(git -c core.quotePath=false -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
 
   # JSON output mode
   if [[ "$JSON_OUTPUT" == true ]]; then
     local files_json=()
 
     if [[ -n "$st" ]]; then
+      # Re-read with -z: NUL-separated entries are never quoted (paths with
+      # quotes, backslashes or newlines arrive verbatim) and a rename is
+      # "XY new\0old\0" rather than an ambiguous "old -> new".
+      local -a entries=("${(@0)$(git -C "$wt_path" status --porcelain -z 2>/dev/null)}")
       # Declare loop variables outside the loop to avoid zsh re-declaration issues
       local line status_code file_path simple_status
-      while IFS= read -r line; do
+      local -i i=1
+      while (( i <= ${#entries} )); do
+        line="${entries[i]}"
+        i+=1
         [[ -z "$line" ]] && continue
 
-        # Extract status code (first 2 chars) and file path (rest after space)
-        # Porcelain format: XY filename (where XY is the status)
+        # Porcelain format: XY <path> (XY is the two-character status)
         status_code="${line:0:2}"
         file_path="${line:3}"
 
@@ -1003,19 +1037,17 @@ cmd_changes() {
           " M"|"M "|"MM") simple_status="M" ;;
           " A"|"A "|"AM") simple_status="A" ;;
           " D"|"D ") simple_status="D" ;;
-          "R "*)  simple_status="R" ;;
-          "C "*)  simple_status="C" ;;
+          R?)  simple_status="R" ;;
+          C?)  simple_status="C" ;;
           "U"*|*"U")  simple_status="U" ;;  # Unmerged
-          *)  simple_status="${status_code:0:1}" ;;  # First non-space char
+          *)  simple_status="${${status_code// /}:0:1}" ;;  # First non-space char
         esac
 
-        # Handle renamed files (format: R  old -> new)
-        if [[ "$status_code" == "R "* && "$file_path" == *" -> "* ]]; then
-          file_path="${file_path##* -> }"
-        fi
+        # A rename or copy (index side) is followed by its source path; skip it.
+        [[ "$status_code" == [RC]? ]] && i+=1
 
         json_escape "$file_path"; files_json+=("{\"path\": \"$REPLY\", \"status\": \"$simple_status\"}")
-      done <<< "$st"
+      done
     fi
 
     format_json "{\"files\": [${(j:, :)files_json}]}"
@@ -1054,7 +1086,7 @@ cmd_changes() {
         " D"|"D ")
           print -r -- "  ${C_RED}D${C_RESET}  $file_path"
           ;;
-        "R "*)
+        R?)
           print -r -- "  ${C_CYAN}R${C_RESET}  $file_path"
           ;;
         *)

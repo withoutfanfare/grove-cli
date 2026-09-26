@@ -22,30 +22,9 @@ _display_worktree() {
     branch=""
     [[ -n "$head" ]] || head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
   fi
-  local url=""
-  if [[ -n "$GROVE_URL_SUBDOMAIN" && -n "$branch" ]]; then
-    # When a subdomain is configured, use the actual folder's browser URL
-    # (.env APP_URL is a Laravel internal config without subdomain prefix)
-    url="$(worktree_site_url "$wt_path")"
-  elif [[ -f "$wt_path/.env" ]]; then
-    # Extract APP_URL using pure Zsh (no subprocess spawns)
-    local line
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      if [[ "$line" =~ ^[[:space:]]*APP_URL= ]]; then
-        url="${line#*=}"           # After =
-        url="${url%%#*}"           # Before # (comments)
-        url="${url//[\"\' ]}"      # Remove quotes and spaces
-        break
-      fi
-    done < "$wt_path/.env"
-    # The .env is untrusted (a committed value could set javascript: or a foreign
-    # host). Only honour an http(s) URL; otherwise fall back to the derived URL.
-    if [[ -n "$url" && "$url" != http://* && "$url" != https://* ]]; then
-      url=""
-    fi
-  fi
-  # Fall back to the canonical derived URL when no trusted .env URL was found.
-  [[ -z "$url" && -n "$branch" ]] && url="$(worktree_site_url "$wt_path")"
+  # One APP_URL parser for ls, info and recent (worktree_url): a '#' inside
+  # the URL (a fragment route) is kept, and only http(s) values are trusted.
+  local url; url="$(worktree_url "$repo" "$branch" "$wt_path")" || url=""
   [[ -z "$url" ]] && url="https://${folder}.test"
 
   # Use cached status if available, fallback to direct git calls
@@ -54,15 +33,15 @@ _display_worktree() {
   local mismatch=false
 
   if has_cached_status "$wt_path"; then
-    sha="$(get_cached_status "$wt_path" sha)"
-    dirty_status="$(get_cached_status "$wt_path" dirty)"
-    ahead="$(get_cached_status "$wt_path" ahead)"
-    behind="$(get_cached_status "$wt_path" behind)"
+    # get_cached_status sets REPLY; calling it directly avoids a subshell each.
+    get_cached_status "$wt_path" sha >/dev/null; sha="$REPLY"
+    get_cached_status "$wt_path" dirty >/dev/null; dirty_status="$REPLY"
+    get_cached_status "$wt_path" ahead >/dev/null; ahead="$REPLY"
+    get_cached_status "$wt_path" behind >/dev/null; behind="$REPLY"
 
     if [[ "$dirty_status" == "dirty" ]]; then
-      # Need to get actual change count for display
-      local st="$(git -C "$wt_path" status --porcelain 2>/dev/null || true)"
-      local changes="$(count_lines "$st")"
+      get_cached_status "$wt_path" changes >/dev/null
+      local changes="$REPLY"
       state_icon="◐"
       state_color="$C_YELLOW"
       state_text="$changes uncommitted"
@@ -88,10 +67,11 @@ _display_worktree() {
       dirty=true
     fi
 
-    # Get ahead/behind via fallback
-    local counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
-    ahead="${counts%% *}"
-    behind="${counts##* }"
+    # Same measure as the cache: ahead/behind the branch's upstream.
+    _worktree_status_record "$wt_path" "" || REPLY=""
+    local -a rec=("${(@s:|:)REPLY}")
+    ahead="${rec[3]:-$GROVE_UNKNOWN}"
+    behind="${rec[4]:-$GROVE_UNKNOWN}"
   fi
 
   # Check for branch/directory mismatch
@@ -110,6 +90,11 @@ _display_worktree() {
   local health_rest="${health_result#*|}"
   local health_score="${health_rest%%|*}"
   local health_issues="${health_rest#*|}"
+  # Never embed anything but a number: a failure inside the scorer must not
+  # leak text into the JSON contract.
+  if [[ ! "$health_score" =~ ^[0-9]+$ ]]; then
+    health_grade="?" health_score=0 health_issues=""
+  fi
 
   # Calculate new fields for enhanced JSON output
   local last_accessed="" merged=false stale=false
@@ -118,8 +103,9 @@ _display_worktree() {
     # Get last accessed timestamp as ISO 8601
     last_accessed="$(get_last_accessed_iso "$wt_path")"
 
-    # Derive merge status from health issues (avoids duplicate is_branch_merged call)
-    if [[ "$health_issues" != *"unmerged"* ]]; then
+    # Derive merge status from health issues (avoids duplicate is_branch_merged
+    # call). Unknown (base ref unresolved) stays false: the contract is boolean.
+    if [[ ",$health_issues," != *",unmerged,"* && ",$health_issues," != *",merge-unknown,"* ]]; then
       merged=true
     fi
 
@@ -268,19 +254,15 @@ _display_status_row() {
 
   # Use cached status if available, fallback to direct git calls
   if has_cached_status "$p"; then
-    sha="$(get_cached_status "$p" sha)"
-    local dirty_status="$(get_cached_status "$p" dirty)"
-    ahead="$(get_cached_status "$p" ahead)"
-    behind="$(get_cached_status "$p" behind)"
-
-    if [[ "$dirty_status" == "dirty" ]]; then
-      # Need to get actual change count for display
-      st="$(git -C "$p" status --porcelain 2>/dev/null)" || st=""
-      changes="$(count_lines "$st")"
+    # get_cached_status sets REPLY; calling it directly avoids a subshell each.
+    get_cached_status "$p" sha >/dev/null; sha="$REPLY"
+    get_cached_status "$p" ahead >/dev/null; ahead="$REPLY"
+    get_cached_status "$p" behind >/dev/null; behind="$REPLY"
+    get_cached_status "$p" changes >/dev/null; changes="$REPLY"
+    st=""
+    if (( changes > 0 )); then
       state_icon="◐ $changes"
       state_color="$C_YELLOW"
-    else
-      st=""
     fi
   else
     # Fallback to direct git calls
@@ -293,10 +275,11 @@ _display_status_row() {
       state_color="$C_YELLOW"
     fi
 
-    # Get sync status via fallback
-    counts="$(get_ahead_behind "$p" "$DEFAULT_BASE")"
-    ahead="${counts%% *}"
-    behind="${counts##* }"
+    # Same measure as the cache: ahead/behind the branch's upstream.
+    _worktree_status_record "$p" "" || REPLY=""
+    local -a rec=("${(@s:|:)REPLY}")
+    ahead="${rec[3]:-$GROVE_UNKNOWN}"
+    behind="${rec[4]:-$GROVE_UNKNOWN}"
   fi
 
   # Check for mismatch
@@ -308,9 +291,12 @@ _display_status_row() {
     REPLY2="${p:t}|$b|$expected_slug"
   fi
 
-  # Check if stale (exceeds commits-behind threshold). Never feed the unknown
-  # sentinel ("?") into arithmetic; an unknown count can't prove staleness.
-  if [[ "$behind" != "$GROVE_UNKNOWN" ]] && (( behind > stale_threshold )); then
+  # Check if stale: commits behind the BASE branch (as `ls` and `health`
+  # measure it), not behind the upstream shown in the sync column — a pushed
+  # branch is usually level with its upstream however far behind base it is.
+  # Never feed the unknown sentinel ("?") into arithmetic.
+  local base_behind; base_behind="$(get_commits_behind "$p" "$DEFAULT_BASE")"
+  if [[ "$base_behind" != "$GROVE_UNKNOWN" ]] && (( base_behind > stale_threshold )); then
     is_stale=true
     sync_display="${C_RED}↑$ahead ↓$behind${C_RESET}"
   else
@@ -325,10 +311,14 @@ _display_status_row() {
   fi
 
   # Check if merged (cache result for reuse in JSON output)
-  local merged=false
-  if is_branch_merged "$p" "$DEFAULT_BASE"; then
+  local merged=false merged_rc=0
+  is_branch_merged "$p" "$DEFAULT_BASE" || merged_rc=$?
+  if (( merged_rc == 0 )); then
     merged=true
     merged_icon="${C_DIM}✓${C_RESET}"
+  elif (( merged_rc == 2 )); then
+    # Unknown (base ref unresolved): JSON stays boolean false, text shows "?".
+    merged_icon="${C_DIM}?${C_RESET}"
   else
     merged_icon="${C_DIM}-${C_RESET}"
   fi
@@ -345,7 +335,7 @@ _display_status_row() {
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     local dirty=false
-    [[ -n "$st" ]] && dirty=true
+    (( ${changes:-0} > 0 )) && dirty=true
     # Map the unknown sentinel ("?") to JSON null; a bare ? is invalid JSON.
     local ahead_json="$ahead" behind_json="$behind"
     [[ "$ahead_json" == "$GROVE_UNKNOWN" ]] && ahead_json="null"
@@ -374,6 +364,9 @@ cmd_status() {
   local git_dir
   git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
+  # Per-repo DEFAULT_BASE / GROVE_STALE_THRESHOLD overrides apply here too.
+  load_repo_config "$git_dir"
+  stale_threshold="$GROVE_STALE_THRESHOLD"
 
   [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
   if ! cached_fetch "$git_dir" --all --prune --quiet; then
@@ -453,6 +446,7 @@ cmd_repos() {
   local repos; repos="$(list_repos)"
 
   if [[ -z "$repos" ]]; then
+    [[ "$JSON_OUTPUT" == true ]] && { format_json "[]"; return 0; }
     dim "No repositories found in $HERD_ROOT"
     return 0
   fi
@@ -514,7 +508,9 @@ cmd_branches() {
   if [[ "$QUIET" != true && "$JSON_OUTPUT" != true ]]; then
     info "Fetching latest branches..."
   fi
-  git --git-dir="$git_dir" fetch --all --prune --quiet 2>/dev/null || true
+  # Cached: the desktop app's branch picker calls this often, and a network
+  # fetch on every call made it slow. --refresh / --no-cache still force one.
+  cached_fetch "$git_dir" --all --prune --quiet 2>/dev/null || true
 
   # Build associative arrays for O(1) worktree lookups, using the shared helper
   # as the single source of truth (detached-aware).
@@ -544,13 +540,17 @@ cmd_branches() {
   typeset -A local_branches_map
 
   # Declare loop variables outside loops to avoid zsh re-declaration output
-  local has_worktree wt_path_for_branch sha last_commit
+  local has_worktree wt_path_for_branch sha last_commit ref_line branch
+
+  # One for-each-ref per namespace yields name, short SHA and commit time
+  # together (tab-separated; a ref name cannot contain a tab). This replaced
+  # a rev-parse and a log per branch.
+  local ref_format='%(refname)%09%(objectname:short)%09%(committerdate:unix)'
 
   # Local branches
-  while IFS= read -r branch; do
-    [[ -n "$branch" ]] || continue
-    branch="${branch#\* }"  # Remove current branch marker
-    branch="${branch## }"   # Trim leading space
+  while IFS= read -r ref_line; do
+    [[ -n "$ref_line" ]] || continue
+    branch="${${ref_line%%$'\t'*}#refs/heads/}"
 
     # Reset state-carrying variables to prevent bleed between iterations
     has_worktree=false
@@ -567,16 +567,17 @@ cmd_branches() {
       wt_path_for_branch="${worktree_by_branch[$branch]}"
     fi
 
-    sha="$(git --git-dir="$git_dir" rev-parse --short "refs/heads/$branch" 2>/dev/null)" || sha=""
-    last_commit="$(git --git-dir="$git_dir" log -1 --format=%ct "refs/heads/$branch" 2>/dev/null)" || last_commit=""
+    sha="${${ref_line#*$'\t'}%%$'\t'*}"
+    last_commit="${ref_line##*$'\t'}"
+    [[ "$last_commit" =~ ^[0-9]+$ ]] || last_commit=""
 
     branches+=("local|$branch|$has_worktree|$wt_path_for_branch|$sha|$last_commit")
-  done < <(git --git-dir="$git_dir" branch --list --format='%(refname:short)' 2>/dev/null)
+  done < <(git --git-dir="$git_dir" for-each-ref --format="$ref_format" refs/heads 2>/dev/null)
 
   # Remote branches (that don't have local tracking)
-  while IFS= read -r branch; do
-    [[ -n "$branch" ]] || continue
-    branch="${branch#origin/}"
+  while IFS= read -r ref_line; do
+    [[ -n "$ref_line" ]] || continue
+    branch="${${ref_line%%$'\t'*}#refs/remotes/origin/}"
 
     # Skip HEAD
     [[ "$branch" == "HEAD" ]] && continue
@@ -596,11 +597,12 @@ cmd_branches() {
       wt_path_for_branch="${worktree_by_branch[$branch]}"
     fi
 
-    sha="$(git --git-dir="$git_dir" rev-parse --short "origin/$branch" 2>/dev/null)" || sha=""
-    last_commit="$(git --git-dir="$git_dir" log -1 --format=%ct "origin/$branch" 2>/dev/null)" || last_commit=""
+    sha="${${ref_line#*$'\t'}%%$'\t'*}"
+    last_commit="${ref_line##*$'\t'}"
+    [[ "$last_commit" =~ ^[0-9]+$ ]] || last_commit=""
 
     branches+=("remote|$branch|$has_worktree|$wt_path_for_branch|$sha|$last_commit")
-  done < <(git --git-dir="$git_dir" branch -r --list --format='%(refname:short)' 2>/dev/null | grep '^origin/')
+  done < <(git --git-dir="$git_dir" for-each-ref --format="$ref_format" refs/remotes/origin 2>/dev/null)
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -829,9 +831,10 @@ calculate_health_score() {
   local score=100
   local issues=()
 
-  # Check commits behind (max -30 points)
-  local counts; counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
-  local behind="${counts##* }"
+  # Check commits behind the base (max -30 points). "?" (base unresolved)
+  # scores nothing rather than reaching arithmetic.
+  local behind; behind="$(get_commits_behind "$wt_path" "$DEFAULT_BASE")"
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
   if (( behind > 50 )); then
     score=$((score - 30))
     issues+=("behind:$behind")
@@ -843,10 +846,20 @@ calculate_health_score() {
     issues+=("behind:$behind")
   fi
 
-  # Check uncommitted changes (max -20 points)
-  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
-  if [[ -n "$st" ]]; then
-    local changes; changes="$(count_lines "$st")"
+  # Check uncommitted changes (max -20 points). The status cache already
+  # holds the counts; only run git status when it does not.
+  local changes=0 untracked=0 st=""
+  if get_cached_status "$wt_path" changes >/dev/null; then
+    changes="$REPLY"
+    get_cached_status "$wt_path" untracked >/dev/null; untracked="$REPLY"
+  else
+    st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+    if [[ -n "$st" ]]; then
+      changes="$(count_lines "$st")"
+      untracked="$(count_matching "$st" '\?\?*')"
+    fi
+  fi
+  if (( changes > 0 )); then
     if (( changes > 20 )); then
       score=$((score - 20))
       issues+=("changes:$changes")
@@ -872,17 +885,18 @@ calculate_health_score() {
     issues+=("age:${age_days}d")
   fi
 
-  # Check merge status (max -10 points)
-  if ! is_branch_merged "$wt_path" "$DEFAULT_BASE"; then
+  # Check merge status (max -10 points). Return 2 means the base ref does not
+  # resolve, so merge status is unknown: flag it without the unmerged penalty.
+  local merged_rc=0
+  is_branch_merged "$wt_path" "$DEFAULT_BASE" || merged_rc=$?
+  if (( merged_rc == 1 )); then
     score=$((score - 10))
     issues+=("unmerged")
+  elif (( merged_rc == 2 )); then
+    issues+=("merge-unknown")
   fi
 
   # Check untracked files (max -5 points)
-  local untracked=0
-  if [[ -n "$st" ]]; then
-    untracked="$(count_matching "$st" '\?\?*')"
-  fi
   if (( untracked > 10 )); then
     score=$((score - 5))
     issues+=("untracked:$untracked")
@@ -959,10 +973,14 @@ cmd_health() {
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
+  load_repo_config "$git_dir"
 
-  # Collect worktrees once for reuse across all health checks
+  # Collect worktrees once for reuse across all health checks, and gather
+  # their statuses in parallel so each health score reads from the cache.
   local health_worktrees=()
   collect_worktrees "$git_dir" health_worktrees
+  clear_git_cache
+  collect_worktree_statuses "$git_dir"
 
   local wt_path="" branch=""
   local total_score=0 wt_count=0
@@ -1160,7 +1178,7 @@ cmd_health() {
   print -r -- "${C_BOLD}Database Health${C_RESET}"
   if command -v mysql >/dev/null 2>&1; then
     # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-    local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+    local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
     local dbs; dbs="$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
 
@@ -1284,7 +1302,7 @@ cmd_dashboard() {
   local result grade rest score st age_days
   local avg_grade avg_score grade_colored
   local wt wt_branch wt_rest wt_grade wt_score wt_grade_colored
-  local status_parts shown
+  local status_parts shown wt_entry
 
   # Collect data for all repos
   for git_dir in "$HERD_ROOT"/*.git(N); do
@@ -1292,9 +1310,14 @@ cmd_dashboard() {
     repo_name="${${git_dir:t}%.git}"
     total_repos=$((total_repos + 1))
 
-    # Collect worktrees using shared helper
+    # Collect worktrees using shared helper. Each repo is graded against its
+    # own DEFAULT_BASE, and its statuses are gathered once, in parallel, so
+    # the per-worktree health score below reads them from the cache.
     local dash_worktrees=()
     collect_worktrees "$git_dir" dash_worktrees
+    load_repo_config "$git_dir"
+    clear_git_cache
+    collect_worktree_statuses "$git_dir"
 
     repo_wt_count=0
     repo_dirty=0
@@ -1303,7 +1326,6 @@ cmd_dashboard() {
 
     # Collect worktree info for this repo
     local wt_info=()
-    local wt_entry
     for wt_entry in "${dash_worktrees[@]}"; do
       wt_path="${wt_entry%%|*}"
       branch="${wt_entry##*|}"
@@ -1320,8 +1342,12 @@ cmd_dashboard() {
       score="${rest%%|*}"
       repo_grade_sum=$((repo_grade_sum + score))
 
-      # Check dirty
-      st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+      # Check dirty (cache first; git status only if the cache has no entry)
+      if get_cached_status "$wt_path" dirty >/dev/null; then
+        [[ "$REPLY" == dirty ]] && st=dirty || st=""
+      else
+        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+      fi
       if [[ -n "$st" ]]; then
         repo_dirty=$((repo_dirty + 1))
         total_dirty=$((total_dirty + 1))

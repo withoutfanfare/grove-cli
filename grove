@@ -97,6 +97,34 @@ _get_now() {
   print -r -- "$_GROVE_NOW"
 }
 
+# File metadata via zsh's own stat module. External `stat` is not portable:
+# BSD `stat -f %m` means "filesystem status" to GNU coreutils (Linux, or macOS
+# with Homebrew gnubin first on PATH), which prints a block of text and exits
+# non-zero, so a `stat -f … || stat -c …` fallback captures both outputs.
+# `-F b:zstat` loads only zstat, so the external `stat` is never shadowed.
+zmodload -F zsh/stat b:zstat 2>/dev/null
+
+# file_mtime — Print a path's modification time (epoch seconds); returns 1 if unreadable
+file_mtime() {
+  local -a _fm
+  zstat -A _fm +mtime -- "$1" 2>/dev/null || return 1
+  print -r -- "${_fm[1]}"
+}
+
+# file_owner_uid — Print the numeric owner uid of a path (symlinks followed)
+file_owner_uid() {
+  local -a _fo
+  zstat -A _fo +uid -- "$1" 2>/dev/null || return 1
+  print -r -- "${_fo[1]}"
+}
+
+# file_perms_octal — Print permission bits in octal (e.g. 755, 4755), symlinks followed
+file_perms_octal() {
+  local -a _fp
+  zstat -A _fp +mode -- "$1" 2>/dev/null || return 1
+  printf '%o\n' $(( _fp[1] & 8#7777 ))
+}
+
 # ensure_tool_path — Append standard package-manager, Herd, and system tool
 # directories when missing. Existing entries stay first so callers retain
 # their intentionally selected tool versions.
@@ -305,6 +333,21 @@ load_repo_config() {
   }
 
   _read_config_pairs "$repo_config" _apply_repo_config
+
+  # Validate DEFAULT_BASE here, once, before any caller fans work out to
+  # parallel callbacks: validate_git_ref's error JSON raised inside a callback's
+  # command substitution was captured as a field value, and the command still
+  # exited 0 with invalid JSON. A bad per-repo override falls back to the
+  # global value (so one repo cannot break a multi-repo listing); a bad global
+  # value is a hard error.
+  if ! ( validate_git_ref "$DEFAULT_BASE" "DEFAULT_BASE" ) >/dev/null 2>&1; then
+    local global_base="${GROVE_GLOBAL_DEFAULT_BASE-$DEFAULT_BASE}"
+    if [[ "$DEFAULT_BASE" != "$global_base" ]]; then
+      warn "Invalid DEFAULT_BASE '$DEFAULT_BASE' in ${repo_config}; using '$global_base'."
+      DEFAULT_BASE="$global_base"
+    fi
+    validate_git_ref "$DEFAULT_BASE" "DEFAULT_BASE"
+  fi
 }
 
 # setup_colors — Initialise colour escape codes (disabled for non-TTY and JSON output)
@@ -361,13 +404,20 @@ die_json() {
   local exit_code="${3:-1}"
 
   if [[ "$JSON_OUTPUT" == "true" ]]; then
-    # Escape JSON special characters using pure Zsh (no subprocess spawns)
+    # Escape with json_escape (07-templates.sh), which also handles the other
+    # control characters: the message can relay gate output or user input
+    # verbatim, and one raw control byte makes the whole document invalid.
     local escaped_msg="$message"
-    escaped_msg="${escaped_msg//\\/\\\\}"   # Backslash -> \\
-    escaped_msg="${escaped_msg//\"/\\\"}"   # Double quote -> \"
-    escaped_msg="${escaped_msg//$'\t'/\\t}" # Tab -> \t
-    escaped_msg="${escaped_msg//$'\n'/\\n}" # Newline -> \n
-    escaped_msg="${escaped_msg//$'\r'/\\r}" # Carriage return -> \r
+    if (( $+functions[json_escape] )); then
+      json_escape "$message"; escaped_msg="$REPLY"
+    else
+      escaped_msg="${escaped_msg//\\/\\\\}"   # Backslash -> \\
+      escaped_msg="${escaped_msg//\"/\\\"}"   # Double quote -> \"
+      escaped_msg="${escaped_msg//$'\t'/\\t}" # Tab -> \t
+      escaped_msg="${escaped_msg//$'\n'/\\n}" # Newline -> \n
+      escaped_msg="${escaped_msg//$'\r'/\\r}" # Carriage return -> \r
+      escaped_msg="${escaped_msg//[$'\x01'-$'\x1f']/?}" # Other control chars
+    fi
     print -r -- "{\"success\": false, \"error\": {\"code\": \"$code\", \"message\": \"$escaped_msg\"}}"
   else
     print -r -- "${C_RED}✖ ERROR:${C_RESET} $message" >&2
@@ -866,11 +916,18 @@ normalize_branch_name() {
 }
 
 # validate_git_ref — Validate git ref format and block injection characters
+# Refs that passed validate_git_ref this run (memo; see below)
+typeset -gA _GROVE_VALID_REFS
+
 validate_git_ref() {
   local ref="$1" type="${2:-git ref}"
 
   # Empty is sometimes okay (will use default)
   [[ -z "$ref" ]] && return 0
+
+  # Already validated in this run: the same base is checked once per worktree
+  # by several helpers, and the last check spawns `git check-ref-format`.
+  (( ${+_GROVE_VALID_REFS[$ref]} )) && return 0
 
   # Block command injection characters
   if [[ "$ref" == *";"* ]] || [[ "$ref" == *"|"* ]] || [[ "$ref" == *"&"* ]] || \
@@ -906,6 +963,8 @@ validate_git_ref() {
   if ! is_valid_ref_format "$ref"; then
     error_exit "INVALID_INPUT" "Invalid $type: '$ref' (invalid git ref format)" 2
   fi
+
+  _GROVE_VALID_REFS[$ref]=1
 }
 
 # validate_max_parallel — Validate GROVE_MAX_PARALLEL and reset to 4 if invalid
@@ -1027,9 +1086,10 @@ check_branch_directory_match() {
   local actual_branch="$2"
   local repo="$3"
 
-  # Skip bare repo and main worktree (e.g., scooda for staging)
+  # Skip bare repo and main worktree (e.g., scooda for staging), and detached
+  # worktrees: they have no branch, so no directory name can "match" one.
   local folder="${wt_path:t}"
-  if [[ "$folder" != *"--"* ]]; then
+  if [[ "$folder" != *"--"* || "$actual_branch" == "$GROVE_DETACHED_BRANCH" || -z "$actual_branch" ]]; then
     print -r -- "skip"
     return 0
   fi
@@ -1243,7 +1303,7 @@ resolve_recent_shortcut() {
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
       if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git && -d "$wt_path" ]]; then
-        mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+        mtime="$(file_mtime "$wt_path" || echo 0)"
         entries+=("$mtime|$branch")
       fi
       wt_path=""
@@ -1256,7 +1316,7 @@ resolve_recent_shortcut() {
 
   # Handle last entry
   if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git && -d "$wt_path" ]]; then
-    mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+    mtime="$(file_mtime "$wt_path" || echo 0)"
     entries+=("$mtime|$branch")
   fi
 
@@ -1427,6 +1487,11 @@ resolve_branch_ref() {
 # Git result cache (cleared between commands)
 typeset -gA _GROVE_GIT_CACHE
 typeset -gA _GROVE_STATUS_CACHE
+# The base ref the status cache's base_behind field was computed against, and
+# whether it resolved. Helpers that take a base consult the cache only when
+# asked about this same base.
+typeset -g _GROVE_STATUS_BASE=""
+typeset -g _GROVE_STATUS_BASE_OK=false
 
 # Sentinel branch name for detached-HEAD worktrees (see iterate_worktrees).
 # Consumers treat this as the "branch" so detached worktrees stay visible.
@@ -1463,7 +1528,7 @@ _fetch_cache_valid() {
   [[ -f "$cache_file" ]] || return 1
 
   local cache_time now
-  cache_time="$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null)" || return 1
+  cache_time="$(file_mtime "$cache_file")" || return 1
   now="$(_get_now)"
   _FETCH_CACHE_AGE=$((now - cache_time))
 
@@ -1524,6 +1589,8 @@ clear_fetch_cache() {
 clear_git_cache() {
   _GROVE_GIT_CACHE=()
   _GROVE_STATUS_CACHE=()
+  _GROVE_STATUS_BASE=""
+  _GROVE_STATUS_BASE_OK=false
 }
 
 # iterate_worktrees — Call a callback(path, branch) for each worktree in a repo
@@ -1565,15 +1632,86 @@ iterate_worktrees() {
   fi
 }
 
-# collect_worktree_statuses — Gather SHA, dirty, ahead/behind for all worktrees into cache
+# _worktree_status_record — Gather one worktree's status in three git calls
+#
+# Arguments:
+#   $1 - worktree path
+#   $2 - base ref already verified to resolve, or "" when it does not
+#
+# Sets REPLY to "sha|dirty|ahead|behind|timestamp|changes|untracked|base_behind":
+#   ahead/behind  - against the branch's upstream ("?" when it has none)
+#   changes       - porcelain entries, untracked files included (so "dirty"
+#                   agrees with `info`, `status` and the health score)
+#   base_behind   - commits the base has that HEAD lacks ("?" if no base)
+# Returns 1 when git cannot read the worktree.
+_worktree_status_record() {
+  local wt_path="$1" base="$2"
+  local out
+  out="$(git -C "$wt_path" status --porcelain=v2 --branch 2>/dev/null)" || return 1
+
+  # porcelain v2 headers carry the SHA and, only when an upstream is set and
+  # resolves, "# branch.ab +A -B". No header means ahead/behind are unknown,
+  # so a never-pushed branch never looks fully synced.
+  local line ab sha="unknown" ahead="$GROVE_UNKNOWN" behind="$GROVE_UNKNOWN"
+  local -i changes=0 untracked=0
+  for line in "${(@f)out}"; do
+    case "$line" in
+      "# branch.oid "*)
+        sha="${line#\# branch.oid }"
+        [[ "$sha" == "(initial)" ]] && sha="unknown" || sha="${sha:0:7}"
+        ;;
+      "# branch.ab "*)
+        ab="${line#\# branch.ab }"
+        ahead="${${ab%% *}#+}"
+        behind="${${ab##* }#-}"
+        ;;
+      "#"*|"") ;;
+      "? "*) changes+=1; untracked+=1 ;;
+      *) changes+=1 ;;
+    esac
+  done
+  [[ "$ahead" == "$GROVE_UNKNOWN" || "$ahead" =~ ^[0-9]+$ ]] || ahead=0
+  [[ "$behind" == "$GROVE_UNKNOWN" || "$behind" =~ ^[0-9]+$ ]] || behind=0
+
+  local dirty=clean
+  (( changes > 0 )) && dirty=dirty
+
+  local timestamp
+  timestamp="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || timestamp=0
+  [[ "$timestamp" =~ ^[0-9]+$ ]] || timestamp=0
+
+  local base_behind="$GROVE_UNKNOWN"
+  if [[ -n "$base" ]]; then
+    base_behind="$(git -C "$wt_path" rev-list --count "HEAD..$base" 2>/dev/null)" || base_behind=0
+    [[ "$base_behind" =~ ^[0-9]+$ ]] || base_behind=0
+  fi
+
+  REPLY="$sha|$dirty|$ahead|$behind|$timestamp|$changes|$untracked|$base_behind"
+}
+
+# collect_worktree_statuses — Gather status for all worktrees into the cache
 #
 # The per-worktree git calls run CONCURRENTLY (see parallel_collect). Walking
 # them one at a time cost roughly 0.65s per worktree on a large repo, so this
 # alone spent ~10s on a repo with fifteen worktrees before anything was printed
 # — the dominant half of a `grove ls` that felt like a hang from the desktop app.
+#
+# Arguments:
+#   $1 - git directory
+#   $2 - base ref for base_behind (default: $DEFAULT_BASE); validated and
+#        resolved once here, not once per worktree
 collect_worktree_statuses() {
   local git_dir="$1"
   _GROVE_STATUS_CACHE=()
+  _GROVE_STATUS_BASE="${2:-$DEFAULT_BASE}"
+  _GROVE_STATUS_BASE_OK=false
+  validate_git_ref "$_GROVE_STATUS_BASE" "base ref"
+  if [[ -n "$_GROVE_STATUS_BASE" ]] &&
+     git --git-dir="$git_dir" rev-parse --verify --quiet "$_GROVE_STATUS_BASE" >/dev/null 2>&1; then
+    _GROVE_STATUS_BASE_OK=true
+  fi
+  local _cws_base=""
+  [[ "$_GROVE_STATUS_BASE_OK" == true ]] && _cws_base="$_GROVE_STATUS_BASE"
 
   # Callback that gathers status for a single worktree.
   #
@@ -1585,34 +1723,7 @@ collect_worktree_statuses() {
     REPLY=""
     # Verify the worktree has a .git reference (file or directory)
     [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || return 0
-
-    local wt_sha wt_dirty wt_ahead wt_behind wt_timestamp wt_counts
-    wt_sha="$(git -C "$wt_path" rev-parse --short HEAD 2>/dev/null)" || wt_sha="unknown"
-
-    if git -C "$wt_path" diff --quiet HEAD 2>/dev/null && \
-       git -C "$wt_path" diff --cached --quiet HEAD 2>/dev/null; then
-      wt_dirty="clean"
-    else
-      wt_dirty="dirty"
-    fi
-
-    # Distinguish "no upstream" (never-pushed branch — ahead/behind unknown) from a
-    # genuine 0/0. Without this guard a never-pushed branch would look fully synced.
-    # The unknown sentinel ("?") is cached so JSON consumers can map it to null.
-    if git -C "$wt_path" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
-      wt_counts="$(git -C "$wt_path" rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)" || wt_counts="0	0"
-      wt_ahead="${wt_counts%%	*}"
-      wt_behind="${wt_counts##*	}"
-      [[ "$wt_ahead" =~ ^[0-9]+$ ]] || wt_ahead=0
-      [[ "$wt_behind" =~ ^[0-9]+$ ]] || wt_behind=0
-    else
-      wt_ahead="$GROVE_UNKNOWN"
-      wt_behind="$GROVE_UNKNOWN"
-    fi
-
-    wt_timestamp="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || wt_timestamp="0"
-
-    REPLY="$wt_sha|$wt_dirty|$wt_ahead|$wt_behind|$wt_timestamp"
+    _worktree_status_record "$wt_path" "$_cws_base" || REPLY=""
   }
 
   # Gather the paths first — one cheap `git worktree list` — so the expensive
@@ -1638,28 +1749,28 @@ collect_worktree_statuses() {
 }
 
 # get_cached_status — Retrieve a single status field from the worktree cache
+#
+# Fields: sha dirty ahead behind timestamp changes untracked base_behind all.
+# Sets REPLY as well as printing, so hot paths can call it without a subshell.
 get_cached_status() {
   local wt_path="$1"
   local field="$2"
+  REPLY=""
 
   local cached="${_GROVE_STATUS_CACHE[$wt_path]:-}"
   [[ -z "$cached" ]] && return 1
 
-  # Parse using parameter expansion (more reliable than IFS splitting)
-  local rest="$cached"
-  local f_sha="${rest%%|*}"; rest="${rest#*|}"
-  local f_dirty="${rest%%|*}"; rest="${rest#*|}"
-  local f_ahead="${rest%%|*}"; rest="${rest#*|}"
-  local f_behind="${rest%%|*}"; rest="${rest#*|}"
-  local f_timestamp="$rest"
-
+  local -a f=("${(@s:|:)cached}")
   case "$field" in
-    sha)       print -r -- "$f_sha" ;;
-    dirty)     print -r -- "$f_dirty" ;;
-    ahead)     print -r -- "$f_ahead" ;;
-    behind)    print -r -- "$f_behind" ;;
-    timestamp) print -r -- "$f_timestamp" ;;
-    all)       print -r -- "$cached" ;;
+    sha)         REPLY="${f[1]}" ;;
+    dirty)       REPLY="${f[2]}" ;;
+    ahead)       REPLY="${f[3]}" ;;
+    behind)      REPLY="${f[4]}" ;;
+    timestamp)   REPLY="${f[5]}" ;;
+    changes)     REPLY="${f[6]:-0}" ;;
+    untracked)   REPLY="${f[7]:-0}" ;;
+    base_behind) REPLY="${f[8]:-$GROVE_UNKNOWN}" ;;
+    all)         REPLY="$cached" ;;
     *)
       # Unknown field requested — signal the caller rather than silently returning
       # success with no output.
@@ -1667,6 +1778,16 @@ get_cached_status() {
       return 1
       ;;
   esac
+  print -r -- "$REPLY"
+}
+
+# cached_base_behind — Set REPLY to the cached commits-behind count for a worktree
+# against $2, when the cache holds it for that same base. Returns 1 otherwise.
+cached_base_behind() {
+  local wt_path="$1" base="$2"
+  REPLY=""
+  [[ -n "$base" && "$base" == "$_GROVE_STATUS_BASE" ]] || return 1
+  get_cached_status "$wt_path" base_behind >/dev/null || return 1
 }
 
 # has_cached_status — Return 0 if worktree status cache has data for the given path
@@ -1915,7 +2036,11 @@ get_last_commit_age() {
   local now epoch_seconds age_seconds age_days
 
   now="$(_get_now)"
-  epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "?"; return 0; }
+  if get_cached_status "$wt_path" timestamp >/dev/null && [[ "$REPLY" =~ ^[1-9][0-9]*$ ]]; then
+    epoch_seconds="$REPLY"
+  else
+    epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "?"; return 0; }
+  fi
 
   # Handle future timestamps (clock skew, timezone issues)
   if (( epoch_seconds > now )); then
@@ -1964,7 +2089,11 @@ get_commit_age_days() {
   local now epoch_seconds age_seconds
 
   now="$(_get_now)"
-  epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "0"; return 0; }
+  if get_cached_status "$wt_path" timestamp >/dev/null && [[ "$REPLY" =~ ^[1-9][0-9]*$ ]]; then
+    epoch_seconds="$REPLY"
+  else
+    epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "0"; return 0; }
+  fi
 
   # Handle future timestamps (clock skew, timezone issues)
   if (( epoch_seconds > now )); then
@@ -1989,21 +2118,21 @@ get_commit_age_days() {
 # so callers can tell "unknown" from a confident "not merged".
 is_branch_merged() {
   local wt_path="$1" base="${2:-origin/staging}"
-  local branch_head base_head
 
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
 
   # Guard: if the base ref is unresolved (not fetched / misconfigured) we cannot
   # determine merge status — signal "unknown" rather than a false "not merged".
-  if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
+  # The status cache already resolved its base once; reuse that answer.
+  if [[ -n "$_GROVE_STATUS_BASE" && "$base" == "$_GROVE_STATUS_BASE" ]]; then
+    [[ "$_GROVE_STATUS_BASE_OK" == true ]] || return 2
+  elif ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
     return 2
   fi
 
-  branch_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || return 1
-
   # Check if the base branch contains this commit
-  if git -C "$wt_path" merge-base --is-ancestor "$branch_head" "$base" 2>/dev/null; then
+  if git -C "$wt_path" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
     return 0
   fi
   return 1
@@ -2014,15 +2143,7 @@ get_last_accessed_iso() {
   local wt_path="$1"
   local mtime
 
-  # Get modification time (epoch seconds) using OS-specific stat format
-  case "$GROVE_OS" in
-    Darwin)
-      mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || print -r -- "")"
-      ;;
-    *)
-      mtime="$(stat -c '%Y' "$wt_path" 2>/dev/null || print -r -- "")"
-      ;;
-  esac
+  mtime="$(file_mtime "$wt_path")" || mtime=""
 
   if [[ -z "$mtime" || ! "$mtime" =~ ^[0-9]+$ ]]; then
     print -r -- ""
@@ -2052,6 +2173,12 @@ get_commits_behind() {
 
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
+
+  # Reuse the status cache when it was built against this same base.
+  if cached_base_behind "$wt_path" "$base"; then
+    print -r -- "$REPLY"
+    return 0
+  fi
 
   if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
     print -r -- "$GROVE_UNKNOWN"
@@ -2273,7 +2400,7 @@ create_database() {
     return 0
   fi
 
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+  local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER")
 
   info "Creating database ${C_CYAN}$db_name${C_RESET}"
 
@@ -2308,7 +2435,7 @@ backup_database() {
   # Probe connectivity FIRST so a connection/auth failure is never mistaken for
   # "database does not exist" — silently skipping the backup right before the
   # worktree (and DB) is removed would be data-loss-adjacent.
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+  local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
   # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
   if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
@@ -2341,7 +2468,7 @@ backup_database() {
     local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
     local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
 
-    local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
+    local mysqldump_cmd=(mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER")
 
     info "Backing up database ${C_CYAN}$db_name${C_RESET}"
 
@@ -2371,7 +2498,7 @@ drop_database() {
     return 0
   fi
 
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+  local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
   # Probe connectivity first so a connection/auth failure is not mistaken for
   # "database does not exist" (which would silently leave the DB behind).
@@ -2480,16 +2607,16 @@ verify_hook_path_security() {
   local owner perms group_digit other_digit
 
   while true; do
-    # Check ownership (macOS stat format, with Linux fallback)
-    owner="$(stat -Lf %u "$checked" 2>/dev/null || stat -Lc %u "$checked" 2>/dev/null)"
+    # Check ownership
+    owner="$(file_owner_uid "$checked")" || owner=""
     if [[ "$owner" != "$current_uid" ]]; then
       warn "$kind '$checked' is not owned by current user - skipping for security"
       return 1
     fi
 
-    # Check for group- or world-writable (macOS octal perms, with Linux fallback).
+    # Check for group- or world-writable (unreadable perms fail closed as 777).
     # Octal write bit (2) is set when the digit is one of 2,3,6,7.
-    perms="$(stat -Lf %Lp "$checked" 2>/dev/null || stat -Lc %a "$checked" 2>/dev/null)"
+    perms="$(file_perms_octal "$checked")" || perms="777"
     # Normalise to a 3-digit owner/group/other string.
     perms="${perms: -3}"
     group_digit="${perms:1:1}"
@@ -2974,14 +3101,10 @@ format_json() {
     if formatted="$(print -r -- "$json" | python3 -m json.tool 2>/dev/null)"; then
       result="$formatted"
     fi
-  else
-    # Fallback: simple string replacements for basic formatting
-    result="${result//\[/$'\n['}"
-    result="${result//\{/$'\n  {'}"
-    result="${result//\}/$'}\n'}"
-    result="${result//\],/$'],\n'}"
-    result="${result//\}, /'},\n  '}"
   fi
+  # With neither jq nor python3 the JSON is printed unformatted: text-level
+  # newline insertion cannot tell structure from brackets inside string values,
+  # and a raw newline inside a string makes the document invalid.
 
   # Apply colours if terminal supports it (skip when jq already colourised,
   # since the regex-based colouring can corrupt values containing ':' or quotes)
@@ -3533,11 +3656,20 @@ interactive_add() {
   with_spinner "Fetching branches" git --git-dir="$git_dir" fetch --all --prune --quiet \
     || warn "Fetch failed - continuing with local branch list"
 
-  # Get remote branches for selection
-  local branches; branches="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null | grep -v HEAD)"
+  # Get remote branches for selection. Filtered in zsh: with pipefail, a
+  # `| grep -v HEAD` that matches nothing (no remote branches, e.g. after a
+  # failed fetch) returned 1 and errexit ended the wizard without a word.
+  local branches_raw; branches_raw="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null)" || branches_raw=""
+  local -a branch_list=("${(@f)branches_raw}")
+  branch_list=("${(@)branch_list:#*HEAD*}")
+  branch_list=("${(@)branch_list:#}")
 
-  local base
-  base="$(echo "$branches" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="origin/staging")" || return $?
+  local base=""
+  if (( ${#branch_list} == 0 )); then
+    warn "No remote branches found - using $DEFAULT_BASE as the base"
+  else
+    base="$(print -rl -- "${branch_list[@]}" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="$DEFAULT_BASE")" || return $?
+  fi
   [[ -n "$base" ]] || base="$DEFAULT_BASE"
 
   ok "Base: ${C_DIM}$base${C_RESET}"
@@ -3653,58 +3785,46 @@ interactive_dashboard() {
   local entries=()
 
   # Declare loop-scoped variables BEFORE the loop to avoid zsh local re-declaration bug
-  local repo_name out wt_path branch line
-  local result grade dirty_icon st age display_line
+  local repo_name wt_path branch wt_entry
+  local result grade dirty_icon age display_line
+  local -a repo_wts
 
   for git_dir in "$HERD_ROOT"/*.git(N); do
     [[ -d "$git_dir" ]] || continue
     repo_name="${${git_dir:t}%.git}"
 
-    out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || continue
-    wt_path=""
-    branch=""
+    repo_wts=()
+    collect_worktrees "$git_dir" repo_wts
+    (( ${#repo_wts} > 0 )) || continue
 
-    while IFS= read -r line; do
-      if [[ "$line" == worktree\ * ]]; then
-        wt_path="${line#worktree }"
-      elif [[ "$line" == branch\ refs/heads/* ]]; then
-        branch="${line#branch refs/heads/}"
-      elif [[ -z "$line" && -n "$wt_path" && "$wt_path" != *.git && -n "$branch" && -d "$wt_path" ]]; then
-        # Get health score
-        result="$(calculate_health_score "$wt_path")" || result="F|0|error"
-        grade="${result%%|*}"
+    # Grade each repo against its own DEFAULT_BASE, and gather its statuses
+    # once, in parallel, so the per-row health score reads from the cache.
+    load_repo_config "$git_dir"
+    clear_git_cache
+    collect_worktree_statuses "$git_dir"
 
-        # Check dirty status
-        dirty_icon=" "
-        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
-        [[ -n "$st" ]] && dirty_icon="◐"
+    for wt_entry in "${repo_wts[@]}"; do
+      wt_path="${wt_entry%%|*}"
+      branch="${wt_entry##*|}"
+      [[ -d "$wt_path" && "$branch" != "$GROVE_DETACHED_BRANCH" ]] || continue
 
-        # Get age
-        age="$(get_last_commit_age "$wt_path")" || age="?"
-
-        # Format entry for fzf display
-        # Format: repo | branch | grade | dirty | age | path
-        display_line="$(printf "%-15s │ %-30s │ %s │ %s │ %-6s" \
-          "${repo_name:0:15}" "${branch:0:30}" "$grade" "$dirty_icon" "$age")"
-
-        entries+=("${display_line}|${repo_name}|${branch}|${wt_path}")
-        wt_path=""
-        branch=""
-      fi
-    done <<< "$out"
-
-    # Handle last entry
-    if [[ -n "$wt_path" && "$wt_path" != *.git && -n "$branch" && -d "$wt_path" ]]; then
       result="$(calculate_health_score "$wt_path")" || result="F|0|error"
       grade="${result%%|*}"
+
       dirty_icon=" "
-      st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
-      [[ -n "$st" ]] && dirty_icon="◐"
+      if get_cached_status "$wt_path" dirty >/dev/null && [[ "$REPLY" == dirty ]]; then
+        dirty_icon="◐"
+      fi
+
       age="$(get_last_commit_age "$wt_path")" || age="?"
+
+      # Format: repo | branch | grade | dirty | age (display only; the row is
+      # mapped back by index, never by this possibly truncated text)
       display_line="$(printf "%-15s │ %-30s │ %s │ %s │ %-6s" \
         "${repo_name:0:15}" "${branch:0:30}" "$grade" "$dirty_icon" "$age")"
+
       entries+=("${display_line}|${repo_name}|${branch}|${wt_path}")
-    fi
+    done
   done
 
   if (( ${#entries[@]} == 0 )); then
@@ -3735,26 +3855,31 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
     fzf_opts+=(--height=80%)
   fi
 
-  selection="$(printf '%s\n' "${entries[@]%%|*}" | _fzf_select "${fzf_opts[@]}")" || return $?
+  # Each row carries its index in a hidden first field. Display text is
+  # truncated, so two long branch names can render identically; matching on it
+  # could run the chosen action on the wrong worktree.
+  fzf_opts+=(--delimiter=$'\t' --with-nth=2..)
+  local -a rows=()
+  local i
+  for (( i = 1; i <= ${#entries}; i++ )); do
+    rows+=("$i"$'\t'"${entries[i]%%|*}")
+  done
+
+  selection="$(printf '%s\n' "${rows[@]}" | _fzf_select "${fzf_opts[@]}")" || return $?
 
   [[ -n "$selection" ]] || { dim "No selection made"; return 0; }
 
-  # Parse selection - first line is the key pressed, second is the item
-  local key_pressed; key_pressed="$(print -r -- "$selection" | head -1)"
-  local selected_display; selected_display="$(print -r -- "$selection" | tail -1)"
+  # Parse selection - first line is the key pressed, last is the item
+  local -a sel_lines=("${(@f)selection}")
+  local key_pressed="${sel_lines[1]}"
+  local selected_row="${sel_lines[-1]}"
 
-  [[ -n "$selected_display" ]] || { dim "No selection made"; return 0; }
+  [[ -n "$selected_row" ]] || { dim "No selection made"; return 0; }
 
-  # Find the full entry to get repo, branch, path
-  local full_entry=""
-  for entry in "${entries[@]}"; do
-    if [[ "${entry%%|*}" == "$selected_display" ]]; then
-      full_entry="$entry"
-      break
-    fi
-  done
-
-  [[ -n "$full_entry" ]] || { dim "Selection not found"; return 0; }
+  local sel_idx="${selected_row%%$'\t'*}"
+  [[ "$sel_idx" =~ ^[0-9]+$ ]] && (( sel_idx >= 1 && sel_idx <= ${#entries} )) ||
+    { dim "Selection not found"; return 0; }
+  local full_entry="${entries[sel_idx]}"
 
   # Parse the entry: display|repo|branch|path
   local rest="${full_entry#*|}"
@@ -3964,7 +4089,7 @@ check_index_locks() {
     [[ -f "$lock_file" ]] || continue
 
     # Only stale locks (older than 5 minutes) are candidates for cleanup.
-    lock_age=$(($(_get_now) - $(stat -f %m "$lock_file" 2>/dev/null || stat -c %Y "$lock_file" 2>/dev/null || echo 0)))
+    lock_age=$(($(_get_now) - $(file_mtime "$lock_file" || echo 0)))
     (( lock_age > 300 )) || continue
 
     # A live git process may legitimately hold a lock for longer than 5 minutes
@@ -4021,13 +4146,20 @@ typeset -g GROVE_ROLLBACK_STEPS=()
 # We deliberately do NOT call `trap '...' EXIT` from inside transaction_start:
 # in zsh a trap set with the `trap` builtin inside a function is FUNCTION-LOCAL
 # and fires when that function returns, which would roll back instantly. A
-# top-level TRAPEXIT() fires only on real shell exit and persists across calls.
+# top-level TRAPEXIT() persists across calls.
+#
+# zsh also runs TRAPEXIT when a subshell started at the top level of the
+# script exits (`$(…)` included, even a successful one). Grove's code runs
+# inside functions, where this does not happen, but the ZSH_SUBSHELL guard
+# makes it impossible: only the real shell exit may roll a transaction back,
+# so a subshell can never undo a worktree the parent is still building.
 #
 # It fires once on shell exit (including after an unhandled INT/TERM, since zsh
 # runs EXIT last), so transaction_rollback runs at most once. The re-entrancy
 # guard in transaction_rollback covers any manual call followed by EXIT.
 # INT/TERM spinner cleanup is handled separately in 08-spinner.sh.
 TRAPEXIT() {
+  (( ZSH_SUBSHELL == 0 )) || return 0
   if [[ "$GROVE_TRANSACTION_ACTIVE" == true ]]; then
     spinner_stop 2>/dev/null
     transaction_rollback
@@ -4319,19 +4451,22 @@ _show_deps_status() {
   print -r -- "${C_BOLD}Dependency Status${C_RESET}"
   print -r -- ""
 
+  # Declared outside the loop: re-declaring `local x` inside it makes zsh
+  # print the previous value to stdout from the second iteration on.
+  local dep_type dep_status dep_path target hash size_kb size
   for dep_type in vendor node_modules; do
-    local dep_status; dep_status="$(_check_deps_shared "$wt_path" "$dep_type")"
-    local dep_path="$wt_path/$dep_type"
+    dep_status="$(_check_deps_shared "$wt_path" "$dep_type")"
+    dep_path="$wt_path/$dep_type"
 
     case "$dep_status" in
       shared)
-        local target; target="$(readlink "$dep_path" 2>/dev/null)"
-        local hash="${target##*/}"
+        target="$(readlink "$dep_path" 2>/dev/null)"
+        hash="${target##*/}"
         print -r -- "  ${C_GREEN}●${C_RESET} $dep_type: ${C_GREEN}shared${C_RESET} ${C_DIM}($hash)${C_RESET}"
         ;;
       local)
-        local size_kb; size_kb="$(get_dir_size_kb "$dep_path")"
-        local size; size="$(bytes_to_human "$size_kb")"
+        size_kb="$(get_dir_size_kb "$dep_path")"
+        size="$(bytes_to_human "$size_kb")"
         print -r -- "  ${C_YELLOW}●${C_RESET} $dep_type: ${C_YELLOW}local${C_RESET} ${C_DIM}($size)${C_RESET}"
         ;;
       missing)
@@ -4465,7 +4600,31 @@ cmd_share_deps_clean() {
   local cleaned=0
   local saved_kb=0
   # Declare loop variables outside loops to avoid zsh re-declaration output
-  local type_dir hash_dir hash in_use out wt_path dep_path target size line
+  local type_dir hash_dir hash out wt_path dep_path size line dep_type
+
+  # Resolve every worktree's vendor/node_modules symlink ONCE, then test each
+  # cache directory against that set. (This used to re-list every repo's
+  # worktrees for every cache directory.)
+  typeset -A in_use_targets
+  for git_dir in "$HERD_ROOT"/*.git(N); do
+    [[ -d "$git_dir" ]] || continue
+    if ! out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)"; then
+      # An unreadable repo could be using any cache: removing one would leave
+      # its worktrees with a dangling vendor/node_modules link.
+      warn "Could not list worktrees for ${git_dir:t} - not removing anything"
+      return 1
+    fi
+    while IFS= read -r line; do
+      [[ "$line" == worktree\ * ]] || continue
+      wt_path="${line#worktree }"
+      [[ -n "$wt_path" && "$wt_path" != *.git && -d "$wt_path" ]] || continue
+      for dep_type in vendor node_modules; do
+        dep_path="$wt_path/$dep_type"
+        # :A resolves the symlink chain, relative targets included.
+        [[ -L "$dep_path" ]] && in_use_targets[${dep_path:A}]=1
+      done
+    done <<< "$out"
+  done
 
   for dep_type in vendor node_modules; do
     type_dir="$GROVE_SHARED_DEPS_DIR/$dep_type"
@@ -4475,38 +4634,7 @@ cmd_share_deps_clean() {
       [[ -d "$hash_dir" ]] || continue
       hash="${hash_dir:t}"
 
-      # Check if any worktree is using this hash
-      in_use=false
-      for git_dir in "$HERD_ROOT"/*.git(N); do
-        [[ -d "$git_dir" ]] || continue
-
-        out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || continue
-
-        # Evaluate each "worktree <path>" line directly. The previous approach
-        # only checked on the trailing blank delimiter, which command
-        # substitution strips - so the last worktree was never inspected.
-        while IFS= read -r line; do
-          [[ "$line" == worktree\ * ]] || continue
-          wt_path="${line#worktree }"
-          [[ -n "$wt_path" && "$wt_path" != *.git && -d "$wt_path" ]] || continue
-
-          dep_path="$wt_path/$dep_type"
-          [[ -L "$dep_path" ]] || continue
-
-          target="$(readlink "$dep_path" 2>/dev/null)"
-          # Canonicalise relative targets against the worktree directory.
-          if [[ -n "$target" && "$target" != /* ]]; then
-            target="${wt_path}/${target}"
-          fi
-          target="${target:A}"
-          if [[ "$target" == "${hash_dir:A}" ]]; then
-            in_use=true
-            break 2
-          fi
-        done <<< "$out"
-      done
-
-      if [[ "$in_use" == false ]]; then
+      if (( ! ${+in_use_targets[${hash_dir:A}]} )); then
         size="$(get_dir_size_kb "$hash_dir")"
         # Guard against a non-numeric/empty du result before arithmetic.
         [[ "$size" =~ ^[0-9]+$ ]] || size=0
@@ -4544,11 +4672,20 @@ cmd_share_deps_clean() {
 #
 # A GUI-launched process does not inherit the shell PATH, so the install
 # locations are probed as well.
+#
+# An explicit GROVE_REMOVAL_CHECK_BIN is used alone: when it names nothing
+# runnable, falling back to another gate would silently drop the one the user
+# chose, so it fails instead.
 removal_check_binary() {
+  if [[ -n "${GROVE_REMOVAL_CHECK_BIN:-}" ]]; then
+    command -v "$GROVE_REMOVAL_CHECK_BIN" >/dev/null 2>&1 || return 1
+    print -r -- "$GROVE_REMOVAL_CHECK_BIN"
+    return 0
+  fi
+
   local candidate
-  for candidate in "${GROVE_REMOVAL_CHECK_BIN:-}" wt-removal-check \
+  for candidate in wt-removal-check \
     "$HOME/.local/bin/wt-removal-check" "$HOME/.claude/bin/wt-removal-check"; do
-    [[ -n "$candidate" ]] || continue
     if command -v "$candidate" >/dev/null 2>&1; then
       print -r -- "$candidate"
       return 0
@@ -4576,7 +4713,11 @@ removal_gate() {
 
   local gate=""
   if ! gate="$(removal_check_binary)"; then
-    REPLY="the worktree removal gate (wt-removal-check) was not found, so unsaved work cannot be ruled out"
+    if [[ -n "${GROVE_REMOVAL_CHECK_BIN:-}" ]]; then
+      REPLY="GROVE_REMOVAL_CHECK_BIN ($GROVE_REMOVAL_CHECK_BIN) is not an executable, so unsaved work cannot be ruled out"
+    else
+      REPLY="the worktree removal gate (wt-removal-check) was not found, so unsaved work cannot be ruled out"
+    fi
     return 1
   fi
 
@@ -4584,6 +4725,15 @@ removal_gate() {
   verdict="$("$gate" "$wt_path" 2>&1)" && return 0
   REPLY="$verdict"
   return 1
+}
+
+# removal_can_prompt — True when a person at a terminal can answer the prompt
+#
+# The "Remove anyway?" confirmation is the only way past a block, so it must
+# come from a person: piped or redirected stdin (`echo y | grove rm …`) is a
+# script accepting a loss on someone's behalf, and is refused like --json.
+removal_can_prompt() {
+  [[ -t 0 ]]
 }
 
 # lifecycle.sh - Worktree creation and removal commands
@@ -4984,6 +5134,10 @@ cmd_rm() {
     if [[ "$JSON_OUTPUT" == true ]]; then
       error_exit "REMOVAL_BLOCKED" "$REPLY" 6
     fi
+    if ! removal_can_prompt; then
+      print -r -- "${C_YELLOW}$REPLY${C_RESET}" >&2
+      error_exit "REMOVAL_BLOCKED" "removal blocked; confirming it needs an interactive terminal" 6
+    fi
     print -r -- "${C_YELLOW}$REPLY${C_RESET}" >&2
     print -n "${C_YELLOW}Remove anyway? [y/N]${C_RESET} "
     local response
@@ -5369,8 +5523,10 @@ cmd_fresh() {
   print -r -- "${C_BOLD}Refreshing ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
   print -r -- ""
 
-  # Run migrate:fresh --seed (with confirmation unless forced)
+  # Run migrate:fresh --seed (with confirmation unless forced). Declining
+  # skips only the database step; npm ci and the build below still run.
   if [[ -f "artisan" ]]; then
+    local run_migrate=true
     if [[ "$FORCE" == false ]]; then
       warn "This will DROP ALL TABLES in the database!"
       print -n "${C_YELLOW}Continue with migrate:fresh? [y/N]${C_RESET} "
@@ -5378,15 +5534,17 @@ cmd_fresh() {
       read -r response
       if [[ ! "$response" =~ ^[Yy]$ ]]; then
         warn "Skipping migrate:fresh"
-        return 0
+        run_migrate=false
       fi
     fi
 
-    info "Running migrate:fresh --seed..."
-    if php artisan migrate:fresh --seed; then
-      ok "Database refreshed"
-    else
-      warn "migrate:fresh --seed failed"
+    if [[ "$run_migrate" == true ]]; then
+      info "Running migrate:fresh --seed..."
+      if php artisan migrate:fresh --seed; then
+        ok "Database refreshed"
+      else
+        warn "migrate:fresh --seed failed"
+      fi
     fi
   fi
 
@@ -5742,33 +5900,52 @@ _pull_all_for_repo() {
   [[ -n "$tmpdir" && -d "$tmpdir" ]] || { warn "Could not create temp directory for parallel pull"; return 1; }
   trap "rm -rf '$tmpdir'" EXIT
 
-  # Launch parallel pulls
+  # Launch parallel pulls, at most GROVE_MAX_PARALLEL at a time. The repo was
+  # fetched once above and every worktree shares its remote-tracking refs, so
+  # each job only rebases onto its upstream: a per-worktree `git pull` fetched
+  # from the network again, N times, with N concurrent writers to the same refs.
   local pids=()
   local idx=0
+  local max_jobs="${GROVE_MAX_PARALLEL:-4}"
+  [[ "$max_jobs" =~ ^[1-9][0-9]*$ ]] || max_jobs=4
   local wt_path wt_branch
   for wt_entry in "${worktrees[@]}"; do
     wt_path="${wt_entry%%|*}"
     wt_branch="${wt_entry##*|}"
 
+    # Sliding window: before starting job idx, wait for job idx - max_jobs.
+    (( idx >= max_jobs )) && { wait "${pids[idx - max_jobs + 1]}" 2>/dev/null || true; }
+
     (
       local pull_output pull_exit_code=0
-      pull_output="$(git -C "$wt_path" pull --rebase 2>&1)" || pull_exit_code=$?
-
       local result_status="ok"
       local already_up_to_date=false
       local commits_pulled=0
+      local before_sha after_sha
+
+      before_sha="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || before_sha=""
+      if ! git -C "$wt_path" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+        pull_output="There is no tracking information for the current branch."
+        pull_exit_code=1
+      else
+        # Upstream commits HEAD lacks: what this pull brings in.
+        commits_pulled="$(git -C "$wt_path" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)" || commits_pulled=0
+        # No upstream argument: rebase then uses the configured upstream with
+        # --fork-point, as `git pull --rebase` does.
+        pull_output="$(git -C "$wt_path" rebase 2>&1)" || pull_exit_code=$?
+        # Drop rebase's progress redraws (CR and "erase line" escapes).
+        pull_output="${pull_output//$'\e'\[K/}"
+        pull_output="${pull_output//$'\r'/}"
+      fi
+      after_sha="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || after_sha=""
+      [[ "$commits_pulled" =~ ^[0-9]+$ ]] || commits_pulled=0
 
       if (( pull_exit_code != 0 )); then
         result_status="fail"
-      elif [[ "$pull_output" == *"Already up to date"* ]]; then
+        commits_pulled=0
+      elif [[ "$before_sha" == "$after_sha" ]]; then
         already_up_to_date=true
-      fi
-
-      # Extract commit count from "Updating abc123..def456" in pull output
-      if [[ "$pull_output" =~ Updating\ ([a-f0-9]+)\.\.([a-f0-9]+) ]]; then
-        local from_sha="${match[1]}"
-        local to_sha="${match[2]}"
-        commits_pulled="$(git -C "$wt_path" rev-list --count "$from_sha".."$to_sha" 2>/dev/null)" || commits_pulled=0
+        commits_pulled=0
       fi
 
       # Write the structural fields as a JSON line for later parsing. The message is
@@ -6002,16 +6179,17 @@ cmd_prune() {
     print -r -- ""
 
     # Build operations for the shared parallel runner using the documented
-    # "<label>|<path>|<command>" convention (see lib/09-parallel.sh). The git command
-    # uses an absolute --git-dir, so the path field is only the run directory; HERD_ROOT
-    # is a safe, always-present choice. The runner enforces GROVE_MAX_PARALLEL correctly
-    # and counts a missing result file as a failure (total == succeeded + failed).
+    # "<label>|<path>|<command>" convention (see lib/09-parallel.sh). The run
+    # directory is the bare repo itself, so git finds it without the path ever
+    # entering the command string: the runner executes that string with sh -c,
+    # and an interpolated directory name would run as shell code. The runner
+    # enforces GROVE_MAX_PARALLEL and counts a missing result file as a failure.
     local operations=()
     local git_dir repo_name
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
       repo_name="${${git_dir:t}%.git}"
-      operations+=("$repo_name|$HERD_ROOT|git --git-dir=\"$git_dir\" worktree prune -v")
+      operations+=("$repo_name|$git_dir|git worktree prune -v")
     done
 
     if (( ${#operations[@]} == 0 )); then
@@ -6025,10 +6203,11 @@ cmd_prune() {
       _prune_success="$1"; _prune_failed="$2"
       report_results "$1" "$2" "$3"
     }
-    parallel_run _prune_all_results "${operations[@]}"
+    # parallel_run returns 1 when any job fails; still notify, then report it.
+    parallel_run _prune_all_results "${operations[@]}" || true
 
     notify "grove prune" "Completed: $_prune_success success, $_prune_failed failed"
-    return 0
+    (( _prune_failed == 0 ))
   fi
 
   # Single repo mode
@@ -6046,7 +6225,9 @@ cmd_prune() {
   local prune_output; prune_output="$(LC_ALL=C git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
   local stale_refs_pruned=0
   if [[ -n "$prune_output" ]]; then
-    stale_refs_pruned="$(print -r -- "$prune_output" | grep -c 'Removing' 2>/dev/null)" || stale_refs_pruned=0
+    # Count "Removing …" lines in zsh (no print | grep pipeline).
+    local -a prune_lines=("${(@f)prune_output}")
+    stale_refs_pruned=${#${(M)prune_lines:#*Removing*}}
   fi
   [[ "$JSON_OUTPUT" != true ]] && [[ -n "$prune_output" ]] && print -r -- "$prune_output"
 
@@ -6067,7 +6248,7 @@ cmd_prune() {
   # Get clean merged-branch names (no '* '/'+ ' markers), excluding protected branches
   # by exact name (is_protected_branch), not a loose substring grep.
   local merged_raw; merged_raw="$(git --git-dir="$git_dir" branch --merged "$base" --format='%(refname:short)' 2>/dev/null)" || merged_raw=""
-  local merged=""
+  local merged="" nl=$'\n'
   local branch_line
   while IFS= read -r branch_line; do
     # Trim leading/trailing whitespace using Zsh parameter expansion
@@ -6075,7 +6256,8 @@ cmd_prune() {
     branch_line="${branch_line%"${branch_line##*[![:space:]]}"}"
     [[ -n "$branch_line" ]] || continue
     is_protected_branch "$branch_line" && continue
-    merged+="${merged:+$'\n'}$branch_line"
+    # $'\n' stays literal inside "${…:+…}", so join with a newline variable.
+    merged+="${merged:+$nl}$branch_line"
   done <<< "$merged_raw"
 
   # JSON output mode
@@ -6196,9 +6378,11 @@ cmd_log() {
     local commits_json=()
     local log_output sha msg author date_iso
 
-    # Get commits with specific format for JSON parsing
-    # Format: %H|%s|%an|%aI (full sha, subject, author name, ISO date)
-    while IFS='|' read -r sha msg author date_iso; do
+    # Fields: full sha, author name, ISO date, subject. Split on the ASCII unit
+    # separator (0x1f), which cannot appear in them, and keep the subject last so
+    # even a stray separator stays inside it. A '|' in a subject used to shift
+    # text into the author and date fields.
+    while IFS=$'\x1f' read -r sha author date_iso msg; do
       [[ -z "$sha" ]] && continue
       # Truncate SHA to 7 chars for display
       local short_sha="${sha:0:7}"
@@ -6207,7 +6391,7 @@ cmd_log() {
       json_escape "$author"; local _je_auth="$REPLY"
       json_escape "$date_iso"; local _je_date="$REPLY"
       commits_json+=("{\"sha\": \"$_je_sha\", \"message\": \"$_je_msg\", \"author\": \"$_je_auth\", \"date\": \"$_je_date\"}")
-    done < <(git -C "$wt_path" log --format='%H|%s|%an|%aI' -n "$count" 2>/dev/null || true)
+    done < <(git -C "$wt_path" log --format='%H%x1f%an%x1f%aI%x1f%s' -n "$count" 2>/dev/null || true)
 
     format_json "{\"commits\": [${(j:, :)commits_json}]}"
     return 0
@@ -6366,8 +6550,9 @@ cmd_summary() {
     untracked="${rest##* }"
   fi
 
-  local ahead_total; ahead_total="$(git -C "$wt_path" rev-list --count "$base"..HEAD 2>/dev/null || print -r -- 0)"
-  local behind_total; behind_total="$(git -C "$wt_path" rev-list --count HEAD.."$base" 2>/dev/null || print -r -- 0)"
+  # get_ahead_behind's left/right counts are exactly base..HEAD and HEAD..base,
+  # so the totals reuse them rather than running rev-list twice more.
+  local ahead_total="$ahead" behind_total="$behind"
 
   local shortstat; shortstat="$(git -C "$wt_path" diff --shortstat --no-color "$base"..HEAD 2>/dev/null || true)"
   local diffstat; diffstat="$(git -C "$wt_path" diff --stat --no-color "$base"..HEAD 2>/dev/null || true)"
@@ -6522,21 +6707,28 @@ cmd_changes() {
     error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
-  # Get git status in porcelain format
-  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+  # Get git status in porcelain format. core.quotePath=false keeps non-ASCII
+  # names readable instead of C-quoted octal escapes.
+  local st; st="$(git -c core.quotePath=false -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
 
   # JSON output mode
   if [[ "$JSON_OUTPUT" == true ]]; then
     local files_json=()
 
     if [[ -n "$st" ]]; then
+      # Re-read with -z: NUL-separated entries are never quoted (paths with
+      # quotes, backslashes or newlines arrive verbatim) and a rename is
+      # "XY new\0old\0" rather than an ambiguous "old -> new".
+      local -a entries=("${(@0)$(git -C "$wt_path" status --porcelain -z 2>/dev/null)}")
       # Declare loop variables outside the loop to avoid zsh re-declaration issues
       local line status_code file_path simple_status
-      while IFS= read -r line; do
+      local -i i=1
+      while (( i <= ${#entries} )); do
+        line="${entries[i]}"
+        i+=1
         [[ -z "$line" ]] && continue
 
-        # Extract status code (first 2 chars) and file path (rest after space)
-        # Porcelain format: XY filename (where XY is the status)
+        # Porcelain format: XY <path> (XY is the two-character status)
         status_code="${line:0:2}"
         file_path="${line:3}"
 
@@ -6548,19 +6740,17 @@ cmd_changes() {
           " M"|"M "|"MM") simple_status="M" ;;
           " A"|"A "|"AM") simple_status="A" ;;
           " D"|"D ") simple_status="D" ;;
-          "R "*)  simple_status="R" ;;
-          "C "*)  simple_status="C" ;;
+          R?)  simple_status="R" ;;
+          C?)  simple_status="C" ;;
           "U"*|*"U")  simple_status="U" ;;  # Unmerged
-          *)  simple_status="${status_code:0:1}" ;;  # First non-space char
+          *)  simple_status="${${status_code// /}:0:1}" ;;  # First non-space char
         esac
 
-        # Handle renamed files (format: R  old -> new)
-        if [[ "$status_code" == "R "* && "$file_path" == *" -> "* ]]; then
-          file_path="${file_path##* -> }"
-        fi
+        # A rename or copy (index side) is followed by its source path; skip it.
+        [[ "$status_code" == [RC]? ]] && i+=1
 
         json_escape "$file_path"; files_json+=("{\"path\": \"$REPLY\", \"status\": \"$simple_status\"}")
-      done <<< "$st"
+      done
     fi
 
     format_json "{\"files\": [${(j:, :)files_json}]}"
@@ -6599,7 +6789,7 @@ cmd_changes() {
         " D"|"D ")
           print -r -- "  ${C_RED}D${C_RESET}  $file_path"
           ;;
-        "R "*)
+        R?)
           print -r -- "  ${C_CYAN}R${C_RESET}  $file_path"
           ;;
         *)
@@ -6731,7 +6921,8 @@ cmd_code() {
 
   # Resolve @N shortcuts and fuzzy matching
   local original_branch="$branch"
-  branch="$(resolve_branch_ref "$repo" "$branch")"
+  branch="$(resolve_branch_ref "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no worktree matches '$original_branch' in '$repo'" 3
   if [[ "$branch" != "$original_branch" ]]; then
     dim "  Matched: $branch"
   fi
@@ -6785,7 +6976,8 @@ cmd_open() {
 
   # Resolve @N shortcuts and fuzzy matching
   local original_branch="$branch"
-  branch="$(resolve_branch_ref "$repo" "$branch")"
+  branch="$(resolve_branch_ref "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no worktree matches '$original_branch' in '$repo'" 3
   if [[ "$branch" != "$original_branch" ]]; then
     dim "  Matched: $branch"
   fi
@@ -6836,7 +7028,8 @@ cmd_cd() {
 
   # Resolve @N shortcuts and fuzzy matching
   local original_branch="$branch"
-  branch="$(resolve_branch_ref "$repo" "$branch")"
+  branch="$(resolve_branch_ref "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no worktree matches '$original_branch' in '$repo'" 3
   if [[ "$branch" != "$original_branch" ]]; then
     # Output match info to stderr so it doesn't interfere with path output
     print -r -- "  Matched: $branch" >&2
@@ -6870,7 +7063,8 @@ cmd_switch() {
 
   # Resolve @N shortcuts and fuzzy matching
   local original_branch="$branch"
-  branch="$(resolve_branch_ref "$repo" "$branch")"
+  branch="$(resolve_branch_ref "$repo" "$branch")" ||
+    error_exit "WORKTREE_NOT_FOUND" "no worktree matches '$original_branch' in '$repo'" 3
   if [[ "$branch" != "$original_branch" ]]; then
     # Output match info to stderr so it doesn't interfere with path output
     print -r -- "  Matched: $branch" >&2
@@ -6953,30 +7147,9 @@ _display_worktree() {
     branch=""
     [[ -n "$head" ]] || head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
   fi
-  local url=""
-  if [[ -n "$GROVE_URL_SUBDOMAIN" && -n "$branch" ]]; then
-    # When a subdomain is configured, use the actual folder's browser URL
-    # (.env APP_URL is a Laravel internal config without subdomain prefix)
-    url="$(worktree_site_url "$wt_path")"
-  elif [[ -f "$wt_path/.env" ]]; then
-    # Extract APP_URL using pure Zsh (no subprocess spawns)
-    local line
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      if [[ "$line" =~ ^[[:space:]]*APP_URL= ]]; then
-        url="${line#*=}"           # After =
-        url="${url%%#*}"           # Before # (comments)
-        url="${url//[\"\' ]}"      # Remove quotes and spaces
-        break
-      fi
-    done < "$wt_path/.env"
-    # The .env is untrusted (a committed value could set javascript: or a foreign
-    # host). Only honour an http(s) URL; otherwise fall back to the derived URL.
-    if [[ -n "$url" && "$url" != http://* && "$url" != https://* ]]; then
-      url=""
-    fi
-  fi
-  # Fall back to the canonical derived URL when no trusted .env URL was found.
-  [[ -z "$url" && -n "$branch" ]] && url="$(worktree_site_url "$wt_path")"
+  # One APP_URL parser for ls, info and recent (worktree_url): a '#' inside
+  # the URL (a fragment route) is kept, and only http(s) values are trusted.
+  local url; url="$(worktree_url "$repo" "$branch" "$wt_path")" || url=""
   [[ -z "$url" ]] && url="https://${folder}.test"
 
   # Use cached status if available, fallback to direct git calls
@@ -6985,15 +7158,15 @@ _display_worktree() {
   local mismatch=false
 
   if has_cached_status "$wt_path"; then
-    sha="$(get_cached_status "$wt_path" sha)"
-    dirty_status="$(get_cached_status "$wt_path" dirty)"
-    ahead="$(get_cached_status "$wt_path" ahead)"
-    behind="$(get_cached_status "$wt_path" behind)"
+    # get_cached_status sets REPLY; calling it directly avoids a subshell each.
+    get_cached_status "$wt_path" sha >/dev/null; sha="$REPLY"
+    get_cached_status "$wt_path" dirty >/dev/null; dirty_status="$REPLY"
+    get_cached_status "$wt_path" ahead >/dev/null; ahead="$REPLY"
+    get_cached_status "$wt_path" behind >/dev/null; behind="$REPLY"
 
     if [[ "$dirty_status" == "dirty" ]]; then
-      # Need to get actual change count for display
-      local st="$(git -C "$wt_path" status --porcelain 2>/dev/null || true)"
-      local changes="$(count_lines "$st")"
+      get_cached_status "$wt_path" changes >/dev/null
+      local changes="$REPLY"
       state_icon="◐"
       state_color="$C_YELLOW"
       state_text="$changes uncommitted"
@@ -7019,10 +7192,11 @@ _display_worktree() {
       dirty=true
     fi
 
-    # Get ahead/behind via fallback
-    local counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
-    ahead="${counts%% *}"
-    behind="${counts##* }"
+    # Same measure as the cache: ahead/behind the branch's upstream.
+    _worktree_status_record "$wt_path" "" || REPLY=""
+    local -a rec=("${(@s:|:)REPLY}")
+    ahead="${rec[3]:-$GROVE_UNKNOWN}"
+    behind="${rec[4]:-$GROVE_UNKNOWN}"
   fi
 
   # Check for branch/directory mismatch
@@ -7041,6 +7215,11 @@ _display_worktree() {
   local health_rest="${health_result#*|}"
   local health_score="${health_rest%%|*}"
   local health_issues="${health_rest#*|}"
+  # Never embed anything but a number: a failure inside the scorer must not
+  # leak text into the JSON contract.
+  if [[ ! "$health_score" =~ ^[0-9]+$ ]]; then
+    health_grade="?" health_score=0 health_issues=""
+  fi
 
   # Calculate new fields for enhanced JSON output
   local last_accessed="" merged=false stale=false
@@ -7049,8 +7228,9 @@ _display_worktree() {
     # Get last accessed timestamp as ISO 8601
     last_accessed="$(get_last_accessed_iso "$wt_path")"
 
-    # Derive merge status from health issues (avoids duplicate is_branch_merged call)
-    if [[ "$health_issues" != *"unmerged"* ]]; then
+    # Derive merge status from health issues (avoids duplicate is_branch_merged
+    # call). Unknown (base ref unresolved) stays false: the contract is boolean.
+    if [[ ",$health_issues," != *",unmerged,"* && ",$health_issues," != *",merge-unknown,"* ]]; then
       merged=true
     fi
 
@@ -7199,19 +7379,15 @@ _display_status_row() {
 
   # Use cached status if available, fallback to direct git calls
   if has_cached_status "$p"; then
-    sha="$(get_cached_status "$p" sha)"
-    local dirty_status="$(get_cached_status "$p" dirty)"
-    ahead="$(get_cached_status "$p" ahead)"
-    behind="$(get_cached_status "$p" behind)"
-
-    if [[ "$dirty_status" == "dirty" ]]; then
-      # Need to get actual change count for display
-      st="$(git -C "$p" status --porcelain 2>/dev/null)" || st=""
-      changes="$(count_lines "$st")"
+    # get_cached_status sets REPLY; calling it directly avoids a subshell each.
+    get_cached_status "$p" sha >/dev/null; sha="$REPLY"
+    get_cached_status "$p" ahead >/dev/null; ahead="$REPLY"
+    get_cached_status "$p" behind >/dev/null; behind="$REPLY"
+    get_cached_status "$p" changes >/dev/null; changes="$REPLY"
+    st=""
+    if (( changes > 0 )); then
       state_icon="◐ $changes"
       state_color="$C_YELLOW"
-    else
-      st=""
     fi
   else
     # Fallback to direct git calls
@@ -7224,10 +7400,11 @@ _display_status_row() {
       state_color="$C_YELLOW"
     fi
 
-    # Get sync status via fallback
-    counts="$(get_ahead_behind "$p" "$DEFAULT_BASE")"
-    ahead="${counts%% *}"
-    behind="${counts##* }"
+    # Same measure as the cache: ahead/behind the branch's upstream.
+    _worktree_status_record "$p" "" || REPLY=""
+    local -a rec=("${(@s:|:)REPLY}")
+    ahead="${rec[3]:-$GROVE_UNKNOWN}"
+    behind="${rec[4]:-$GROVE_UNKNOWN}"
   fi
 
   # Check for mismatch
@@ -7239,9 +7416,12 @@ _display_status_row() {
     REPLY2="${p:t}|$b|$expected_slug"
   fi
 
-  # Check if stale (exceeds commits-behind threshold). Never feed the unknown
-  # sentinel ("?") into arithmetic; an unknown count can't prove staleness.
-  if [[ "$behind" != "$GROVE_UNKNOWN" ]] && (( behind > stale_threshold )); then
+  # Check if stale: commits behind the BASE branch (as `ls` and `health`
+  # measure it), not behind the upstream shown in the sync column — a pushed
+  # branch is usually level with its upstream however far behind base it is.
+  # Never feed the unknown sentinel ("?") into arithmetic.
+  local base_behind; base_behind="$(get_commits_behind "$p" "$DEFAULT_BASE")"
+  if [[ "$base_behind" != "$GROVE_UNKNOWN" ]] && (( base_behind > stale_threshold )); then
     is_stale=true
     sync_display="${C_RED}↑$ahead ↓$behind${C_RESET}"
   else
@@ -7256,10 +7436,14 @@ _display_status_row() {
   fi
 
   # Check if merged (cache result for reuse in JSON output)
-  local merged=false
-  if is_branch_merged "$p" "$DEFAULT_BASE"; then
+  local merged=false merged_rc=0
+  is_branch_merged "$p" "$DEFAULT_BASE" || merged_rc=$?
+  if (( merged_rc == 0 )); then
     merged=true
     merged_icon="${C_DIM}✓${C_RESET}"
+  elif (( merged_rc == 2 )); then
+    # Unknown (base ref unresolved): JSON stays boolean false, text shows "?".
+    merged_icon="${C_DIM}?${C_RESET}"
   else
     merged_icon="${C_DIM}-${C_RESET}"
   fi
@@ -7276,7 +7460,7 @@ _display_status_row() {
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     local dirty=false
-    [[ -n "$st" ]] && dirty=true
+    (( ${changes:-0} > 0 )) && dirty=true
     # Map the unknown sentinel ("?") to JSON null; a bare ? is invalid JSON.
     local ahead_json="$ahead" behind_json="$behind"
     [[ "$ahead_json" == "$GROVE_UNKNOWN" ]] && ahead_json="null"
@@ -7305,6 +7489,9 @@ cmd_status() {
   local git_dir
   git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
+  # Per-repo DEFAULT_BASE / GROVE_STALE_THRESHOLD overrides apply here too.
+  load_repo_config "$git_dir"
+  stale_threshold="$GROVE_STALE_THRESHOLD"
 
   [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
   if ! cached_fetch "$git_dir" --all --prune --quiet; then
@@ -7384,6 +7571,7 @@ cmd_repos() {
   local repos; repos="$(list_repos)"
 
   if [[ -z "$repos" ]]; then
+    [[ "$JSON_OUTPUT" == true ]] && { format_json "[]"; return 0; }
     dim "No repositories found in $HERD_ROOT"
     return 0
   fi
@@ -7445,7 +7633,9 @@ cmd_branches() {
   if [[ "$QUIET" != true && "$JSON_OUTPUT" != true ]]; then
     info "Fetching latest branches..."
   fi
-  git --git-dir="$git_dir" fetch --all --prune --quiet 2>/dev/null || true
+  # Cached: the desktop app's branch picker calls this often, and a network
+  # fetch on every call made it slow. --refresh / --no-cache still force one.
+  cached_fetch "$git_dir" --all --prune --quiet 2>/dev/null || true
 
   # Build associative arrays for O(1) worktree lookups, using the shared helper
   # as the single source of truth (detached-aware).
@@ -7475,13 +7665,17 @@ cmd_branches() {
   typeset -A local_branches_map
 
   # Declare loop variables outside loops to avoid zsh re-declaration output
-  local has_worktree wt_path_for_branch sha last_commit
+  local has_worktree wt_path_for_branch sha last_commit ref_line branch
+
+  # One for-each-ref per namespace yields name, short SHA and commit time
+  # together (tab-separated; a ref name cannot contain a tab). This replaced
+  # a rev-parse and a log per branch.
+  local ref_format='%(refname)%09%(objectname:short)%09%(committerdate:unix)'
 
   # Local branches
-  while IFS= read -r branch; do
-    [[ -n "$branch" ]] || continue
-    branch="${branch#\* }"  # Remove current branch marker
-    branch="${branch## }"   # Trim leading space
+  while IFS= read -r ref_line; do
+    [[ -n "$ref_line" ]] || continue
+    branch="${${ref_line%%$'\t'*}#refs/heads/}"
 
     # Reset state-carrying variables to prevent bleed between iterations
     has_worktree=false
@@ -7498,16 +7692,17 @@ cmd_branches() {
       wt_path_for_branch="${worktree_by_branch[$branch]}"
     fi
 
-    sha="$(git --git-dir="$git_dir" rev-parse --short "refs/heads/$branch" 2>/dev/null)" || sha=""
-    last_commit="$(git --git-dir="$git_dir" log -1 --format=%ct "refs/heads/$branch" 2>/dev/null)" || last_commit=""
+    sha="${${ref_line#*$'\t'}%%$'\t'*}"
+    last_commit="${ref_line##*$'\t'}"
+    [[ "$last_commit" =~ ^[0-9]+$ ]] || last_commit=""
 
     branches+=("local|$branch|$has_worktree|$wt_path_for_branch|$sha|$last_commit")
-  done < <(git --git-dir="$git_dir" branch --list --format='%(refname:short)' 2>/dev/null)
+  done < <(git --git-dir="$git_dir" for-each-ref --format="$ref_format" refs/heads 2>/dev/null)
 
   # Remote branches (that don't have local tracking)
-  while IFS= read -r branch; do
-    [[ -n "$branch" ]] || continue
-    branch="${branch#origin/}"
+  while IFS= read -r ref_line; do
+    [[ -n "$ref_line" ]] || continue
+    branch="${${ref_line%%$'\t'*}#refs/remotes/origin/}"
 
     # Skip HEAD
     [[ "$branch" == "HEAD" ]] && continue
@@ -7527,11 +7722,12 @@ cmd_branches() {
       wt_path_for_branch="${worktree_by_branch[$branch]}"
     fi
 
-    sha="$(git --git-dir="$git_dir" rev-parse --short "origin/$branch" 2>/dev/null)" || sha=""
-    last_commit="$(git --git-dir="$git_dir" log -1 --format=%ct "origin/$branch" 2>/dev/null)" || last_commit=""
+    sha="${${ref_line#*$'\t'}%%$'\t'*}"
+    last_commit="${ref_line##*$'\t'}"
+    [[ "$last_commit" =~ ^[0-9]+$ ]] || last_commit=""
 
     branches+=("remote|$branch|$has_worktree|$wt_path_for_branch|$sha|$last_commit")
-  done < <(git --git-dir="$git_dir" branch -r --list --format='%(refname:short)' 2>/dev/null | grep '^origin/')
+  done < <(git --git-dir="$git_dir" for-each-ref --format="$ref_format" refs/remotes/origin 2>/dev/null)
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -7760,9 +7956,10 @@ calculate_health_score() {
   local score=100
   local issues=()
 
-  # Check commits behind (max -30 points)
-  local counts; counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
-  local behind="${counts##* }"
+  # Check commits behind the base (max -30 points). "?" (base unresolved)
+  # scores nothing rather than reaching arithmetic.
+  local behind; behind="$(get_commits_behind "$wt_path" "$DEFAULT_BASE")"
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
   if (( behind > 50 )); then
     score=$((score - 30))
     issues+=("behind:$behind")
@@ -7774,10 +7971,20 @@ calculate_health_score() {
     issues+=("behind:$behind")
   fi
 
-  # Check uncommitted changes (max -20 points)
-  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
-  if [[ -n "$st" ]]; then
-    local changes; changes="$(count_lines "$st")"
+  # Check uncommitted changes (max -20 points). The status cache already
+  # holds the counts; only run git status when it does not.
+  local changes=0 untracked=0 st=""
+  if get_cached_status "$wt_path" changes >/dev/null; then
+    changes="$REPLY"
+    get_cached_status "$wt_path" untracked >/dev/null; untracked="$REPLY"
+  else
+    st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+    if [[ -n "$st" ]]; then
+      changes="$(count_lines "$st")"
+      untracked="$(count_matching "$st" '\?\?*')"
+    fi
+  fi
+  if (( changes > 0 )); then
     if (( changes > 20 )); then
       score=$((score - 20))
       issues+=("changes:$changes")
@@ -7803,17 +8010,18 @@ calculate_health_score() {
     issues+=("age:${age_days}d")
   fi
 
-  # Check merge status (max -10 points)
-  if ! is_branch_merged "$wt_path" "$DEFAULT_BASE"; then
+  # Check merge status (max -10 points). Return 2 means the base ref does not
+  # resolve, so merge status is unknown: flag it without the unmerged penalty.
+  local merged_rc=0
+  is_branch_merged "$wt_path" "$DEFAULT_BASE" || merged_rc=$?
+  if (( merged_rc == 1 )); then
     score=$((score - 10))
     issues+=("unmerged")
+  elif (( merged_rc == 2 )); then
+    issues+=("merge-unknown")
   fi
 
   # Check untracked files (max -5 points)
-  local untracked=0
-  if [[ -n "$st" ]]; then
-    untracked="$(count_matching "$st" '\?\?*')"
-  fi
   if (( untracked > 10 )); then
     score=$((score - 5))
     issues+=("untracked:$untracked")
@@ -7890,10 +8098,14 @@ cmd_health() {
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
+  load_repo_config "$git_dir"
 
-  # Collect worktrees once for reuse across all health checks
+  # Collect worktrees once for reuse across all health checks, and gather
+  # their statuses in parallel so each health score reads from the cache.
   local health_worktrees=()
   collect_worktrees "$git_dir" health_worktrees
+  clear_git_cache
+  collect_worktree_statuses "$git_dir"
 
   local wt_path="" branch=""
   local total_score=0 wt_count=0
@@ -8091,7 +8303,7 @@ cmd_health() {
   print -r -- "${C_BOLD}Database Health${C_RESET}"
   if command -v mysql >/dev/null 2>&1; then
     # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-    local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+    local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
     local dbs; dbs="$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
 
@@ -8215,7 +8427,7 @@ cmd_dashboard() {
   local result grade rest score st age_days
   local avg_grade avg_score grade_colored
   local wt wt_branch wt_rest wt_grade wt_score wt_grade_colored
-  local status_parts shown
+  local status_parts shown wt_entry
 
   # Collect data for all repos
   for git_dir in "$HERD_ROOT"/*.git(N); do
@@ -8223,9 +8435,14 @@ cmd_dashboard() {
     repo_name="${${git_dir:t}%.git}"
     total_repos=$((total_repos + 1))
 
-    # Collect worktrees using shared helper
+    # Collect worktrees using shared helper. Each repo is graded against its
+    # own DEFAULT_BASE, and its statuses are gathered once, in parallel, so
+    # the per-worktree health score below reads them from the cache.
     local dash_worktrees=()
     collect_worktrees "$git_dir" dash_worktrees
+    load_repo_config "$git_dir"
+    clear_git_cache
+    collect_worktree_statuses "$git_dir"
 
     repo_wt_count=0
     repo_dirty=0
@@ -8234,7 +8451,6 @@ cmd_dashboard() {
 
     # Collect worktree info for this repo
     local wt_info=()
-    local wt_entry
     for wt_entry in "${dash_worktrees[@]}"; do
       wt_path="${wt_entry%%|*}"
       branch="${wt_entry##*|}"
@@ -8251,8 +8467,12 @@ cmd_dashboard() {
       score="${rest%%|*}"
       repo_grade_sum=$((repo_grade_sum + score))
 
-      # Check dirty
-      st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+      # Check dirty (cache first; git status only if the cache has no entry)
+      if get_cached_status "$wt_path" dirty >/dev/null; then
+        [[ "$REPLY" == dirty ]] && st=dirty || st=""
+      else
+        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+      fi
       if [[ -n "$st" ]]; then
         repo_dirty=$((repo_dirty + 1))
         total_dirty=$((total_dirty + 1))
@@ -8538,6 +8758,7 @@ cmd_cleanup_herd() {
   local cert_dir="$HERD_CONFIG/valet/Certificates"
   local orphaned=()
   local cleaned=0
+  local raw_target=""
 
   if [[ ! -d "$nginx_dir" ]]; then
     warn "Nginx config directory not found: $nginx_dir"
@@ -8555,6 +8776,11 @@ cmd_cleanup_herd() {
     local folder_name="${site_name%.test}"  # e.g., myapp--feature-xyz
     local wt_path="$HERD_ROOT/$folder_name"
 
+    # A site still linked in Herd's Sites directory is live whatever its name
+    # (a new-layout worktree folder can contain "--" too, e.g. after
+    # `grove move`); only Method 2 below may judge a linked site.
+    [[ -e "$sites_dir/$folder_name" || -L "$sites_dir/$folder_name" ]] && continue
+
     # Check if the worktree directory exists
     if [[ ! -d "$wt_path" ]]; then
       orphaned+=("$site_name")
@@ -8569,7 +8795,7 @@ cmd_cleanup_herd() {
       # readlink may return a RELATIVE target, which would then be tested against
       # grove's cwd and wrongly judged missing. Canonicalise with :A (full symlink
       # resolution) so the existence test runs against the real absolute path.
-      local raw_target; raw_target="$(readlink "$site_link" 2>/dev/null)"
+      raw_target="$(readlink "$site_link" 2>/dev/null)"
       local target="${site_link:A}"
 
       # Only check sites that point to -worktrees directories
@@ -8643,6 +8869,33 @@ cmd_cleanup_herd() {
 }
 
 
+# _unlock_lock_file — Remove one index.lock if it is safe to do so
+#
+# A lock held by a running process is never removed: deleting it mid-checkout or
+# mid-rebase lets a second writer corrupt the index. A lock younger than five
+# minutes is probably a live operation that lsof/fuser missed, so it needs -f.
+#
+# Arguments:
+#   $1 - lock file path
+#   $2 - label for messages
+#
+# Returns:
+#   0 if removed, 1 if left in place
+_unlock_lock_file() {
+  local lock_file="$1" label="$2"
+  if _lock_file_in_use "$lock_file"; then
+    warn "Lock in use by a running process, not removing: $label"
+    return 1
+  fi
+  local lock_age=$(( $(_get_now) - $(file_mtime "$lock_file" || echo 0) ))
+  if (( lock_age <= 300 )) && [[ "$FORCE" != true ]]; then
+    warn "Lock is under 5 minutes old, not removing: $label ${C_DIM}(use -f if no git command is running)${C_RESET}"
+    return 1
+  fi
+  rm -f "$lock_file"
+  ok "Removed lock: $label"
+}
+
 # cmd_unlock — Remove stale git index lock files from worktrees
 #
 # Arguments:
@@ -8673,16 +8926,12 @@ cmd_unlock() {
 
     local count=0
     for lock_file in "$worktrees_dir"/*/index.lock(N); do
-      if [[ -f "$lock_file" ]]; then
-        local wt_name="${${lock_file:h}:t}"
-        rm -f "$lock_file"
-        ok "Removed lock: ${C_CYAN}$wt_name${C_RESET}"
-        count=$((count + 1))
-      fi
+      [[ -f "$lock_file" ]] || continue
+      _unlock_lock_file "$lock_file" "${C_CYAN}${${lock_file:h}:t}${C_RESET}" && count=$((count + 1))
     done
 
     if (( count == 0 )); then
-      ok "No stale lock files found for ${C_CYAN}$repo${C_RESET}"
+      ok "No lock files removed for ${C_CYAN}$repo${C_RESET}"
     else
       ok "Removed ${C_BOLD}$count${C_RESET} lock file(s)"
     fi
@@ -8699,17 +8948,13 @@ cmd_unlock() {
       [[ -d "$worktrees_dir" ]] || continue
 
       for lock_file in "$worktrees_dir"/*/index.lock(N); do
-        if [[ -f "$lock_file" ]]; then
-          local wt_name="${${lock_file:h}:t}"
-          rm -f "$lock_file"
-          ok "Removed lock: ${C_CYAN}$repo_name${C_RESET} / ${C_MAGENTA}$wt_name${C_RESET}"
-          total=$((total + 1))
-        fi
+        [[ -f "$lock_file" ]] || continue
+        _unlock_lock_file "$lock_file" "${C_CYAN}$repo_name${C_RESET} / ${C_MAGENTA}${${lock_file:h}:t}${C_RESET}" && total=$((total + 1))
       done
     done
 
     if (( total == 0 )); then
-      ok "No stale lock files found"
+      ok "No lock files removed"
     else
       ok "Removed ${C_BOLD}$total${C_RESET} lock file(s)"
     fi
@@ -8780,24 +9025,9 @@ _repair_repo() {
     print -r -- ""
   fi
 
-  local found=0 fixed=0
+  local found=0 fixed=0 damaged=0 recovered=0
 
-  # 1. Prune orphaned worktrees
-  [[ "$json_mode" == true ]] || info "Checking for orphaned worktrees..."
-  local pruned; pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
-  if [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
-    if [[ "$json_mode" != true ]]; then
-      print -r -- "$pruned" | while read -r line; do
-        ok "  Pruned: $line"
-      done
-    fi
-    found=$((found + 1))
-    fixed=$((fixed + 1))
-  else
-    [[ "$json_mode" == true ]] || dim "  No orphaned worktrees"
-  fi
-
-  # 2. Clean stale index locks
+  # 1. Clean stale index locks
   [[ "$json_mode" == true ]] || info "Checking for stale index locks..."
   # check_index_locks prints the lock count on STDOUT (exit status is always 0 on
   # success); capture it rather than relying on the old exit-status-as-count.
@@ -8810,14 +9040,17 @@ _repair_repo() {
     [[ "$json_mode" == true ]] || dim "  No stale locks"
   fi
 
-  # 3. Check for missing .git files in worktrees
+  # 2. Check for missing .git files in worktrees. This runs BEFORE pruning:
+  # git treats a worktree whose .git file is missing as deleted, so pruning
+  # first would destroy the metadata (index, HEAD, grove sidecars) that
+  # recovery needs, then report the loss as a fix.
   [[ "$json_mode" == true ]] || info "Checking worktree integrity..."
   local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
   local wt_path="" branch="" corrupted_worktrees=()
   # Declared OUTSIDE the loop: `local var;` re-declared inside a loop makes
   # zsh print "var='...'" to stdout from the second iteration onward, which
   # corrupts JSON output (see CLAUDE.md, JSON output data contract).
-  local gitdir_content=""
+  local gitdir_content="" wt_git_dir=""
 
   # The trailing $'\n' preserves the blank line after the final porcelain
   # entry (command substitution strips it), so the last worktree is checked.
@@ -8845,15 +9078,17 @@ _repair_repo() {
           fi
         fi
 
-        # Check for missing HEAD
+        # Check for missing HEAD. git names the admin directory at creation
+        # time and `worktree move` keeps it, so find it by its gitdir backlink.
         local worktree_name="${wt_path:t}"
-        local wt_git_dir="$git_dir/worktrees/$worktree_name"
-        if [[ -d "$wt_git_dir" && ! -f "$wt_git_dir/HEAD" ]]; then
+        wt_git_dir="$(_worktree_admin_dir "$git_dir" "$wt_path")" || wt_git_dir=""
+        if [[ -n "$wt_git_dir" && ! -f "$wt_git_dir/HEAD" ]]; then
           issue="${issue:+$issue, }missing HEAD"
         fi
 
         if [[ -n "$issue" ]]; then
           found=$((found + 1))
+          damaged=$((damaged + 1))
           [[ "$json_mode" == true ]] || warn "  ${C_YELLOW}$worktree_name${C_RESET}: $issue"
           [[ -n "$branch" ]] && corrupted_worktrees+=("$wt_path|$branch|$issue")
         fi
@@ -8883,14 +9118,37 @@ _repair_repo() {
       if _attempt_worktree_recovery "$repo" "$git_dir" "$corrupt_path" "$corrupt_branch" "$corrupt_issue"; then
         [[ "$json_mode" == true ]] || ok "    Recovered successfully"
         fixed=$((fixed + 1))
-      elif [[ "$json_mode" != true ]]; then
-        warn "    Recovery failed - may need manual intervention"
-        dim "    Try: grove rm $repo $corrupt_branch && grove add $repo $corrupt_branch"
+        recovered=$((recovered + 1))
+      else
+        if [[ "$json_mode" != true ]]; then
+          warn "    Recovery failed - may need manual intervention"
+          dim "    Try: grove rm $repo $corrupt_branch && grove add $repo $corrupt_branch"
+        fi
       fi
     done
   elif (( ${#corrupted_worktrees[@]} > 0 )) && [[ "$json_mode" != true ]]; then
     print -r -- ""
     dim "  Use ${C_YELLOW}--recovery${C_RESET} flag to attempt automatic recovery"
+  fi
+
+  # 3. Prune orphaned worktrees — only once no damaged worktree remains, so
+  # prune never discards the metadata of a worktree that still exists.
+  [[ "$json_mode" == true ]] || info "Checking for orphaned worktrees..."
+  if (( damaged > recovered )); then
+    [[ "$json_mode" == true ]] || dim "  Skipped: damaged worktrees remain and pruning would discard their metadata"
+  else
+    local pruned; pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
+    if [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
+      if [[ "$json_mode" != true ]]; then
+        print -r -- "$pruned" | while read -r line; do
+          ok "  Pruned: $line"
+        done
+      fi
+      found=$((found + 1))
+      fixed=$((fixed + 1))
+    else
+      [[ "$json_mode" == true ]] || dim "  No orphaned worktrees"
+    fi
   fi
 
   if [[ "$json_mode" == true ]]; then
@@ -8919,7 +9177,39 @@ _repair_repo() {
   fi
 }
 
-# Attempt to recover a corrupted worktree by recreating .git and HEAD files
+# _worktree_admin_dir — Print the $git_dir/worktrees/<id> directory that belongs to a worktree
+#
+# git names the admin directory when the worktree is created, and `git worktree
+# move` (used by `grove move`) keeps that name, so the folder name is not a
+# reliable key. Match on the admin directory's gitdir backlink instead.
+#
+# Arguments:
+#   $1 - git directory path
+#   $2 - worktree path
+#
+# Returns:
+#   0 and prints the directory, or 1 when no admin directory points at the worktree
+_worktree_admin_dir() {
+  local git_dir="$1"
+  local want="${2:A}/.git"
+  local admin backlink
+  for admin in "$git_dir"/worktrees/*(N/); do
+    [[ -f "$admin/gitdir" ]] || continue
+    backlink="$(<"$admin/gitdir")"
+    if [[ "${backlink:A}" == "$want" ]]; then
+      print -r -- "$admin"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Attempt to recover a corrupted worktree
+#
+# .git file problems are repaired by `git worktree repair`, which rewrites each
+# worktree's .git file from its admin directory's backlink and so never points
+# a worktree at another worktree's metadata. A missing HEAD is recreated in the
+# admin directory found by _worktree_admin_dir.
 #
 # Arguments:
 #   $1 - repository name
@@ -8936,64 +9226,22 @@ _attempt_worktree_recovery() {
   local wt_path="$3"
   local branch="$4"
   local issue="$5"
-  local folder="${wt_path:t}"
 
-  case "$issue" in
-    "missing .git file")
-      # Recreate the .git file pointing to the correct gitdir
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        print -r -- "gitdir: $worktree_git_dir" > "$wt_path/.git"
-        return 0
-      fi
-      return 1
-      ;;
+  local admin_dir; admin_dir="$(_worktree_admin_dir "$git_dir" "$wt_path")" || return 1
 
-    "broken gitdir reference")
-      # Try to find and fix the gitdir reference
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        print -r -- "gitdir: $worktree_git_dir" > "$wt_path/.git"
-        return 0
-      fi
-      return 1
-      ;;
+  if [[ "$issue" == *"missing HEAD"* ]]; then
+    print -r -- "ref: refs/heads/$branch" > "$admin_dir/HEAD"
+  fi
 
-    "malformed .git file")
-      # Recreate the .git file
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        print -r -- "gitdir: $worktree_git_dir" > "$wt_path/.git"
-        return 0
-      fi
-      return 1
-      ;;
+  if [[ "$issue" == *".git file"* || "$issue" == *"gitdir reference"* ]]; then
+    # repair exits non-zero on a bare layout (it also reports the bare repo as
+    # a broken main worktree), so judge success by the result instead.
+    git --git-dir="$git_dir" worktree repair >/dev/null 2>&1 || true
+  fi
 
-    *"missing HEAD"*)
-      # Try to recreate HEAD file
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        print -r -- "ref: refs/heads/$branch" > "$worktree_git_dir/HEAD"
-        return 0
-      fi
-      return 1
-      ;;
-
-    *)
-      # For compound issues, try the most common fix
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        # Fix .git file
-        print -r -- "gitdir: $worktree_git_dir" > "$wt_path/.git"
-        # Fix HEAD if missing
-        if [[ ! -f "$worktree_git_dir/HEAD" ]]; then
-          print -r -- "ref: refs/heads/$branch" > "$worktree_git_dir/HEAD"
-        fi
-        return 0
-      fi
-      return 1
-      ;;
-  esac
+  # Recovered only if the worktree now resolves to its own admin directory.
+  local resolved; resolved="$(git -C "$wt_path" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  [[ "${resolved:A}" == "${admin_dir:A}" ]]
 }
 
 # Parallel commands
@@ -9227,17 +9475,25 @@ cmd_build_all() {
     info "Building all worktrees across all repositories..."
     print -r -- ""
 
+    # A failing repo must not stop the rest (parallel_run returns 1 when any
+    # job fails, which errexit would otherwise turn into an early exit).
+    local rc=0
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
       local repo_name="${${git_dir:t}%.git}"
       print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
-      _build_all_for_repo "$repo_name" "$git_dir"
+      _build_all_for_repo "$repo_name" "$git_dir" || rc=1
       print -r -- ""
     done
 
-    ok "Build complete across all repositories"
-    notify "grove build-all" "Completed across all repos"
-    return 0
+    if (( rc == 0 )); then
+      ok "Build complete across all repositories"
+      notify "grove build-all" "Completed across all repos"
+    else
+      warn "Build finished across all repositories with failures"
+      notify "grove build-all" "Finished across all repos with failures"
+    fi
+    return $rc
   fi
 
   # Group mode: @name expands to the repos configured via `grove group`
@@ -9251,19 +9507,24 @@ cmd_build_all() {
     info "Building all worktrees across group @$group_name..."
     print -r -- ""
 
-    local repo_name git_dir
+    local repo_name git_dir rc=0
     for repo_name in ${=resolved}; do
       validate_name "$repo_name" "repository"
       git_dir="$(git_dir_for "$repo_name")"
       ensure_bare_repo "$git_dir"
       print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
-      _build_all_for_repo "$repo_name" "$git_dir"
+      _build_all_for_repo "$repo_name" "$git_dir" || rc=1
       print -r -- ""
     done
 
-    ok "Build complete across group @$group_name"
-    notify "grove build-all" "Completed across group @$group_name"
-    return 0
+    if (( rc == 0 )); then
+      ok "Build complete across group @$group_name"
+      notify "grove build-all" "Completed across group @$group_name"
+    else
+      warn "Build finished across group @$group_name with failures"
+      notify "grove build-all" "Finished across group @$group_name with failures"
+    fi
+    return $rc
   fi
 
   [[ -n "$repo" ]] || error_exit "INVALID_INPUT" "Usage: grove build-all <repo>
@@ -9324,16 +9585,22 @@ cmd_exec_all() {
     info "Executing '$cmd_str' across all repositories..."
     print -r -- ""
 
+    # A failing repo must not stop the rest; report the overall result.
+    local rc=0
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
       local repo_name="${${git_dir:t}%.git}"
       print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
-      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str"
+      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str" || rc=1
       print -r -- ""
     done
 
-    ok "Execution complete across all repositories"
-    return 0
+    if (( rc == 0 )); then
+      ok "Execution complete across all repositories"
+    else
+      warn "Execution finished across all repositories with failures"
+    fi
+    return $rc
   fi
 
   shift || true
@@ -9355,18 +9622,22 @@ cmd_exec_all() {
     info "Executing '$cmd_str' across group @$group_name..."
     print -r -- ""
 
-    local repo_name git_dir
+    local repo_name git_dir rc=0
     for repo_name in ${=resolved}; do
       validate_name "$repo_name" "repository"
       git_dir="$(git_dir_for "$repo_name")"
       ensure_bare_repo "$git_dir"
       print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
-      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str"
+      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str" || rc=1
       print -r -- ""
     done
 
-    ok "Execution complete across group @$group_name"
-    return 0
+    if (( rc == 0 )); then
+      ok "Execution complete across group @$group_name"
+    else
+      warn "Execution finished across group @$group_name with failures"
+    fi
+    return $rc
   fi
 
   [[ -n "$repo" && ${#cmd[@]} -gt 0 ]] || error_exit "INVALID_INPUT" "Usage: grove exec-all <repo> <command...>
@@ -9537,7 +9808,7 @@ cmd_info() {
   local db_exists=false
   if [[ "$skip_heavy" != true ]] && command -v mysql >/dev/null 2>&1; then
     # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-    local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+    local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
     if MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1 FROM information_schema.schemata WHERE schema_name='$db_name'" 2>/dev/null | grep -q 1; then
       db_exists=true
     fi
@@ -9545,7 +9816,7 @@ cmd_info() {
 
   # Timestamps
   local created_at="" accessed_at="" last_commit_at=""
-  accessed_at="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo "")"
+  accessed_at="$(file_mtime "$wt_path")" || accessed_at=""
   last_commit_at="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || last_commit_at=""
 
   # Health score
@@ -9554,6 +9825,10 @@ cmd_info() {
   local health_rest="${health_result#*|}"
   local health_score="${health_rest%%|*}"
   local health_issues="${health_rest#*|}"
+  # Only numbers may be embedded bare in the JSON contract.
+  [[ "$health_score" =~ ^[0-9]+$ ]] || { health_grade="?" health_score=0 health_issues=""; }
+  [[ "$accessed_at" =~ ^[0-9]+$ ]] || accessed_at=""
+  [[ "$last_commit_at" =~ ^[0-9]+$ ]] || last_commit_at=""
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -9645,9 +9920,9 @@ cmd_info() {
     # Convert comma-separated issues to JSON array
     local issues_json="["
     if [[ -n "$health_issues" ]]; then
-      local first=true
-      local IFS=','
-      for issue in $health_issues; do
+      local first=true issue
+      # zsh does not word-split unquoted parameters; split explicitly on commas
+      for issue in ${(s:,:)health_issues}; do
         [[ "$first" == true ]] || issues_json+=", "
         json_escape "$issue"; issues_json+="\"$REPLY\""
         first=false
@@ -9740,7 +10015,7 @@ cmd_recent() {
       wt_path="${wt_entry%%|*}"
       wt_branch="${wt_entry##*|}"
       [[ -d "$wt_path" ]] || continue
-      atime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+      atime="$(file_mtime "$wt_path" || echo 0)"
       # Resolve the URL HERE, while this repo's config (GROVE_URL_SUBDOMAIN) is
       # loaded — resolving it later would apply the last repo's subdomain to
       # every entry. Keep URLs outside the delimited records: APP_URL may
@@ -10478,7 +10753,7 @@ cmd_setup() {
   # Test MySQL connection if credentials provided (use MYSQL_PWD for safer password handling)
   if [[ -n "$db_host" && -n "$db_user" ]]; then
     info "   Testing MySQL connection..."
-    local mysql_cmd=(mysql -h "$db_host" -u "$db_user")
+    local mysql_cmd=(mysql -h "$db_host" -P "$DB_PORT" -u "$db_user")
     if MYSQL_PWD="${db_password:-}" "${mysql_cmd[@]}" -e "SELECT 1" >/dev/null 2>&1; then
       ok "   MySQL connection successful"
     else
@@ -10553,10 +10828,17 @@ DB_HOST="$db_host"
 DB_USER="$db_user"
 EOF
 
-    # Only write password if provided
+    # Only write password if provided. The config parser ends a quoted value
+    # at its first matching quote, so pick the quote the password lacks.
     if [[ -n "$db_password" ]]; then
       warn "   Database password will be stored in plain text"
-      print -r -- "DB_PASSWORD=\"$db_password\"" >> "$config_file"
+      if [[ "$db_password" != *'"'* ]]; then
+        print -r -- "DB_PASSWORD=\"$db_password\"" >> "$config_file"
+      elif [[ "$db_password" != *"'"* ]]; then
+        print -r -- "DB_PASSWORD='$db_password'" >> "$config_file"
+      else
+        warn "   The password contains both ' and \" and cannot be stored; set DB_PASSWORD in the environment instead"
+      fi
     fi
 
     cat >> "$config_file" << EOF
@@ -10735,8 +11017,10 @@ cmd_group() {
       # Declare loop variables outside loop to avoid zsh re-declaration output
       local git_dir wt_list wt_count
       for repo in ${=repos_str}; do
-        # Validate repo name to prevent injection from tampered group file
-        validate_name "$repo" "repository" 2>/dev/null || {
+        # Validate repo name to prevent injection from tampered group file.
+        # validate_name exits on failure, so run it in a subshell to skip
+        # the bad entry instead of silently ending the whole listing.
+        ( validate_name "$repo" "repository" ) >/dev/null 2>&1 || {
           warn "Invalid repo name in group: $repo (skipping)"
           continue
         }
@@ -10982,6 +11266,36 @@ svc_get_supervisor_process() {
   print -r -- "${SVC_SUPERVISOR_PROCESSES[$app]:-${app}-horizon}"
 }
 
+# svc_process_state — Set REPLY to a supervisor program's state from a
+# `supervisorctl status` snapshot ("" when the program is not configured).
+#
+# A grouped program ("app:*") has one line per member. It is RUNNING only when
+# every member is; otherwise the first member that is not running decides, so a
+# FATAL Reverb beside a RUNNING Horizon is never reported as RUNNING. The name
+# is matched literally (it is not a regex).
+svc_process_state() {
+  local snapshot="$1" name="${2%:*}" line
+  local -a fields
+  REPLY=""
+  for line in "${(@f)snapshot}"; do
+    [[ "$line" == "$name"[:\ ]* ]] || continue
+    fields=(${=line})
+    [[ -z "$REPLY" || "$REPLY" == RUNNING ]] && REPLY="${fields[2]:-UNKNOWN}"
+  done
+  return 0
+}
+
+# Snapshots of `supervisorctl status` and `launchctl list`, taken once per
+# status/doctor run so the cost does not grow with the number of apps. Empty
+# (unset) outside those runs, where svc_show_app_status queries live.
+typeset -g _SVC_SUP_SNAPSHOT="" _SVC_LAUNCHCTL_SNAPSHOT="" _SVC_SNAPSHOTS=false
+
+svc_take_snapshots() {
+  _SVC_SUP_SNAPSHOT="$(supervisorctl status 2>/dev/null || true)"
+  _SVC_LAUNCHCTL_SNAPSHOT="$(launchctl list 2>/dev/null || true)"
+  _SVC_SNAPSHOTS=true
+}
+
 svc_app_uses_horizon() {
   local app="$1"
   [[ "${SVC_SERVICES[$app]}" == horizon* ]]
@@ -11038,13 +11352,14 @@ svc_show_app_status() {
 
   # Supervisor process (skip if services=none)
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
-    local sup_status
-    sup_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1)" || true
-    if [[ -n "$sup_status" ]]; then
-      if print -r -- "$sup_status" | grep -q "RUNNING"; then
+    local sup_snapshot="$_SVC_SUP_SNAPSHOT"
+    [[ "$_SVC_SNAPSHOTS" == true ]] || sup_snapshot="$(supervisorctl status 2>/dev/null || true)"
+    svc_process_state "$sup_snapshot" "$process"
+    if [[ -n "$REPLY" ]]; then
+      if [[ "$REPLY" == RUNNING ]]; then
         ok "Supervisor: RUNNING"
       else
-        warn "Supervisor: $(print -r -- "$sup_status" | awk '{print $2}')"
+        warn "Supervisor: $REPLY"
       fi
     else
       warn "Supervisor: Not configured"
@@ -11071,9 +11386,9 @@ svc_show_app_status() {
   fi
 
   # Scheduler
-  local scheduler_status
-  scheduler_status="$(launchctl list 2>/dev/null | grep "com.${app}.scheduler" || true)"
-  if [[ -n "$scheduler_status" ]]; then
+  local launchctl_snapshot="$_SVC_LAUNCHCTL_SNAPSHOT"
+  [[ "$_SVC_SNAPSHOTS" == true ]] || launchctl_snapshot="$(launchctl list 2>/dev/null || true)"
+  if [[ "$launchctl_snapshot" == *"com.${app}.scheduler"* ]]; then
     ok "Scheduler: Loaded"
   else
     dim "Scheduler: Not loaded"
@@ -11110,7 +11425,7 @@ cmd_services_status_json() {
   # zsh `local` re-declaration debug-output pitfall.
   local json_items=()
   local app_name system_name services process domain symlink current
-  local proc_line proc_state scheduler_loaded current_json supervisor_status_json
+  local proc_state scheduler_loaded current_json supervisor_status_json
   local je_name je_system je_services je_process je_domain je_current je_state
   for app_name in $(svc_get_app_list); do
     if [[ -n "$app_filter" && "$app_filter" != "all" && "$app_name" != "$app_filter" ]]; then
@@ -11133,12 +11448,8 @@ cmd_services_status_json() {
     if [[ "$services" == "none" || -z "$process" ]]; then
       supervisor_status_json="null"
     else
-      proc_line="$(print -r -- "$supervisor_snapshot" | grep -E "^${process%:*}[: ]" | head -1 || true)"
-      if [[ -n "$proc_line" ]]; then
-        proc_state="$(print -r -- "$proc_line" | awk '{print $2}')"
-      else
-        proc_state="NOT_CONFIGURED"
-      fi
+      svc_process_state "$supervisor_snapshot" "$process"
+      proc_state="${REPLY:-NOT_CONFIGURED}"
       json_escape "$proc_state"; je_state="$REPLY"
       supervisor_status_json="\"$je_state\""
     fi
@@ -11196,6 +11507,7 @@ cmd_services_status() {
     return 0
   fi
 
+  svc_take_snapshots
   if [[ -n "$app" && "$app" != "all" ]]; then
     svc_validate_app "$app"
     svc_show_app_status "$app"
@@ -11705,20 +12017,21 @@ cmd_services_doctor() {
       fi
     done
 
-    # Check supervisor processes
+    # Check supervisor processes (one snapshot for every app)
     info "Supervisor Processes:"
-    local process proc_status
+    svc_take_snapshots
+    local process
     for app in $(svc_get_app_list); do
       if [[ "${SVC_SERVICES[$app]}" == "none" ]]; then
         continue
       fi
       process="$(svc_get_supervisor_process "$app")"
-      proc_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
-      if [[ -n "$proc_status" ]]; then
-        if print -r -- "$proc_status" | grep -q "RUNNING"; then
+      svc_process_state "$_SVC_SUP_SNAPSHOT" "$process"
+      if [[ -n "$REPLY" ]]; then
+        if [[ "$REPLY" == RUNNING ]]; then
           ok "$app: RUNNING"
         else
-          warn "$app: $(print -r -- "$proc_status" | awk '{print $2}')"
+          warn "$app: $REPLY"
         fi
       else
         warn "$app: Not configured"
@@ -11727,14 +12040,11 @@ cmd_services_doctor() {
 
     # Check scheduler LaunchAgents
     info "Scheduler LaunchAgents:"
-    local plist scheduler_status
+    local plist
     for app in $(svc_get_app_list); do
       plist="$GROVE_LAUNCH_AGENTS/com.${app}.scheduler.plist"
       if [[ -f "$plist" ]]; then
-        # Capture with plain grep rather than grep -q: under pipefail, -q's early
-        # exit sends launchctl a SIGPIPE and fails the pipeline on a real match.
-        scheduler_status="$(launchctl list 2>/dev/null | grep "com.${app}.scheduler" || true)"
-        if [[ -n "$scheduler_status" ]]; then
+        if [[ "$_SVC_LAUNCHCTL_SNAPSHOT" == *"com.${app}.scheduler"* ]]; then
           ok "$app: Loaded"
         else
           warn "$app: Not loaded"
@@ -12005,10 +12315,43 @@ usage() {
 }
 
 # Parse global flags (can appear anywhere in command line)
+#
+# exec and exec-all run a user command. Once their own positional arguments are
+# in, a flag grove would consume (-f, -q, -v, …) is refused rather than
+# silently taken from that command: `grove exec app main php -v` must not print
+# grove's version, and `artisan migrate --force` must not lose --force. The
+# error points at `--`. Flags grove does not know pass through to the command,
+# and --json/--pretty stay grove's output flags (the JSON contract uses them
+# after the command).
 parse_flags() {
   REMAINING_ARGS=()
   local show_version=false
+  local user_cmd_at=0
   while [[ $# -gt 0 ]]; do
+    # Positional count at which the user command starts (the command word
+    # itself counts as one): exec <repo> <branch>, exec-all <repo|@group>,
+    # or exec-all --all-repos with no repo.
+    case "${REMAINING_ARGS[1]:-}" in
+      exec)     user_cmd_at=3 ;;
+      exec-all) [[ "${ALL_REPOS:-false}" == true ]] && user_cmd_at=1 || user_cmd_at=2 ;;
+      *)        user_cmd_at=0 ;;
+    esac
+    if (( user_cmd_at > 0 && ${#REMAINING_ARGS[@]} >= user_cmd_at )) && [[ "$1" == -?* ]]; then
+      case "$1" in
+        --|--json|--pretty) ;;
+        -q|--quiet|-f|--force|-i|--interactive|--delete-branch|--drop-db|--no-backup|\
+        --dry-run|--check|--all-repos|--recovery|--no-cache|--refresh|--template=*|-t|\
+        --dir|--dir=*|--as|--as=*|-v|--version|-h|--help)
+          setup_colors
+          die "'$1' after the command is ambiguous (it is also a grove flag). Put the command after '--': grove ${REMAINING_ARGS[1]} … -- <command>"
+          ;;
+        *)
+          REMAINING_ARGS+=("$1")
+          shift
+          continue
+          ;;
+      esac
+    fi
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;

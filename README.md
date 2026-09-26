@@ -472,7 +472,7 @@ Some flags are specific to a single command but still accepted on the command li
 | `--output <file>` | `grove report` — write the report to a file instead of stdout |
 | `-n N` | `grove log` — limit the number of commits shown (default 5) |
 | `--recovery` | `grove repair` — attempt more aggressive recovery |
-| `--` | End-of-options marker — everything after it is passed through verbatim (lets `exec` / `exec-all` run commands containing dashes) |
+| `--` | End-of-options marker — everything after it is passed through verbatim. `exec` / `exec-all` pass unknown flags such as `-la` to the command, but refuse a grove flag (`-f`, `-q`, `-v`, …) after the command unless it follows `--` |
 
 See the [Command Reference](docs/reference/commands.md) for every flag and the full JSON schemas.
 

@@ -123,7 +123,7 @@ cmd_info() {
   local db_exists=false
   if [[ "$skip_heavy" != true ]] && command -v mysql >/dev/null 2>&1; then
     # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-    local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+    local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
     if MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1 FROM information_schema.schemata WHERE schema_name='$db_name'" 2>/dev/null | grep -q 1; then
       db_exists=true
     fi
@@ -131,7 +131,7 @@ cmd_info() {
 
   # Timestamps
   local created_at="" accessed_at="" last_commit_at=""
-  accessed_at="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo "")"
+  accessed_at="$(file_mtime "$wt_path")" || accessed_at=""
   last_commit_at="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || last_commit_at=""
 
   # Health score
@@ -140,6 +140,10 @@ cmd_info() {
   local health_rest="${health_result#*|}"
   local health_score="${health_rest%%|*}"
   local health_issues="${health_rest#*|}"
+  # Only numbers may be embedded bare in the JSON contract.
+  [[ "$health_score" =~ ^[0-9]+$ ]] || { health_grade="?" health_score=0 health_issues=""; }
+  [[ "$accessed_at" =~ ^[0-9]+$ ]] || accessed_at=""
+  [[ "$last_commit_at" =~ ^[0-9]+$ ]] || last_commit_at=""
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -231,9 +235,9 @@ cmd_info() {
     # Convert comma-separated issues to JSON array
     local issues_json="["
     if [[ -n "$health_issues" ]]; then
-      local first=true
-      local IFS=','
-      for issue in $health_issues; do
+      local first=true issue
+      # zsh does not word-split unquoted parameters; split explicitly on commas
+      for issue in ${(s:,:)health_issues}; do
         [[ "$first" == true ]] || issues_json+=", "
         json_escape "$issue"; issues_json+="\"$REPLY\""
         first=false
@@ -326,7 +330,7 @@ cmd_recent() {
       wt_path="${wt_entry%%|*}"
       wt_branch="${wt_entry##*|}"
       [[ -d "$wt_path" ]] || continue
-      atime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+      atime="$(file_mtime "$wt_path" || echo 0)"
       # Resolve the URL HERE, while this repo's config (GROVE_URL_SUBDOMAIN) is
       # loaded — resolving it later would apply the last repo's subdomain to
       # every entry. Keep URLs outside the delimited records: APP_URL may

@@ -210,11 +210,18 @@ normalize_branch_name() {
 }
 
 # validate_git_ref — Validate git ref format and block injection characters
+# Refs that passed validate_git_ref this run (memo; see below)
+typeset -gA _GROVE_VALID_REFS
+
 validate_git_ref() {
   local ref="$1" type="${2:-git ref}"
 
   # Empty is sometimes okay (will use default)
   [[ -z "$ref" ]] && return 0
+
+  # Already validated in this run: the same base is checked once per worktree
+  # by several helpers, and the last check spawns `git check-ref-format`.
+  (( ${+_GROVE_VALID_REFS[$ref]} )) && return 0
 
   # Block command injection characters
   if [[ "$ref" == *";"* ]] || [[ "$ref" == *"|"* ]] || [[ "$ref" == *"&"* ]] || \
@@ -250,6 +257,8 @@ validate_git_ref() {
   if ! is_valid_ref_format "$ref"; then
     error_exit "INVALID_INPUT" "Invalid $type: '$ref' (invalid git ref format)" 2
   fi
+
+  _GROVE_VALID_REFS[$ref]=1
 }
 
 # validate_max_parallel — Validate GROVE_MAX_PARALLEL and reset to 4 if invalid

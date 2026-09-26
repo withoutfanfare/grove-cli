@@ -274,14 +274,10 @@ format_json() {
     if formatted="$(print -r -- "$json" | python3 -m json.tool 2>/dev/null)"; then
       result="$formatted"
     fi
-  else
-    # Fallback: simple string replacements for basic formatting
-    result="${result//\[/$'\n['}"
-    result="${result//\{/$'\n  {'}"
-    result="${result//\}/$'}\n'}"
-    result="${result//\],/$'],\n'}"
-    result="${result//\}, /'},\n  '}"
   fi
+  # With neither jq nor python3 the JSON is printed unformatted: text-level
+  # newline insertion cannot tell structure from brackets inside string values,
+  # and a raw newline inside a string makes the document invalid.
 
   # Apply colours if terminal supports it (skip when jq already colourised,
   # since the regex-based colouring can corrupt values containing ':' or quotes)

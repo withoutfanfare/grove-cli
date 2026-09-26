@@ -135,7 +135,7 @@ create_database() {
     return 0
   fi
 
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+  local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER")
 
   info "Creating database ${C_CYAN}$db_name${C_RESET}"
 
@@ -170,7 +170,7 @@ backup_database() {
   # Probe connectivity FIRST so a connection/auth failure is never mistaken for
   # "database does not exist" — silently skipping the backup right before the
   # worktree (and DB) is removed would be data-loss-adjacent.
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+  local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
   # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
   if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
@@ -203,7 +203,7 @@ backup_database() {
     local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
     local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
 
-    local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
+    local mysqldump_cmd=(mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER")
 
     info "Backing up database ${C_CYAN}$db_name${C_RESET}"
 
@@ -233,7 +233,7 @@ drop_database() {
     return 0
   fi
 
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+  local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
   # Probe connectivity first so a connection/auth failure is not mistaken for
   # "database does not exist" (which would silently leave the DB behind).

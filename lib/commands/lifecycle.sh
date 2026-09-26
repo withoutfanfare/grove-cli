@@ -397,6 +397,10 @@ cmd_rm() {
     if [[ "$JSON_OUTPUT" == true ]]; then
       error_exit "REMOVAL_BLOCKED" "$REPLY" 6
     fi
+    if ! removal_can_prompt; then
+      print -r -- "${C_YELLOW}$REPLY${C_RESET}" >&2
+      error_exit "REMOVAL_BLOCKED" "removal blocked; confirming it needs an interactive terminal" 6
+    fi
     print -r -- "${C_YELLOW}$REPLY${C_RESET}" >&2
     print -n "${C_YELLOW}Remove anyway? [y/N]${C_RESET} "
     local response
@@ -782,8 +786,10 @@ cmd_fresh() {
   print -r -- "${C_BOLD}Refreshing ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
   print -r -- ""
 
-  # Run migrate:fresh --seed (with confirmation unless forced)
+  # Run migrate:fresh --seed (with confirmation unless forced). Declining
+  # skips only the database step; npm ci and the build below still run.
   if [[ -f "artisan" ]]; then
+    local run_migrate=true
     if [[ "$FORCE" == false ]]; then
       warn "This will DROP ALL TABLES in the database!"
       print -n "${C_YELLOW}Continue with migrate:fresh? [y/N]${C_RESET} "
@@ -791,15 +797,17 @@ cmd_fresh() {
       read -r response
       if [[ ! "$response" =~ ^[Yy]$ ]]; then
         warn "Skipping migrate:fresh"
-        return 0
+        run_migrate=false
       fi
     fi
 
-    info "Running migrate:fresh --seed..."
-    if php artisan migrate:fresh --seed; then
-      ok "Database refreshed"
-    else
-      warn "migrate:fresh --seed failed"
+    if [[ "$run_migrate" == true ]]; then
+      info "Running migrate:fresh --seed..."
+      if php artisan migrate:fresh --seed; then
+        ok "Database refreshed"
+      else
+        warn "migrate:fresh --seed failed"
+      fi
     fi
   fi
 
