@@ -123,7 +123,7 @@ cmd_info() {
   local db_exists=false
   if [[ "$skip_heavy" != true ]] && command -v mysql >/dev/null 2>&1; then
     # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-    local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+    local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
     if MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1 FROM information_schema.schemata WHERE schema_name='$db_name'" 2>/dev/null | grep -q 1; then
       db_exists=true
     fi

@@ -573,3 +573,17 @@ EOF
   grep -qF "myXapp|myXapp|" "$GROVE_SERVICES_DIR/apps.conf"
   ! grep -qF "my.app|my.app|" "$GROVE_SERVICES_DIR/apps.conf"
 }
+
+@test "svc_process_state: a grouped program is RUNNING only when every member is" {
+  run zsh -c "
+    source \"\$PROJECT_ROOT/lib/commands/services.sh\" 2>/dev/null || true
+    snap=\$'app:app-horizon  RUNNING  pid 1\napp:app-reverb  FATAL  Exited too quickly\nappx:foo  RUNNING  pid 2\nsolo  RUNNING  pid 3'
+    svc_process_state \"\$snap\" 'app:*'; print -r -- \"group=\$REPLY\"
+    svc_process_state \"\$snap\" solo; print -r -- \"solo=\$REPLY\"
+    svc_process_state \"\$snap\" missing; print -r -- \"missing=[\$REPLY]\"
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"group=FATAL"* ]]
+  [[ "$output" == *"solo=RUNNING"* ]]
+  [[ "$output" == *"missing=[]"* ]]
+}

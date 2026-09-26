@@ -212,6 +212,28 @@ seed_group() {
   [[ "$output" == *"failed"* ]]
 }
 
+@test "exec-all --all-repos: a failing repo does not stop the remaining repos" {
+  seed_repo_with_worktree appa main
+  seed_repo_with_worktree appb main
+
+  # Fails in appa only; appb must still run, and the overall status is failure.
+  touch "$HERD_ROOT/appa-worktrees/main/.fail"
+  run_grove exec-all --all-repos -- test ! -f .fail '&&' touch .ran
+  [ "$status" -ne 0 ]
+  [ -f "$HERD_ROOT/appb-worktrees/main/.ran" ]
+  [[ "$output" == *"with failures"* ]]
+}
+
+@test "prune --all-repos: a repository name is never run as shell code" {
+  git init -q --bare "$HERD_ROOT/ev\$(touch PWNED).git"
+  git init -q --bare "$HERD_ROOT/ok.git"
+
+  (cd "$TEST_TEMP_DIR" && run_grove prune --all-repos)
+  [ ! -e "$TEST_TEMP_DIR/PWNED" ]
+  [ ! -e "$HERD_ROOT/PWNED" ]
+  [ ! -e "$GROVE_ROOT/PWNED" ]
+}
+
 # ============================================================================
 # #16 - single quote in a worktree path is handled, not exploited
 # ============================================================================

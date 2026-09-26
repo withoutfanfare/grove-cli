@@ -22,30 +22,9 @@ _display_worktree() {
     branch=""
     [[ -n "$head" ]] || head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || true)"
   fi
-  local url=""
-  if [[ -n "$GROVE_URL_SUBDOMAIN" && -n "$branch" ]]; then
-    # When a subdomain is configured, use the actual folder's browser URL
-    # (.env APP_URL is a Laravel internal config without subdomain prefix)
-    url="$(worktree_site_url "$wt_path")"
-  elif [[ -f "$wt_path/.env" ]]; then
-    # Extract APP_URL using pure Zsh (no subprocess spawns)
-    local line
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      if [[ "$line" =~ ^[[:space:]]*APP_URL= ]]; then
-        url="${line#*=}"           # After =
-        url="${url%%#*}"           # Before # (comments)
-        url="${url//[\"\' ]}"      # Remove quotes and spaces
-        break
-      fi
-    done < "$wt_path/.env"
-    # The .env is untrusted (a committed value could set javascript: or a foreign
-    # host). Only honour an http(s) URL; otherwise fall back to the derived URL.
-    if [[ -n "$url" && "$url" != http://* && "$url" != https://* ]]; then
-      url=""
-    fi
-  fi
-  # Fall back to the canonical derived URL when no trusted .env URL was found.
-  [[ -z "$url" && -n "$branch" ]] && url="$(worktree_site_url "$wt_path")"
+  # One APP_URL parser for ls, info and recent (worktree_url): a '#' inside
+  # the URL (a fragment route) is kept, and only http(s) values are trusted.
+  local url; url="$(worktree_url "$repo" "$branch" "$wt_path")" || url=""
   [[ -z "$url" ]] && url="https://${folder}.test"
 
   # Use cached status if available, fallback to direct git calls
@@ -529,7 +508,9 @@ cmd_branches() {
   if [[ "$QUIET" != true && "$JSON_OUTPUT" != true ]]; then
     info "Fetching latest branches..."
   fi
-  git --git-dir="$git_dir" fetch --all --prune --quiet 2>/dev/null || true
+  # Cached: the desktop app's branch picker calls this often, and a network
+  # fetch on every call made it slow. --refresh / --no-cache still force one.
+  cached_fetch "$git_dir" --all --prune --quiet 2>/dev/null || true
 
   # Build associative arrays for O(1) worktree lookups, using the shared helper
   # as the single source of truth (detached-aware).
@@ -559,13 +540,17 @@ cmd_branches() {
   typeset -A local_branches_map
 
   # Declare loop variables outside loops to avoid zsh re-declaration output
-  local has_worktree wt_path_for_branch sha last_commit
+  local has_worktree wt_path_for_branch sha last_commit ref_line branch
+
+  # One for-each-ref per namespace yields name, short SHA and commit time
+  # together (tab-separated; a ref name cannot contain a tab). This replaced
+  # a rev-parse and a log per branch.
+  local ref_format='%(refname)%09%(objectname:short)%09%(committerdate:unix)'
 
   # Local branches
-  while IFS= read -r branch; do
-    [[ -n "$branch" ]] || continue
-    branch="${branch#\* }"  # Remove current branch marker
-    branch="${branch## }"   # Trim leading space
+  while IFS= read -r ref_line; do
+    [[ -n "$ref_line" ]] || continue
+    branch="${${ref_line%%$'\t'*}#refs/heads/}"
 
     # Reset state-carrying variables to prevent bleed between iterations
     has_worktree=false
@@ -582,16 +567,17 @@ cmd_branches() {
       wt_path_for_branch="${worktree_by_branch[$branch]}"
     fi
 
-    sha="$(git --git-dir="$git_dir" rev-parse --short "refs/heads/$branch" 2>/dev/null)" || sha=""
-    last_commit="$(git --git-dir="$git_dir" log -1 --format=%ct "refs/heads/$branch" 2>/dev/null)" || last_commit=""
+    sha="${${ref_line#*$'\t'}%%$'\t'*}"
+    last_commit="${ref_line##*$'\t'}"
+    [[ "$last_commit" =~ ^[0-9]+$ ]] || last_commit=""
 
     branches+=("local|$branch|$has_worktree|$wt_path_for_branch|$sha|$last_commit")
-  done < <(git --git-dir="$git_dir" branch --list --format='%(refname:short)' 2>/dev/null)
+  done < <(git --git-dir="$git_dir" for-each-ref --format="$ref_format" refs/heads 2>/dev/null)
 
   # Remote branches (that don't have local tracking)
-  while IFS= read -r branch; do
-    [[ -n "$branch" ]] || continue
-    branch="${branch#origin/}"
+  while IFS= read -r ref_line; do
+    [[ -n "$ref_line" ]] || continue
+    branch="${${ref_line%%$'\t'*}#refs/remotes/origin/}"
 
     # Skip HEAD
     [[ "$branch" == "HEAD" ]] && continue
@@ -611,11 +597,12 @@ cmd_branches() {
       wt_path_for_branch="${worktree_by_branch[$branch]}"
     fi
 
-    sha="$(git --git-dir="$git_dir" rev-parse --short "origin/$branch" 2>/dev/null)" || sha=""
-    last_commit="$(git --git-dir="$git_dir" log -1 --format=%ct "origin/$branch" 2>/dev/null)" || last_commit=""
+    sha="${${ref_line#*$'\t'}%%$'\t'*}"
+    last_commit="${ref_line##*$'\t'}"
+    [[ "$last_commit" =~ ^[0-9]+$ ]] || last_commit=""
 
     branches+=("remote|$branch|$has_worktree|$wt_path_for_branch|$sha|$last_commit")
-  done < <(git --git-dir="$git_dir" branch -r --list --format='%(refname:short)' 2>/dev/null | grep '^origin/')
+  done < <(git --git-dir="$git_dir" for-each-ref --format="$ref_format" refs/remotes/origin 2>/dev/null)
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -1191,7 +1178,7 @@ cmd_health() {
   print -r -- "${C_BOLD}Database Health${C_RESET}"
   if command -v mysql >/dev/null 2>&1; then
     # Use MYSQL_PWD env var instead of -p flag to avoid password exposure in ps
-    local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+    local mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
     local dbs; dbs="$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
 

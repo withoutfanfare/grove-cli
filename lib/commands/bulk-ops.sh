@@ -38,17 +38,25 @@ cmd_build_all() {
     info "Building all worktrees across all repositories..."
     print -r -- ""
 
+    # A failing repo must not stop the rest (parallel_run returns 1 when any
+    # job fails, which errexit would otherwise turn into an early exit).
+    local rc=0
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
       local repo_name="${${git_dir:t}%.git}"
       print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
-      _build_all_for_repo "$repo_name" "$git_dir"
+      _build_all_for_repo "$repo_name" "$git_dir" || rc=1
       print -r -- ""
     done
 
-    ok "Build complete across all repositories"
-    notify "grove build-all" "Completed across all repos"
-    return 0
+    if (( rc == 0 )); then
+      ok "Build complete across all repositories"
+      notify "grove build-all" "Completed across all repos"
+    else
+      warn "Build finished across all repositories with failures"
+      notify "grove build-all" "Finished across all repos with failures"
+    fi
+    return $rc
   fi
 
   # Group mode: @name expands to the repos configured via `grove group`
@@ -62,19 +70,24 @@ cmd_build_all() {
     info "Building all worktrees across group @$group_name..."
     print -r -- ""
 
-    local repo_name git_dir
+    local repo_name git_dir rc=0
     for repo_name in ${=resolved}; do
       validate_name "$repo_name" "repository"
       git_dir="$(git_dir_for "$repo_name")"
       ensure_bare_repo "$git_dir"
       print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
-      _build_all_for_repo "$repo_name" "$git_dir"
+      _build_all_for_repo "$repo_name" "$git_dir" || rc=1
       print -r -- ""
     done
 
-    ok "Build complete across group @$group_name"
-    notify "grove build-all" "Completed across group @$group_name"
-    return 0
+    if (( rc == 0 )); then
+      ok "Build complete across group @$group_name"
+      notify "grove build-all" "Completed across group @$group_name"
+    else
+      warn "Build finished across group @$group_name with failures"
+      notify "grove build-all" "Finished across group @$group_name with failures"
+    fi
+    return $rc
   fi
 
   [[ -n "$repo" ]] || error_exit "INVALID_INPUT" "Usage: grove build-all <repo>
@@ -135,16 +148,22 @@ cmd_exec_all() {
     info "Executing '$cmd_str' across all repositories..."
     print -r -- ""
 
+    # A failing repo must not stop the rest; report the overall result.
+    local rc=0
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
       local repo_name="${${git_dir:t}%.git}"
       print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
-      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str"
+      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str" || rc=1
       print -r -- ""
     done
 
-    ok "Execution complete across all repositories"
-    return 0
+    if (( rc == 0 )); then
+      ok "Execution complete across all repositories"
+    else
+      warn "Execution finished across all repositories with failures"
+    fi
+    return $rc
   fi
 
   shift || true
@@ -166,18 +185,22 @@ cmd_exec_all() {
     info "Executing '$cmd_str' across group @$group_name..."
     print -r -- ""
 
-    local repo_name git_dir
+    local repo_name git_dir rc=0
     for repo_name in ${=resolved}; do
       validate_name "$repo_name" "repository"
       git_dir="$(git_dir_for "$repo_name")"
       ensure_bare_repo "$git_dir"
       print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
-      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str"
+      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str" || rc=1
       print -r -- ""
     done
 
-    ok "Execution complete across group @$group_name"
-    return 0
+    if (( rc == 0 )); then
+      ok "Execution complete across group @$group_name"
+    else
+      warn "Execution finished across group @$group_name with failures"
+    fi
+    return $rc
   fi
 
   [[ -n "$repo" && ${#cmd[@]} -gt 0 ]] || error_exit "INVALID_INPUT" "Usage: grove exec-all <repo> <command...>

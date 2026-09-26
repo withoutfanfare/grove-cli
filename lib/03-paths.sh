@@ -107,9 +107,10 @@ check_branch_directory_match() {
   local actual_branch="$2"
   local repo="$3"
 
-  # Skip bare repo and main worktree (e.g., scooda for staging)
+  # Skip bare repo and main worktree (e.g., scooda for staging), and detached
+  # worktrees: they have no branch, so no directory name can "match" one.
   local folder="${wt_path:t}"
-  if [[ "$folder" != *"--"* ]]; then
+  if [[ "$folder" != *"--"* || "$actual_branch" == "$GROVE_DETACHED_BRANCH" || -z "$actual_branch" ]]; then
     print -r -- "skip"
     return 0
   fi

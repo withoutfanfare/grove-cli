@@ -337,3 +337,32 @@ EOF
   "
   [ "$status" -eq 0 ]
 }
+
+@test "TRAPEXIT: a top-level subshell does not roll back the parent's transaction" {
+  # zsh runs TRAPEXIT when a top-level $(…) exits. The undo must leave a file
+  # rather than print: a substitution's stdout is captured, not shown.
+  run zsh -c "
+    $STUBS
+    source \"\$PROJECT_ROOT/lib/11-resilience.sh\"
+    undo() { touch '$TEST_TMPDIR/rolled-back'; }
+    transaction_start
+    transaction_register undo
+    x=\"\$(print ok)\"
+    y=\"\$(false)\" || y=default
+    GROVE_TRANSACTION_ACTIVE=false
+  "
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_TMPDIR/rolled-back" ]
+}
+
+@test "TRAPEXIT: a real exit mid-transaction still rolls back" {
+  run zsh -c "
+    $STUBS
+    source \"\$PROJECT_ROOT/lib/11-resilience.sh\"
+    undo() { print -r -- ROLLED_BACK; }
+    transaction_start
+    transaction_register undo
+    exit 1
+  "
+  [[ "$output" == *ROLLED_BACK* ]]
+}

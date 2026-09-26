@@ -362,7 +362,31 @@ cmd_share_deps_clean() {
   local cleaned=0
   local saved_kb=0
   # Declare loop variables outside loops to avoid zsh re-declaration output
-  local type_dir hash_dir hash in_use out wt_path dep_path target size line
+  local type_dir hash_dir hash out wt_path dep_path size line dep_type
+
+  # Resolve every worktree's vendor/node_modules symlink ONCE, then test each
+  # cache directory against that set. (This used to re-list every repo's
+  # worktrees for every cache directory.)
+  typeset -A in_use_targets
+  for git_dir in "$HERD_ROOT"/*.git(N); do
+    [[ -d "$git_dir" ]] || continue
+    if ! out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)"; then
+      # An unreadable repo could be using any cache: removing one would leave
+      # its worktrees with a dangling vendor/node_modules link.
+      warn "Could not list worktrees for ${git_dir:t} - not removing anything"
+      return 1
+    fi
+    while IFS= read -r line; do
+      [[ "$line" == worktree\ * ]] || continue
+      wt_path="${line#worktree }"
+      [[ -n "$wt_path" && "$wt_path" != *.git && -d "$wt_path" ]] || continue
+      for dep_type in vendor node_modules; do
+        dep_path="$wt_path/$dep_type"
+        # :A resolves the symlink chain, relative targets included.
+        [[ -L "$dep_path" ]] && in_use_targets[${dep_path:A}]=1
+      done
+    done <<< "$out"
+  done
 
   for dep_type in vendor node_modules; do
     type_dir="$GROVE_SHARED_DEPS_DIR/$dep_type"
@@ -372,38 +396,7 @@ cmd_share_deps_clean() {
       [[ -d "$hash_dir" ]] || continue
       hash="${hash_dir:t}"
 
-      # Check if any worktree is using this hash
-      in_use=false
-      for git_dir in "$HERD_ROOT"/*.git(N); do
-        [[ -d "$git_dir" ]] || continue
-
-        out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || continue
-
-        # Evaluate each "worktree <path>" line directly. The previous approach
-        # only checked on the trailing blank delimiter, which command
-        # substitution strips - so the last worktree was never inspected.
-        while IFS= read -r line; do
-          [[ "$line" == worktree\ * ]] || continue
-          wt_path="${line#worktree }"
-          [[ -n "$wt_path" && "$wt_path" != *.git && -d "$wt_path" ]] || continue
-
-          dep_path="$wt_path/$dep_type"
-          [[ -L "$dep_path" ]] || continue
-
-          target="$(readlink "$dep_path" 2>/dev/null)"
-          # Canonicalise relative targets against the worktree directory.
-          if [[ -n "$target" && "$target" != /* ]]; then
-            target="${wt_path}/${target}"
-          fi
-          target="${target:A}"
-          if [[ "$target" == "${hash_dir:A}" ]]; then
-            in_use=true
-            break 2
-          fi
-        done <<< "$out"
-      done
-
-      if [[ "$in_use" == false ]]; then
+      if (( ! ${+in_use_targets[${hash_dir:A}]} )); then
         size="$(get_dir_size_kb "$hash_dir")"
         # Guard against a non-numeric/empty du result before arithmetic.
         [[ "$size" =~ ^[0-9]+$ ]] || size=0

@@ -51,11 +51,20 @@ interactive_add() {
   with_spinner "Fetching branches" git --git-dir="$git_dir" fetch --all --prune --quiet \
     || warn "Fetch failed - continuing with local branch list"
 
-  # Get remote branches for selection
-  local branches; branches="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null | grep -v HEAD)"
+  # Get remote branches for selection. Filtered in zsh: with pipefail, a
+  # `| grep -v HEAD` that matches nothing (no remote branches, e.g. after a
+  # failed fetch) returned 1 and errexit ended the wizard without a word.
+  local branches_raw; branches_raw="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null)" || branches_raw=""
+  local -a branch_list=("${(@f)branches_raw}")
+  branch_list=("${(@)branch_list:#*HEAD*}")
+  branch_list=("${(@)branch_list:#}")
 
-  local base
-  base="$(echo "$branches" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="origin/staging")" || return $?
+  local base=""
+  if (( ${#branch_list} == 0 )); then
+    warn "No remote branches found - using $DEFAULT_BASE as the base"
+  else
+    base="$(print -rl -- "${branch_list[@]}" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="$DEFAULT_BASE")" || return $?
+  fi
   [[ -n "$base" ]] || base="$DEFAULT_BASE"
 
   ok "Base: ${C_DIM}$base${C_RESET}"
@@ -171,58 +180,46 @@ interactive_dashboard() {
   local entries=()
 
   # Declare loop-scoped variables BEFORE the loop to avoid zsh local re-declaration bug
-  local repo_name out wt_path branch line
-  local result grade dirty_icon st age display_line
+  local repo_name wt_path branch wt_entry
+  local result grade dirty_icon age display_line
+  local -a repo_wts
 
   for git_dir in "$HERD_ROOT"/*.git(N); do
     [[ -d "$git_dir" ]] || continue
     repo_name="${${git_dir:t}%.git}"
 
-    out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || continue
-    wt_path=""
-    branch=""
+    repo_wts=()
+    collect_worktrees "$git_dir" repo_wts
+    (( ${#repo_wts} > 0 )) || continue
 
-    while IFS= read -r line; do
-      if [[ "$line" == worktree\ * ]]; then
-        wt_path="${line#worktree }"
-      elif [[ "$line" == branch\ refs/heads/* ]]; then
-        branch="${line#branch refs/heads/}"
-      elif [[ -z "$line" && -n "$wt_path" && "$wt_path" != *.git && -n "$branch" && -d "$wt_path" ]]; then
-        # Get health score
-        result="$(calculate_health_score "$wt_path")" || result="F|0|error"
-        grade="${result%%|*}"
+    # Grade each repo against its own DEFAULT_BASE, and gather its statuses
+    # once, in parallel, so the per-row health score reads from the cache.
+    load_repo_config "$git_dir"
+    clear_git_cache
+    collect_worktree_statuses "$git_dir"
 
-        # Check dirty status
-        dirty_icon=" "
-        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
-        [[ -n "$st" ]] && dirty_icon="◐"
+    for wt_entry in "${repo_wts[@]}"; do
+      wt_path="${wt_entry%%|*}"
+      branch="${wt_entry##*|}"
+      [[ -d "$wt_path" && "$branch" != "$GROVE_DETACHED_BRANCH" ]] || continue
 
-        # Get age
-        age="$(get_last_commit_age "$wt_path")" || age="?"
-
-        # Format entry for fzf display
-        # Format: repo | branch | grade | dirty | age | path
-        display_line="$(printf "%-15s │ %-30s │ %s │ %s │ %-6s" \
-          "${repo_name:0:15}" "${branch:0:30}" "$grade" "$dirty_icon" "$age")"
-
-        entries+=("${display_line}|${repo_name}|${branch}|${wt_path}")
-        wt_path=""
-        branch=""
-      fi
-    done <<< "$out"
-
-    # Handle last entry
-    if [[ -n "$wt_path" && "$wt_path" != *.git && -n "$branch" && -d "$wt_path" ]]; then
       result="$(calculate_health_score "$wt_path")" || result="F|0|error"
       grade="${result%%|*}"
+
       dirty_icon=" "
-      st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
-      [[ -n "$st" ]] && dirty_icon="◐"
+      if get_cached_status "$wt_path" dirty >/dev/null && [[ "$REPLY" == dirty ]]; then
+        dirty_icon="◐"
+      fi
+
       age="$(get_last_commit_age "$wt_path")" || age="?"
+
+      # Format: repo | branch | grade | dirty | age (display only; the row is
+      # mapped back by index, never by this possibly truncated text)
       display_line="$(printf "%-15s │ %-30s │ %s │ %s │ %-6s" \
         "${repo_name:0:15}" "${branch:0:30}" "$grade" "$dirty_icon" "$age")"
+
       entries+=("${display_line}|${repo_name}|${branch}|${wt_path}")
-    fi
+    done
   done
 
   if (( ${#entries[@]} == 0 )); then
@@ -253,26 +250,31 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
     fzf_opts+=(--height=80%)
   fi
 
-  selection="$(printf '%s\n' "${entries[@]%%|*}" | _fzf_select "${fzf_opts[@]}")" || return $?
+  # Each row carries its index in a hidden first field. Display text is
+  # truncated, so two long branch names can render identically; matching on it
+  # could run the chosen action on the wrong worktree.
+  fzf_opts+=(--delimiter=$'\t' --with-nth=2..)
+  local -a rows=()
+  local i
+  for (( i = 1; i <= ${#entries}; i++ )); do
+    rows+=("$i"$'\t'"${entries[i]%%|*}")
+  done
+
+  selection="$(printf '%s\n' "${rows[@]}" | _fzf_select "${fzf_opts[@]}")" || return $?
 
   [[ -n "$selection" ]] || { dim "No selection made"; return 0; }
 
-  # Parse selection - first line is the key pressed, second is the item
-  local key_pressed; key_pressed="$(print -r -- "$selection" | head -1)"
-  local selected_display; selected_display="$(print -r -- "$selection" | tail -1)"
+  # Parse selection - first line is the key pressed, last is the item
+  local -a sel_lines=("${(@f)selection}")
+  local key_pressed="${sel_lines[1]}"
+  local selected_row="${sel_lines[-1]}"
 
-  [[ -n "$selected_display" ]] || { dim "No selection made"; return 0; }
+  [[ -n "$selected_row" ]] || { dim "No selection made"; return 0; }
 
-  # Find the full entry to get repo, branch, path
-  local full_entry=""
-  for entry in "${entries[@]}"; do
-    if [[ "${entry%%|*}" == "$selected_display" ]]; then
-      full_entry="$entry"
-      break
-    fi
-  done
-
-  [[ -n "$full_entry" ]] || { dim "Selection not found"; return 0; }
+  local sel_idx="${selected_row%%$'\t'*}"
+  [[ "$sel_idx" =~ ^[0-9]+$ ]] && (( sel_idx >= 1 && sel_idx <= ${#entries} )) ||
+    { dim "Selection not found"; return 0; }
+  local full_entry="${entries[sel_idx]}"
 
   # Parse the entry: display|repo|branch|path
   local rest="${full_entry#*|}"

@@ -221,6 +221,11 @@ cmd_cleanup_herd() {
     local folder_name="${site_name%.test}"  # e.g., myapp--feature-xyz
     local wt_path="$HERD_ROOT/$folder_name"
 
+    # A site still linked in Herd's Sites directory is live whatever its name
+    # (a new-layout worktree folder can contain "--" too, e.g. after
+    # `grove move`); only Method 2 below may judge a linked site.
+    [[ -e "$sites_dir/$folder_name" || -L "$sites_dir/$folder_name" ]] && continue
+
     # Check if the worktree directory exists
     if [[ ! -d "$wt_path" ]]; then
       orphaned+=("$site_name")

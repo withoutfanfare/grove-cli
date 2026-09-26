@@ -140,6 +140,36 @@ svc_get_supervisor_process() {
   print -r -- "${SVC_SUPERVISOR_PROCESSES[$app]:-${app}-horizon}"
 }
 
+# svc_process_state — Set REPLY to a supervisor program's state from a
+# `supervisorctl status` snapshot ("" when the program is not configured).
+#
+# A grouped program ("app:*") has one line per member. It is RUNNING only when
+# every member is; otherwise the first member that is not running decides, so a
+# FATAL Reverb beside a RUNNING Horizon is never reported as RUNNING. The name
+# is matched literally (it is not a regex).
+svc_process_state() {
+  local snapshot="$1" name="${2%:*}" line
+  local -a fields
+  REPLY=""
+  for line in "${(@f)snapshot}"; do
+    [[ "$line" == "$name"[:\ ]* ]] || continue
+    fields=(${=line})
+    [[ -z "$REPLY" || "$REPLY" == RUNNING ]] && REPLY="${fields[2]:-UNKNOWN}"
+  done
+  return 0
+}
+
+# Snapshots of `supervisorctl status` and `launchctl list`, taken once per
+# status/doctor run so the cost does not grow with the number of apps. Empty
+# (unset) outside those runs, where svc_show_app_status queries live.
+typeset -g _SVC_SUP_SNAPSHOT="" _SVC_LAUNCHCTL_SNAPSHOT="" _SVC_SNAPSHOTS=false
+
+svc_take_snapshots() {
+  _SVC_SUP_SNAPSHOT="$(supervisorctl status 2>/dev/null || true)"
+  _SVC_LAUNCHCTL_SNAPSHOT="$(launchctl list 2>/dev/null || true)"
+  _SVC_SNAPSHOTS=true
+}
+
 svc_app_uses_horizon() {
   local app="$1"
   [[ "${SVC_SERVICES[$app]}" == horizon* ]]
@@ -196,13 +226,14 @@ svc_show_app_status() {
 
   # Supervisor process (skip if services=none)
   if [[ "${SVC_SERVICES[$app]}" != "none" && -n "$process" ]]; then
-    local sup_status
-    sup_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1)" || true
-    if [[ -n "$sup_status" ]]; then
-      if print -r -- "$sup_status" | grep -q "RUNNING"; then
+    local sup_snapshot="$_SVC_SUP_SNAPSHOT"
+    [[ "$_SVC_SNAPSHOTS" == true ]] || sup_snapshot="$(supervisorctl status 2>/dev/null || true)"
+    svc_process_state "$sup_snapshot" "$process"
+    if [[ -n "$REPLY" ]]; then
+      if [[ "$REPLY" == RUNNING ]]; then
         ok "Supervisor: RUNNING"
       else
-        warn "Supervisor: $(print -r -- "$sup_status" | awk '{print $2}')"
+        warn "Supervisor: $REPLY"
       fi
     else
       warn "Supervisor: Not configured"
@@ -229,9 +260,9 @@ svc_show_app_status() {
   fi
 
   # Scheduler
-  local scheduler_status
-  scheduler_status="$(launchctl list 2>/dev/null | grep "com.${app}.scheduler" || true)"
-  if [[ -n "$scheduler_status" ]]; then
+  local launchctl_snapshot="$_SVC_LAUNCHCTL_SNAPSHOT"
+  [[ "$_SVC_SNAPSHOTS" == true ]] || launchctl_snapshot="$(launchctl list 2>/dev/null || true)"
+  if [[ "$launchctl_snapshot" == *"com.${app}.scheduler"* ]]; then
     ok "Scheduler: Loaded"
   else
     dim "Scheduler: Not loaded"
@@ -268,7 +299,7 @@ cmd_services_status_json() {
   # zsh `local` re-declaration debug-output pitfall.
   local json_items=()
   local app_name system_name services process domain symlink current
-  local proc_line proc_state scheduler_loaded current_json supervisor_status_json
+  local proc_state scheduler_loaded current_json supervisor_status_json
   local je_name je_system je_services je_process je_domain je_current je_state
   for app_name in $(svc_get_app_list); do
     if [[ -n "$app_filter" && "$app_filter" != "all" && "$app_name" != "$app_filter" ]]; then
@@ -291,12 +322,8 @@ cmd_services_status_json() {
     if [[ "$services" == "none" || -z "$process" ]]; then
       supervisor_status_json="null"
     else
-      proc_line="$(print -r -- "$supervisor_snapshot" | grep -E "^${process%:*}[: ]" | head -1 || true)"
-      if [[ -n "$proc_line" ]]; then
-        proc_state="$(print -r -- "$proc_line" | awk '{print $2}')"
-      else
-        proc_state="NOT_CONFIGURED"
-      fi
+      svc_process_state "$supervisor_snapshot" "$process"
+      proc_state="${REPLY:-NOT_CONFIGURED}"
       json_escape "$proc_state"; je_state="$REPLY"
       supervisor_status_json="\"$je_state\""
     fi
@@ -354,6 +381,7 @@ cmd_services_status() {
     return 0
   fi
 
+  svc_take_snapshots
   if [[ -n "$app" && "$app" != "all" ]]; then
     svc_validate_app "$app"
     svc_show_app_status "$app"
@@ -863,20 +891,21 @@ cmd_services_doctor() {
       fi
     done
 
-    # Check supervisor processes
+    # Check supervisor processes (one snapshot for every app)
     info "Supervisor Processes:"
-    local process proc_status
+    svc_take_snapshots
+    local process
     for app in $(svc_get_app_list); do
       if [[ "${SVC_SERVICES[$app]}" == "none" ]]; then
         continue
       fi
       process="$(svc_get_supervisor_process "$app")"
-      proc_status="$(supervisorctl status 2>/dev/null | grep -E "^${process%:*}[: ]" | head -1 || true)"
-      if [[ -n "$proc_status" ]]; then
-        if print -r -- "$proc_status" | grep -q "RUNNING"; then
+      svc_process_state "$_SVC_SUP_SNAPSHOT" "$process"
+      if [[ -n "$REPLY" ]]; then
+        if [[ "$REPLY" == RUNNING ]]; then
           ok "$app: RUNNING"
         else
-          warn "$app: $(print -r -- "$proc_status" | awk '{print $2}')"
+          warn "$app: $REPLY"
         fi
       else
         warn "$app: Not configured"
@@ -885,14 +914,11 @@ cmd_services_doctor() {
 
     # Check scheduler LaunchAgents
     info "Scheduler LaunchAgents:"
-    local plist scheduler_status
+    local plist
     for app in $(svc_get_app_list); do
       plist="$GROVE_LAUNCH_AGENTS/com.${app}.scheduler.plist"
       if [[ -f "$plist" ]]; then
-        # Capture with plain grep rather than grep -q: under pipefail, -q's early
-        # exit sends launchctl a SIGPIPE and fails the pipeline on a real match.
-        scheduler_status="$(launchctl list 2>/dev/null | grep "com.${app}.scheduler" || true)"
-        if [[ -n "$scheduler_status" ]]; then
+        if [[ "$_SVC_LAUNCHCTL_SNAPSHOT" == *"com.${app}.scheduler"* ]]; then
           ok "$app: Loaded"
         else
           warn "$app: Not loaded"

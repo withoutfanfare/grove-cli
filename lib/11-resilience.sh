@@ -169,13 +169,20 @@ typeset -g GROVE_ROLLBACK_STEPS=()
 # We deliberately do NOT call `trap '...' EXIT` from inside transaction_start:
 # in zsh a trap set with the `trap` builtin inside a function is FUNCTION-LOCAL
 # and fires when that function returns, which would roll back instantly. A
-# top-level TRAPEXIT() fires only on real shell exit and persists across calls.
+# top-level TRAPEXIT() persists across calls.
+#
+# zsh also runs TRAPEXIT when a subshell started at the top level of the
+# script exits (`$(…)` included, even a successful one). Grove's code runs
+# inside functions, where this does not happen, but the ZSH_SUBSHELL guard
+# makes it impossible: only the real shell exit may roll a transaction back,
+# so a subshell can never undo a worktree the parent is still building.
 #
 # It fires once on shell exit (including after an unhandled INT/TERM, since zsh
 # runs EXIT last), so transaction_rollback runs at most once. The re-entrancy
 # guard in transaction_rollback covers any manual call followed by EXIT.
 # INT/TERM spinner cleanup is handled separately in 08-spinner.sh.
 TRAPEXIT() {
+  (( ZSH_SUBSHELL == 0 )) || return 0
   if [[ "$GROVE_TRANSACTION_ACTIVE" == true ]]; then
     spinner_stop 2>/dev/null
     transaction_rollback
