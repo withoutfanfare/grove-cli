@@ -308,6 +308,33 @@ cmd_cleanup_herd() {
 }
 
 
+# _unlock_lock_file — Remove one index.lock if it is safe to do so
+#
+# A lock held by a running process is never removed: deleting it mid-checkout or
+# mid-rebase lets a second writer corrupt the index. A lock younger than five
+# minutes is probably a live operation that lsof/fuser missed, so it needs -f.
+#
+# Arguments:
+#   $1 - lock file path
+#   $2 - label for messages
+#
+# Returns:
+#   0 if removed, 1 if left in place
+_unlock_lock_file() {
+  local lock_file="$1" label="$2"
+  if _lock_file_in_use "$lock_file"; then
+    warn "Lock in use by a running process, not removing: $label"
+    return 1
+  fi
+  local lock_age=$(( $(_get_now) - $(file_mtime "$lock_file" || echo 0) ))
+  if (( lock_age <= 300 )) && [[ "$FORCE" != true ]]; then
+    warn "Lock is under 5 minutes old, not removing: $label ${C_DIM}(use -f if no git command is running)${C_RESET}"
+    return 1
+  fi
+  rm -f "$lock_file"
+  ok "Removed lock: $label"
+}
+
 # cmd_unlock — Remove stale git index lock files from worktrees
 #
 # Arguments:
@@ -338,16 +365,12 @@ cmd_unlock() {
 
     local count=0
     for lock_file in "$worktrees_dir"/*/index.lock(N); do
-      if [[ -f "$lock_file" ]]; then
-        local wt_name="${${lock_file:h}:t}"
-        rm -f "$lock_file"
-        ok "Removed lock: ${C_CYAN}$wt_name${C_RESET}"
-        count=$((count + 1))
-      fi
+      [[ -f "$lock_file" ]] || continue
+      _unlock_lock_file "$lock_file" "${C_CYAN}${${lock_file:h}:t}${C_RESET}" && count=$((count + 1))
     done
 
     if (( count == 0 )); then
-      ok "No stale lock files found for ${C_CYAN}$repo${C_RESET}"
+      ok "No lock files removed for ${C_CYAN}$repo${C_RESET}"
     else
       ok "Removed ${C_BOLD}$count${C_RESET} lock file(s)"
     fi
@@ -364,17 +387,13 @@ cmd_unlock() {
       [[ -d "$worktrees_dir" ]] || continue
 
       for lock_file in "$worktrees_dir"/*/index.lock(N); do
-        if [[ -f "$lock_file" ]]; then
-          local wt_name="${${lock_file:h}:t}"
-          rm -f "$lock_file"
-          ok "Removed lock: ${C_CYAN}$repo_name${C_RESET} / ${C_MAGENTA}$wt_name${C_RESET}"
-          total=$((total + 1))
-        fi
+        [[ -f "$lock_file" ]] || continue
+        _unlock_lock_file "$lock_file" "${C_CYAN}$repo_name${C_RESET} / ${C_MAGENTA}${${lock_file:h}:t}${C_RESET}" && total=$((total + 1))
       done
     done
 
     if (( total == 0 )); then
-      ok "No stale lock files found"
+      ok "No lock files removed"
     else
       ok "Removed ${C_BOLD}$total${C_RESET} lock file(s)"
     fi
@@ -445,24 +464,9 @@ _repair_repo() {
     print -r -- ""
   fi
 
-  local found=0 fixed=0
+  local found=0 fixed=0 damaged=0 recovered=0
 
-  # 1. Prune orphaned worktrees
-  [[ "$json_mode" == true ]] || info "Checking for orphaned worktrees..."
-  local pruned; pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
-  if [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
-    if [[ "$json_mode" != true ]]; then
-      print -r -- "$pruned" | while read -r line; do
-        ok "  Pruned: $line"
-      done
-    fi
-    found=$((found + 1))
-    fixed=$((fixed + 1))
-  else
-    [[ "$json_mode" == true ]] || dim "  No orphaned worktrees"
-  fi
-
-  # 2. Clean stale index locks
+  # 1. Clean stale index locks
   [[ "$json_mode" == true ]] || info "Checking for stale index locks..."
   # check_index_locks prints the lock count on STDOUT (exit status is always 0 on
   # success); capture it rather than relying on the old exit-status-as-count.
@@ -475,14 +479,17 @@ _repair_repo() {
     [[ "$json_mode" == true ]] || dim "  No stale locks"
   fi
 
-  # 3. Check for missing .git files in worktrees
+  # 2. Check for missing .git files in worktrees. This runs BEFORE pruning:
+  # git treats a worktree whose .git file is missing as deleted, so pruning
+  # first would destroy the metadata (index, HEAD, grove sidecars) that
+  # recovery needs, then report the loss as a fix.
   [[ "$json_mode" == true ]] || info "Checking worktree integrity..."
   local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
   local wt_path="" branch="" corrupted_worktrees=()
   # Declared OUTSIDE the loop: `local var;` re-declared inside a loop makes
   # zsh print "var='...'" to stdout from the second iteration onward, which
   # corrupts JSON output (see CLAUDE.md, JSON output data contract).
-  local gitdir_content=""
+  local gitdir_content="" wt_git_dir=""
 
   # The trailing $'\n' preserves the blank line after the final porcelain
   # entry (command substitution strips it), so the last worktree is checked.
@@ -510,15 +517,17 @@ _repair_repo() {
           fi
         fi
 
-        # Check for missing HEAD
+        # Check for missing HEAD. git names the admin directory at creation
+        # time and `worktree move` keeps it, so find it by its gitdir backlink.
         local worktree_name="${wt_path:t}"
-        local wt_git_dir="$git_dir/worktrees/$worktree_name"
-        if [[ -d "$wt_git_dir" && ! -f "$wt_git_dir/HEAD" ]]; then
+        wt_git_dir="$(_worktree_admin_dir "$git_dir" "$wt_path")" || wt_git_dir=""
+        if [[ -n "$wt_git_dir" && ! -f "$wt_git_dir/HEAD" ]]; then
           issue="${issue:+$issue, }missing HEAD"
         fi
 
         if [[ -n "$issue" ]]; then
           found=$((found + 1))
+          damaged=$((damaged + 1))
           [[ "$json_mode" == true ]] || warn "  ${C_YELLOW}$worktree_name${C_RESET}: $issue"
           [[ -n "$branch" ]] && corrupted_worktrees+=("$wt_path|$branch|$issue")
         fi
@@ -548,14 +557,37 @@ _repair_repo() {
       if _attempt_worktree_recovery "$repo" "$git_dir" "$corrupt_path" "$corrupt_branch" "$corrupt_issue"; then
         [[ "$json_mode" == true ]] || ok "    Recovered successfully"
         fixed=$((fixed + 1))
-      elif [[ "$json_mode" != true ]]; then
-        warn "    Recovery failed - may need manual intervention"
-        dim "    Try: grove rm $repo $corrupt_branch && grove add $repo $corrupt_branch"
+        recovered=$((recovered + 1))
+      else
+        if [[ "$json_mode" != true ]]; then
+          warn "    Recovery failed - may need manual intervention"
+          dim "    Try: grove rm $repo $corrupt_branch && grove add $repo $corrupt_branch"
+        fi
       fi
     done
   elif (( ${#corrupted_worktrees[@]} > 0 )) && [[ "$json_mode" != true ]]; then
     print -r -- ""
     dim "  Use ${C_YELLOW}--recovery${C_RESET} flag to attempt automatic recovery"
+  fi
+
+  # 3. Prune orphaned worktrees — only once no damaged worktree remains, so
+  # prune never discards the metadata of a worktree that still exists.
+  [[ "$json_mode" == true ]] || info "Checking for orphaned worktrees..."
+  if (( damaged > recovered )); then
+    [[ "$json_mode" == true ]] || dim "  Skipped: damaged worktrees remain and pruning would discard their metadata"
+  else
+    local pruned; pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
+    if [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
+      if [[ "$json_mode" != true ]]; then
+        print -r -- "$pruned" | while read -r line; do
+          ok "  Pruned: $line"
+        done
+      fi
+      found=$((found + 1))
+      fixed=$((fixed + 1))
+    else
+      [[ "$json_mode" == true ]] || dim "  No orphaned worktrees"
+    fi
   fi
 
   if [[ "$json_mode" == true ]]; then
@@ -584,7 +616,39 @@ _repair_repo() {
   fi
 }
 
-# Attempt to recover a corrupted worktree by recreating .git and HEAD files
+# _worktree_admin_dir — Print the $git_dir/worktrees/<id> directory that belongs to a worktree
+#
+# git names the admin directory when the worktree is created, and `git worktree
+# move` (used by `grove move`) keeps that name, so the folder name is not a
+# reliable key. Match on the admin directory's gitdir backlink instead.
+#
+# Arguments:
+#   $1 - git directory path
+#   $2 - worktree path
+#
+# Returns:
+#   0 and prints the directory, or 1 when no admin directory points at the worktree
+_worktree_admin_dir() {
+  local git_dir="$1"
+  local want="${2:A}/.git"
+  local admin backlink
+  for admin in "$git_dir"/worktrees/*(N/); do
+    [[ -f "$admin/gitdir" ]] || continue
+    backlink="$(<"$admin/gitdir")"
+    if [[ "${backlink:A}" == "$want" ]]; then
+      print -r -- "$admin"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Attempt to recover a corrupted worktree
+#
+# .git file problems are repaired by `git worktree repair`, which rewrites each
+# worktree's .git file from its admin directory's backlink and so never points
+# a worktree at another worktree's metadata. A missing HEAD is recreated in the
+# admin directory found by _worktree_admin_dir.
 #
 # Arguments:
 #   $1 - repository name
@@ -601,64 +665,22 @@ _attempt_worktree_recovery() {
   local wt_path="$3"
   local branch="$4"
   local issue="$5"
-  local folder="${wt_path:t}"
 
-  case "$issue" in
-    "missing .git file")
-      # Recreate the .git file pointing to the correct gitdir
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        print -r -- "gitdir: $worktree_git_dir" > "$wt_path/.git"
-        return 0
-      fi
-      return 1
-      ;;
+  local admin_dir; admin_dir="$(_worktree_admin_dir "$git_dir" "$wt_path")" || return 1
 
-    "broken gitdir reference")
-      # Try to find and fix the gitdir reference
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        print -r -- "gitdir: $worktree_git_dir" > "$wt_path/.git"
-        return 0
-      fi
-      return 1
-      ;;
+  if [[ "$issue" == *"missing HEAD"* ]]; then
+    print -r -- "ref: refs/heads/$branch" > "$admin_dir/HEAD"
+  fi
 
-    "malformed .git file")
-      # Recreate the .git file
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        print -r -- "gitdir: $worktree_git_dir" > "$wt_path/.git"
-        return 0
-      fi
-      return 1
-      ;;
+  if [[ "$issue" == *".git file"* || "$issue" == *"gitdir reference"* ]]; then
+    # repair exits non-zero on a bare layout (it also reports the bare repo as
+    # a broken main worktree), so judge success by the result instead.
+    git --git-dir="$git_dir" worktree repair >/dev/null 2>&1 || true
+  fi
 
-    *"missing HEAD"*)
-      # Try to recreate HEAD file
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        print -r -- "ref: refs/heads/$branch" > "$worktree_git_dir/HEAD"
-        return 0
-      fi
-      return 1
-      ;;
-
-    *)
-      # For compound issues, try the most common fix
-      local worktree_git_dir="$git_dir/worktrees/$folder"
-      if [[ -d "$worktree_git_dir" ]]; then
-        # Fix .git file
-        print -r -- "gitdir: $worktree_git_dir" > "$wt_path/.git"
-        # Fix HEAD if missing
-        if [[ ! -f "$worktree_git_dir/HEAD" ]]; then
-          print -r -- "ref: refs/heads/$branch" > "$worktree_git_dir/HEAD"
-        fi
-        return 0
-      fi
-      return 1
-      ;;
-  esac
+  # Recovered only if the worktree now resolves to its own admin directory.
+  local resolved; resolved="$(git -C "$wt_path" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  [[ "${resolved:A}" == "${admin_dir:A}" ]]
 }
 
 # Parallel commands

@@ -522,7 +522,7 @@ cmd_prune() {
   # Get clean merged-branch names (no '* '/'+ ' markers), excluding protected branches
   # by exact name (is_protected_branch), not a loose substring grep.
   local merged_raw; merged_raw="$(git --git-dir="$git_dir" branch --merged "$base" --format='%(refname:short)' 2>/dev/null)" || merged_raw=""
-  local merged=""
+  local merged="" nl=$'\n'
   local branch_line
   while IFS= read -r branch_line; do
     # Trim leading/trailing whitespace using Zsh parameter expansion
@@ -530,7 +530,8 @@ cmd_prune() {
     branch_line="${branch_line%"${branch_line##*[![:space:]]}"}"
     [[ -n "$branch_line" ]] || continue
     is_protected_branch "$branch_line" && continue
-    merged+="${merged:+$'\n'}$branch_line"
+    # $'\n' stays literal inside "${…:+…}", so join with a newline variable.
+    merged+="${merged:+$nl}$branch_line"
   done <<< "$merged_raw"
 
   # JSON output mode

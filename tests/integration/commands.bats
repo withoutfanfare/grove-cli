@@ -82,6 +82,30 @@ run_grove() {
   [[ "$output" != *"CORE COMMANDS"* ]]
 }
 
+@test "exec never silently strips a grove flag from the user command" {
+  local src="$TEST_TEMP_DIR/exec-src"
+  git init -q -b main "$src"
+  git -C "$src" -c user.email=t@t.t -c user.name=T commit -q --allow-empty -m init
+  git clone -q --bare "$src" "$HERD_ROOT/app.git"
+  git --git-dir="$HERD_ROOT/app.git" worktree add -q "$HERD_ROOT/app--main" main
+
+  # -f is also a grove flag: refuse loudly rather than run a different command.
+  run_grove exec app main printf '%s|' -f
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ambiguous"*"--"* ]]
+  run_grove exec app main php -v
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"grove version"* ]]
+
+  # Flags grove does not know pass through; `--` passes grove's own verbatim.
+  run_grove exec app main printf '%s|' -la --force-recreate
+  [ "$status" -eq 0 ]
+  [ "$output" = "-la|--force-recreate|" ]
+  run_grove exec -q app main -- printf '%s|' -i hello -f
+  [ "$status" -eq 0 ]
+  [ "$output" = "-i|hello|-f|" ]
+}
+
 @test "grove --help: lists available templates" {
   run_grove --help
   [ "$status" -eq 0 ]

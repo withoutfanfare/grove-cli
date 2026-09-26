@@ -314,3 +314,27 @@ _setup_fetchable_repo() {
   [[ "$output" == *"OK:Fetched myrepo"* ]]
   [ "$(git -C "$root/repo.git" rev-parse refs/remotes/origin/main)" = "$remote_tip" ]
 }
+
+@test "prune --json: reports and deletes every merged branch, not just one" {
+  local src="$TEST_TEMP_DIR/prune-src"
+  git init -q -b main "$src"
+  git -C "$src" commit -q --allow-empty -m init
+  git clone -q --bare "$src" "$HERD_ROOT/app.git"
+  git --git-dir="$HERD_ROOT/app.git" branch feat/one main
+  git --git-dir="$HERD_ROOT/app.git" branch feat/two main
+
+  run zsh -c "source '$GIT_OPS_FNS'
+load_repo_config() { DEFAULT_BASE=main; }
+is_protected_branch() { [[ \"\$1\" == main ]]; }
+GROVE_TEST_GIT_DIR='$HERD_ROOT/app.git'; JSON_OUTPUT=true; FORCE=true
+cmd_prune app"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+names = sorted(b['name'] for b in d['merged_branches'])
+assert names == ['feat/one', 'feat/two'], d
+assert d['summary'] == {'branches_found': 2, 'branches_deleted': 2}, d
+"
+  ! git --git-dir="$HERD_ROOT/app.git" rev-parse --verify --quiet feat/one
+}

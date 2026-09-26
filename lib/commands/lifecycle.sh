@@ -397,6 +397,10 @@ cmd_rm() {
     if [[ "$JSON_OUTPUT" == true ]]; then
       error_exit "REMOVAL_BLOCKED" "$REPLY" 6
     fi
+    if ! removal_can_prompt; then
+      print -r -- "${C_YELLOW}$REPLY${C_RESET}" >&2
+      error_exit "REMOVAL_BLOCKED" "removal blocked; confirming it needs an interactive terminal" 6
+    fi
     print -r -- "${C_YELLOW}$REPLY${C_RESET}" >&2
     print -n "${C_YELLOW}Remove anyway? [y/N]${C_RESET} "
     local response
