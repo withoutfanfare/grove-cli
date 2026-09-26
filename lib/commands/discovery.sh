@@ -140,6 +140,10 @@ cmd_info() {
   local health_rest="${health_result#*|}"
   local health_score="${health_rest%%|*}"
   local health_issues="${health_rest#*|}"
+  # Only numbers may be embedded bare in the JSON contract.
+  [[ "$health_score" =~ ^[0-9]+$ ]] || { health_grade="?" health_score=0 health_issues=""; }
+  [[ "$accessed_at" =~ ^[0-9]+$ ]] || accessed_at=""
+  [[ "$last_commit_at" =~ ^[0-9]+$ ]] || last_commit_at=""
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -231,9 +235,9 @@ cmd_info() {
     # Convert comma-separated issues to JSON array
     local issues_json="["
     if [[ -n "$health_issues" ]]; then
-      local first=true
-      local IFS=','
-      for issue in $health_issues; do
+      local first=true issue
+      # zsh does not word-split unquoted parameters; split explicitly on commas
+      for issue in ${(s:,:)health_issues}; do
         [[ "$first" == true ]] || issues_json+=", "
         json_escape "$issue"; issues_json+="\"$REPLY\""
         first=false

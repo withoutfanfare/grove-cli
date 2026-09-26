@@ -333,6 +333,21 @@ load_repo_config() {
   }
 
   _read_config_pairs "$repo_config" _apply_repo_config
+
+  # Validate DEFAULT_BASE here, once, before any caller fans work out to
+  # parallel callbacks: validate_git_ref's error JSON raised inside a callback's
+  # command substitution was captured as a field value, and the command still
+  # exited 0 with invalid JSON. A bad per-repo override falls back to the
+  # global value (so one repo cannot break a multi-repo listing); a bad global
+  # value is a hard error.
+  if ! ( validate_git_ref "$DEFAULT_BASE" "DEFAULT_BASE" ) >/dev/null 2>&1; then
+    local global_base="${GROVE_GLOBAL_DEFAULT_BASE-$DEFAULT_BASE}"
+    if [[ "$DEFAULT_BASE" != "$global_base" ]]; then
+      warn "Invalid DEFAULT_BASE '$DEFAULT_BASE' in ${repo_config}; using '$global_base'."
+      DEFAULT_BASE="$global_base"
+    fi
+    validate_git_ref "$DEFAULT_BASE" "DEFAULT_BASE"
+  fi
 }
 
 # setup_colors — Initialise colour escape codes (disabled for non-TTY and JSON output)
@@ -389,13 +404,20 @@ die_json() {
   local exit_code="${3:-1}"
 
   if [[ "$JSON_OUTPUT" == "true" ]]; then
-    # Escape JSON special characters using pure Zsh (no subprocess spawns)
+    # Escape with json_escape (07-templates.sh), which also handles the other
+    # control characters: the message can relay gate output or user input
+    # verbatim, and one raw control byte makes the whole document invalid.
     local escaped_msg="$message"
-    escaped_msg="${escaped_msg//\\/\\\\}"   # Backslash -> \\
-    escaped_msg="${escaped_msg//\"/\\\"}"   # Double quote -> \"
-    escaped_msg="${escaped_msg//$'\t'/\\t}" # Tab -> \t
-    escaped_msg="${escaped_msg//$'\n'/\\n}" # Newline -> \n
-    escaped_msg="${escaped_msg//$'\r'/\\r}" # Carriage return -> \r
+    if (( $+functions[json_escape] )); then
+      json_escape "$message"; escaped_msg="$REPLY"
+    else
+      escaped_msg="${escaped_msg//\\/\\\\}"   # Backslash -> \\
+      escaped_msg="${escaped_msg//\"/\\\"}"   # Double quote -> \"
+      escaped_msg="${escaped_msg//$'\t'/\\t}" # Tab -> \t
+      escaped_msg="${escaped_msg//$'\n'/\\n}" # Newline -> \n
+      escaped_msg="${escaped_msg//$'\r'/\\r}" # Carriage return -> \r
+      escaped_msg="${escaped_msg//[$'\x01'-$'\x1f']/?}" # Other control chars
+    fi
     print -r -- "{\"success\": false, \"error\": {\"code\": \"$code\", \"message\": \"$escaped_msg\"}}"
   else
     print -r -- "${C_RED}✖ ERROR:${C_RESET} $message" >&2
@@ -4339,19 +4361,22 @@ _show_deps_status() {
   print -r -- "${C_BOLD}Dependency Status${C_RESET}"
   print -r -- ""
 
+  # Declared outside the loop: re-declaring `local x` inside it makes zsh
+  # print the previous value to stdout from the second iteration on.
+  local dep_type dep_status dep_path target hash size_kb size
   for dep_type in vendor node_modules; do
-    local dep_status; dep_status="$(_check_deps_shared "$wt_path" "$dep_type")"
-    local dep_path="$wt_path/$dep_type"
+    dep_status="$(_check_deps_shared "$wt_path" "$dep_type")"
+    dep_path="$wt_path/$dep_type"
 
     case "$dep_status" in
       shared)
-        local target; target="$(readlink "$dep_path" 2>/dev/null)"
-        local hash="${target##*/}"
+        target="$(readlink "$dep_path" 2>/dev/null)"
+        hash="${target##*/}"
         print -r -- "  ${C_GREEN}●${C_RESET} $dep_type: ${C_GREEN}shared${C_RESET} ${C_DIM}($hash)${C_RESET}"
         ;;
       local)
-        local size_kb; size_kb="$(get_dir_size_kb "$dep_path")"
-        local size; size="$(bytes_to_human "$size_kb")"
+        size_kb="$(get_dir_size_kb "$dep_path")"
+        size="$(bytes_to_human "$size_kb")"
         print -r -- "  ${C_YELLOW}●${C_RESET} $dep_type: ${C_YELLOW}local${C_RESET} ${C_DIM}($size)${C_RESET}"
         ;;
       missing)
@@ -6243,9 +6268,11 @@ cmd_log() {
     local commits_json=()
     local log_output sha msg author date_iso
 
-    # Get commits with specific format for JSON parsing
-    # Format: %H|%s|%an|%aI (full sha, subject, author name, ISO date)
-    while IFS='|' read -r sha msg author date_iso; do
+    # Fields: full sha, author name, ISO date, subject. Split on the ASCII unit
+    # separator (0x1f), which cannot appear in them, and keep the subject last so
+    # even a stray separator stays inside it. A '|' in a subject used to shift
+    # text into the author and date fields.
+    while IFS=$'\x1f' read -r sha author date_iso msg; do
       [[ -z "$sha" ]] && continue
       # Truncate SHA to 7 chars for display
       local short_sha="${sha:0:7}"
@@ -6254,7 +6281,7 @@ cmd_log() {
       json_escape "$author"; local _je_auth="$REPLY"
       json_escape "$date_iso"; local _je_date="$REPLY"
       commits_json+=("{\"sha\": \"$_je_sha\", \"message\": \"$_je_msg\", \"author\": \"$_je_auth\", \"date\": \"$_je_date\"}")
-    done < <(git -C "$wt_path" log --format='%H|%s|%an|%aI' -n "$count" 2>/dev/null || true)
+    done < <(git -C "$wt_path" log --format='%H%x1f%an%x1f%aI%x1f%s' -n "$count" 2>/dev/null || true)
 
     format_json "{\"commits\": [${(j:, :)commits_json}]}"
     return 0
@@ -6569,21 +6596,28 @@ cmd_changes() {
     error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
-  # Get git status in porcelain format
-  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+  # Get git status in porcelain format. core.quotePath=false keeps non-ASCII
+  # names readable instead of C-quoted octal escapes.
+  local st; st="$(git -c core.quotePath=false -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
 
   # JSON output mode
   if [[ "$JSON_OUTPUT" == true ]]; then
     local files_json=()
 
     if [[ -n "$st" ]]; then
+      # Re-read with -z: NUL-separated entries are never quoted (paths with
+      # quotes, backslashes or newlines arrive verbatim) and a rename is
+      # "XY new\0old\0" rather than an ambiguous "old -> new".
+      local -a entries=("${(@0)$(git -C "$wt_path" status --porcelain -z 2>/dev/null)}")
       # Declare loop variables outside the loop to avoid zsh re-declaration issues
       local line status_code file_path simple_status
-      while IFS= read -r line; do
+      local -i i=1
+      while (( i <= ${#entries} )); do
+        line="${entries[i]}"
+        i+=1
         [[ -z "$line" ]] && continue
 
-        # Extract status code (first 2 chars) and file path (rest after space)
-        # Porcelain format: XY filename (where XY is the status)
+        # Porcelain format: XY <path> (XY is the two-character status)
         status_code="${line:0:2}"
         file_path="${line:3}"
 
@@ -6595,19 +6629,17 @@ cmd_changes() {
           " M"|"M "|"MM") simple_status="M" ;;
           " A"|"A "|"AM") simple_status="A" ;;
           " D"|"D ") simple_status="D" ;;
-          "R "*)  simple_status="R" ;;
-          "C "*)  simple_status="C" ;;
+          R?)  simple_status="R" ;;
+          C?)  simple_status="C" ;;
           "U"*|*"U")  simple_status="U" ;;  # Unmerged
-          *)  simple_status="${status_code:0:1}" ;;  # First non-space char
+          *)  simple_status="${${status_code// /}:0:1}" ;;  # First non-space char
         esac
 
-        # Handle renamed files (format: R  old -> new)
-        if [[ "$status_code" == "R "* && "$file_path" == *" -> "* ]]; then
-          file_path="${file_path##* -> }"
-        fi
+        # A rename or copy (index side) is followed by its source path; skip it.
+        [[ "$status_code" == [RC]? ]] && i+=1
 
         json_escape "$file_path"; files_json+=("{\"path\": \"$REPLY\", \"status\": \"$simple_status\"}")
-      done <<< "$st"
+      done
     fi
 
     format_json "{\"files\": [${(j:, :)files_json}]}"
@@ -6646,7 +6678,7 @@ cmd_changes() {
         " D"|"D ")
           print -r -- "  ${C_RED}D${C_RESET}  $file_path"
           ;;
-        "R "*)
+        R?)
           print -r -- "  ${C_CYAN}R${C_RESET}  $file_path"
           ;;
         *)
@@ -7088,6 +7120,11 @@ _display_worktree() {
   local health_rest="${health_result#*|}"
   local health_score="${health_rest%%|*}"
   local health_issues="${health_rest#*|}"
+  # Never embed anything but a number: a failure inside the scorer must not
+  # leak text into the JSON contract.
+  if [[ ! "$health_score" =~ ^[0-9]+$ ]]; then
+    health_grade="?" health_score=0 health_issues=""
+  fi
 
   # Calculate new fields for enhanced JSON output
   local last_accessed="" merged=false stale=false
@@ -7096,8 +7133,9 @@ _display_worktree() {
     # Get last accessed timestamp as ISO 8601
     last_accessed="$(get_last_accessed_iso "$wt_path")"
 
-    # Derive merge status from health issues (avoids duplicate is_branch_merged call)
-    if [[ "$health_issues" != *"unmerged"* ]]; then
+    # Derive merge status from health issues (avoids duplicate is_branch_merged
+    # call). Unknown (base ref unresolved) stays false: the contract is boolean.
+    if [[ ",$health_issues," != *",unmerged,"* && ",$health_issues," != *",merge-unknown,"* ]]; then
       merged=true
     fi
 
@@ -7303,10 +7341,14 @@ _display_status_row() {
   fi
 
   # Check if merged (cache result for reuse in JSON output)
-  local merged=false
-  if is_branch_merged "$p" "$DEFAULT_BASE"; then
+  local merged=false merged_rc=0
+  is_branch_merged "$p" "$DEFAULT_BASE" || merged_rc=$?
+  if (( merged_rc == 0 )); then
     merged=true
     merged_icon="${C_DIM}✓${C_RESET}"
+  elif (( merged_rc == 2 )); then
+    # Unknown (base ref unresolved): JSON stays boolean false, text shows "?".
+    merged_icon="${C_DIM}?${C_RESET}"
   else
     merged_icon="${C_DIM}-${C_RESET}"
   fi
@@ -7431,6 +7473,7 @@ cmd_repos() {
   local repos; repos="$(list_repos)"
 
   if [[ -z "$repos" ]]; then
+    [[ "$JSON_OUTPUT" == true ]] && { format_json "[]"; return 0; }
     dim "No repositories found in $HERD_ROOT"
     return 0
   fi
@@ -7850,10 +7893,15 @@ calculate_health_score() {
     issues+=("age:${age_days}d")
   fi
 
-  # Check merge status (max -10 points)
-  if ! is_branch_merged "$wt_path" "$DEFAULT_BASE"; then
+  # Check merge status (max -10 points). Return 2 means the base ref does not
+  # resolve, so merge status is unknown: flag it without the unmerged penalty.
+  local merged_rc=0
+  is_branch_merged "$wt_path" "$DEFAULT_BASE" || merged_rc=$?
+  if (( merged_rc == 1 )); then
     score=$((score - 10))
     issues+=("unmerged")
+  elif (( merged_rc == 2 )); then
+    issues+=("merge-unknown")
   fi
 
   # Check untracked files (max -5 points)
@@ -8262,7 +8310,7 @@ cmd_dashboard() {
   local result grade rest score st age_days
   local avg_grade avg_score grade_colored
   local wt wt_branch wt_rest wt_grade wt_score wt_grade_colored
-  local status_parts shown
+  local status_parts shown wt_entry
 
   # Collect data for all repos
   for git_dir in "$HERD_ROOT"/*.git(N); do
@@ -8281,7 +8329,6 @@ cmd_dashboard() {
 
     # Collect worktree info for this repo
     local wt_info=()
-    local wt_entry
     for wt_entry in "${dash_worktrees[@]}"; do
       wt_path="${wt_entry%%|*}"
       branch="${wt_entry##*|}"
@@ -8585,6 +8632,7 @@ cmd_cleanup_herd() {
   local cert_dir="$HERD_CONFIG/valet/Certificates"
   local orphaned=()
   local cleaned=0
+  local raw_target=""
 
   if [[ ! -d "$nginx_dir" ]]; then
     warn "Nginx config directory not found: $nginx_dir"
@@ -8616,7 +8664,7 @@ cmd_cleanup_herd() {
       # readlink may return a RELATIVE target, which would then be tested against
       # grove's cwd and wrongly judged missing. Canonicalise with :A (full symlink
       # resolution) so the existence test runs against the real absolute path.
-      local raw_target; raw_target="$(readlink "$site_link" 2>/dev/null)"
+      raw_target="$(readlink "$site_link" 2>/dev/null)"
       local target="${site_link:A}"
 
       # Only check sites that point to -worktrees directories
@@ -9623,6 +9671,10 @@ cmd_info() {
   local health_rest="${health_result#*|}"
   local health_score="${health_rest%%|*}"
   local health_issues="${health_rest#*|}"
+  # Only numbers may be embedded bare in the JSON contract.
+  [[ "$health_score" =~ ^[0-9]+$ ]] || { health_grade="?" health_score=0 health_issues=""; }
+  [[ "$accessed_at" =~ ^[0-9]+$ ]] || accessed_at=""
+  [[ "$last_commit_at" =~ ^[0-9]+$ ]] || last_commit_at=""
 
   # JSON output
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -9714,9 +9766,9 @@ cmd_info() {
     # Convert comma-separated issues to JSON array
     local issues_json="["
     if [[ -n "$health_issues" ]]; then
-      local first=true
-      local IFS=','
-      for issue in $health_issues; do
+      local first=true issue
+      # zsh does not word-split unquoted parameters; split explicitly on commas
+      for issue in ${(s:,:)health_issues}; do
         [[ "$first" == true ]] || issues_json+=", "
         json_escape "$issue"; issues_json+="\"$REPLY\""
         first=false

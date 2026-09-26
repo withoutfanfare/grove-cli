@@ -203,6 +203,7 @@ cmd_cleanup_herd() {
   local cert_dir="$HERD_CONFIG/valet/Certificates"
   local orphaned=()
   local cleaned=0
+  local raw_target=""
 
   if [[ ! -d "$nginx_dir" ]]; then
     warn "Nginx config directory not found: $nginx_dir"
@@ -234,7 +235,7 @@ cmd_cleanup_herd() {
       # readlink may return a RELATIVE target, which would then be tested against
       # grove's cwd and wrongly judged missing. Canonicalise with :A (full symlink
       # resolution) so the existence test runs against the real absolute path.
-      local raw_target; raw_target="$(readlink "$site_link" 2>/dev/null)"
+      raw_target="$(readlink "$site_link" 2>/dev/null)"
       local target="${site_link:A}"
 
       # Only check sites that point to -worktrees directories

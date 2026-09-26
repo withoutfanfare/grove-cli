@@ -110,6 +110,11 @@ _display_worktree() {
   local health_rest="${health_result#*|}"
   local health_score="${health_rest%%|*}"
   local health_issues="${health_rest#*|}"
+  # Never embed anything but a number: a failure inside the scorer must not
+  # leak text into the JSON contract.
+  if [[ ! "$health_score" =~ ^[0-9]+$ ]]; then
+    health_grade="?" health_score=0 health_issues=""
+  fi
 
   # Calculate new fields for enhanced JSON output
   local last_accessed="" merged=false stale=false
@@ -118,8 +123,9 @@ _display_worktree() {
     # Get last accessed timestamp as ISO 8601
     last_accessed="$(get_last_accessed_iso "$wt_path")"
 
-    # Derive merge status from health issues (avoids duplicate is_branch_merged call)
-    if [[ "$health_issues" != *"unmerged"* ]]; then
+    # Derive merge status from health issues (avoids duplicate is_branch_merged
+    # call). Unknown (base ref unresolved) stays false: the contract is boolean.
+    if [[ ",$health_issues," != *",unmerged,"* && ",$health_issues," != *",merge-unknown,"* ]]; then
       merged=true
     fi
 
@@ -325,10 +331,14 @@ _display_status_row() {
   fi
 
   # Check if merged (cache result for reuse in JSON output)
-  local merged=false
-  if is_branch_merged "$p" "$DEFAULT_BASE"; then
+  local merged=false merged_rc=0
+  is_branch_merged "$p" "$DEFAULT_BASE" || merged_rc=$?
+  if (( merged_rc == 0 )); then
     merged=true
     merged_icon="${C_DIM}✓${C_RESET}"
+  elif (( merged_rc == 2 )); then
+    # Unknown (base ref unresolved): JSON stays boolean false, text shows "?".
+    merged_icon="${C_DIM}?${C_RESET}"
   else
     merged_icon="${C_DIM}-${C_RESET}"
   fi
@@ -453,6 +463,7 @@ cmd_repos() {
   local repos; repos="$(list_repos)"
 
   if [[ -z "$repos" ]]; then
+    [[ "$JSON_OUTPUT" == true ]] && { format_json "[]"; return 0; }
     dim "No repositories found in $HERD_ROOT"
     return 0
   fi
@@ -872,10 +883,15 @@ calculate_health_score() {
     issues+=("age:${age_days}d")
   fi
 
-  # Check merge status (max -10 points)
-  if ! is_branch_merged "$wt_path" "$DEFAULT_BASE"; then
+  # Check merge status (max -10 points). Return 2 means the base ref does not
+  # resolve, so merge status is unknown: flag it without the unmerged penalty.
+  local merged_rc=0
+  is_branch_merged "$wt_path" "$DEFAULT_BASE" || merged_rc=$?
+  if (( merged_rc == 1 )); then
     score=$((score - 10))
     issues+=("unmerged")
+  elif (( merged_rc == 2 )); then
+    issues+=("merge-unknown")
   fi
 
   # Check untracked files (max -5 points)
@@ -1284,7 +1300,7 @@ cmd_dashboard() {
   local result grade rest score st age_days
   local avg_grade avg_score grade_colored
   local wt wt_branch wt_rest wt_grade wt_score wt_grade_colored
-  local status_parts shown
+  local status_parts shown wt_entry
 
   # Collect data for all repos
   for git_dir in "$HERD_ROOT"/*.git(N); do
@@ -1303,7 +1319,6 @@ cmd_dashboard() {
 
     # Collect worktree info for this repo
     local wt_info=()
-    local wt_entry
     for wt_entry in "${dash_worktrees[@]}"; do
       wt_path="${wt_entry%%|*}"
       branch="${wt_entry##*|}"

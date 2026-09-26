@@ -652,9 +652,11 @@ cmd_log() {
     local commits_json=()
     local log_output sha msg author date_iso
 
-    # Get commits with specific format for JSON parsing
-    # Format: %H|%s|%an|%aI (full sha, subject, author name, ISO date)
-    while IFS='|' read -r sha msg author date_iso; do
+    # Fields: full sha, author name, ISO date, subject. Split on the ASCII unit
+    # separator (0x1f), which cannot appear in them, and keep the subject last so
+    # even a stray separator stays inside it. A '|' in a subject used to shift
+    # text into the author and date fields.
+    while IFS=$'\x1f' read -r sha author date_iso msg; do
       [[ -z "$sha" ]] && continue
       # Truncate SHA to 7 chars for display
       local short_sha="${sha:0:7}"
@@ -663,7 +665,7 @@ cmd_log() {
       json_escape "$author"; local _je_auth="$REPLY"
       json_escape "$date_iso"; local _je_date="$REPLY"
       commits_json+=("{\"sha\": \"$_je_sha\", \"message\": \"$_je_msg\", \"author\": \"$_je_auth\", \"date\": \"$_je_date\"}")
-    done < <(git -C "$wt_path" log --format='%H|%s|%an|%aI' -n "$count" 2>/dev/null || true)
+    done < <(git -C "$wt_path" log --format='%H%x1f%an%x1f%aI%x1f%s' -n "$count" 2>/dev/null || true)
 
     format_json "{\"commits\": [${(j:, :)commits_json}]}"
     return 0
@@ -978,21 +980,28 @@ cmd_changes() {
     error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
-  # Get git status in porcelain format
-  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+  # Get git status in porcelain format. core.quotePath=false keeps non-ASCII
+  # names readable instead of C-quoted octal escapes.
+  local st; st="$(git -c core.quotePath=false -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
 
   # JSON output mode
   if [[ "$JSON_OUTPUT" == true ]]; then
     local files_json=()
 
     if [[ -n "$st" ]]; then
+      # Re-read with -z: NUL-separated entries are never quoted (paths with
+      # quotes, backslashes or newlines arrive verbatim) and a rename is
+      # "XY new\0old\0" rather than an ambiguous "old -> new".
+      local -a entries=("${(@0)$(git -C "$wt_path" status --porcelain -z 2>/dev/null)}")
       # Declare loop variables outside the loop to avoid zsh re-declaration issues
       local line status_code file_path simple_status
-      while IFS= read -r line; do
+      local -i i=1
+      while (( i <= ${#entries} )); do
+        line="${entries[i]}"
+        i+=1
         [[ -z "$line" ]] && continue
 
-        # Extract status code (first 2 chars) and file path (rest after space)
-        # Porcelain format: XY filename (where XY is the status)
+        # Porcelain format: XY <path> (XY is the two-character status)
         status_code="${line:0:2}"
         file_path="${line:3}"
 
@@ -1004,19 +1013,17 @@ cmd_changes() {
           " M"|"M "|"MM") simple_status="M" ;;
           " A"|"A "|"AM") simple_status="A" ;;
           " D"|"D ") simple_status="D" ;;
-          "R "*)  simple_status="R" ;;
-          "C "*)  simple_status="C" ;;
+          R?)  simple_status="R" ;;
+          C?)  simple_status="C" ;;
           "U"*|*"U")  simple_status="U" ;;  # Unmerged
-          *)  simple_status="${status_code:0:1}" ;;  # First non-space char
+          *)  simple_status="${${status_code// /}:0:1}" ;;  # First non-space char
         esac
 
-        # Handle renamed files (format: R  old -> new)
-        if [[ "$status_code" == "R "* && "$file_path" == *" -> "* ]]; then
-          file_path="${file_path##* -> }"
-        fi
+        # A rename or copy (index side) is followed by its source path; skip it.
+        [[ "$status_code" == [RC]? ]] && i+=1
 
         json_escape "$file_path"; files_json+=("{\"path\": \"$REPLY\", \"status\": \"$simple_status\"}")
-      done <<< "$st"
+      done
     fi
 
     format_json "{\"files\": [${(j:, :)files_json}]}"
@@ -1055,7 +1062,7 @@ cmd_changes() {
         " D"|"D ")
           print -r -- "  ${C_RED}D${C_RESET}  $file_path"
           ;;
-        "R "*)
+        R?)
           print -r -- "  ${C_CYAN}R${C_RESET}  $file_path"
           ;;
         *)

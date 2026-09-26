@@ -213,19 +213,22 @@ _show_deps_status() {
   print -r -- "${C_BOLD}Dependency Status${C_RESET}"
   print -r -- ""
 
+  # Declared outside the loop: re-declaring `local x` inside it makes zsh
+  # print the previous value to stdout from the second iteration on.
+  local dep_type dep_status dep_path target hash size_kb size
   for dep_type in vendor node_modules; do
-    local dep_status; dep_status="$(_check_deps_shared "$wt_path" "$dep_type")"
-    local dep_path="$wt_path/$dep_type"
+    dep_status="$(_check_deps_shared "$wt_path" "$dep_type")"
+    dep_path="$wt_path/$dep_type"
 
     case "$dep_status" in
       shared)
-        local target; target="$(readlink "$dep_path" 2>/dev/null)"
-        local hash="${target##*/}"
+        target="$(readlink "$dep_path" 2>/dev/null)"
+        hash="${target##*/}"
         print -r -- "  ${C_GREEN}●${C_RESET} $dep_type: ${C_GREEN}shared${C_RESET} ${C_DIM}($hash)${C_RESET}"
         ;;
       local)
-        local size_kb; size_kb="$(get_dir_size_kb "$dep_path")"
-        local size; size="$(bytes_to_human "$size_kb")"
+        size_kb="$(get_dir_size_kb "$dep_path")"
+        size="$(bytes_to_human "$size_kb")"
         print -r -- "  ${C_YELLOW}●${C_RESET} $dep_type: ${C_YELLOW}local${C_RESET} ${C_DIM}($size)${C_RESET}"
         ;;
       missing)
