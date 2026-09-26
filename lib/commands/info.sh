@@ -54,15 +54,15 @@ _display_worktree() {
   local mismatch=false
 
   if has_cached_status "$wt_path"; then
-    sha="$(get_cached_status "$wt_path" sha)"
-    dirty_status="$(get_cached_status "$wt_path" dirty)"
-    ahead="$(get_cached_status "$wt_path" ahead)"
-    behind="$(get_cached_status "$wt_path" behind)"
+    # get_cached_status sets REPLY; calling it directly avoids a subshell each.
+    get_cached_status "$wt_path" sha >/dev/null; sha="$REPLY"
+    get_cached_status "$wt_path" dirty >/dev/null; dirty_status="$REPLY"
+    get_cached_status "$wt_path" ahead >/dev/null; ahead="$REPLY"
+    get_cached_status "$wt_path" behind >/dev/null; behind="$REPLY"
 
     if [[ "$dirty_status" == "dirty" ]]; then
-      # Need to get actual change count for display
-      local st="$(git -C "$wt_path" status --porcelain 2>/dev/null || true)"
-      local changes="$(count_lines "$st")"
+      get_cached_status "$wt_path" changes >/dev/null
+      local changes="$REPLY"
       state_icon="◐"
       state_color="$C_YELLOW"
       state_text="$changes uncommitted"
@@ -88,10 +88,11 @@ _display_worktree() {
       dirty=true
     fi
 
-    # Get ahead/behind via fallback
-    local counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
-    ahead="${counts%% *}"
-    behind="${counts##* }"
+    # Same measure as the cache: ahead/behind the branch's upstream.
+    _worktree_status_record "$wt_path" "" || REPLY=""
+    local -a rec=("${(@s:|:)REPLY}")
+    ahead="${rec[3]:-$GROVE_UNKNOWN}"
+    behind="${rec[4]:-$GROVE_UNKNOWN}"
   fi
 
   # Check for branch/directory mismatch
@@ -274,19 +275,15 @@ _display_status_row() {
 
   # Use cached status if available, fallback to direct git calls
   if has_cached_status "$p"; then
-    sha="$(get_cached_status "$p" sha)"
-    local dirty_status="$(get_cached_status "$p" dirty)"
-    ahead="$(get_cached_status "$p" ahead)"
-    behind="$(get_cached_status "$p" behind)"
-
-    if [[ "$dirty_status" == "dirty" ]]; then
-      # Need to get actual change count for display
-      st="$(git -C "$p" status --porcelain 2>/dev/null)" || st=""
-      changes="$(count_lines "$st")"
+    # get_cached_status sets REPLY; calling it directly avoids a subshell each.
+    get_cached_status "$p" sha >/dev/null; sha="$REPLY"
+    get_cached_status "$p" ahead >/dev/null; ahead="$REPLY"
+    get_cached_status "$p" behind >/dev/null; behind="$REPLY"
+    get_cached_status "$p" changes >/dev/null; changes="$REPLY"
+    st=""
+    if (( changes > 0 )); then
       state_icon="◐ $changes"
       state_color="$C_YELLOW"
-    else
-      st=""
     fi
   else
     # Fallback to direct git calls
@@ -299,10 +296,11 @@ _display_status_row() {
       state_color="$C_YELLOW"
     fi
 
-    # Get sync status via fallback
-    counts="$(get_ahead_behind "$p" "$DEFAULT_BASE")"
-    ahead="${counts%% *}"
-    behind="${counts##* }"
+    # Same measure as the cache: ahead/behind the branch's upstream.
+    _worktree_status_record "$p" "" || REPLY=""
+    local -a rec=("${(@s:|:)REPLY}")
+    ahead="${rec[3]:-$GROVE_UNKNOWN}"
+    behind="${rec[4]:-$GROVE_UNKNOWN}"
   fi
 
   # Check for mismatch
@@ -314,9 +312,12 @@ _display_status_row() {
     REPLY2="${p:t}|$b|$expected_slug"
   fi
 
-  # Check if stale (exceeds commits-behind threshold). Never feed the unknown
-  # sentinel ("?") into arithmetic; an unknown count can't prove staleness.
-  if [[ "$behind" != "$GROVE_UNKNOWN" ]] && (( behind > stale_threshold )); then
+  # Check if stale: commits behind the BASE branch (as `ls` and `health`
+  # measure it), not behind the upstream shown in the sync column — a pushed
+  # branch is usually level with its upstream however far behind base it is.
+  # Never feed the unknown sentinel ("?") into arithmetic.
+  local base_behind; base_behind="$(get_commits_behind "$p" "$DEFAULT_BASE")"
+  if [[ "$base_behind" != "$GROVE_UNKNOWN" ]] && (( base_behind > stale_threshold )); then
     is_stale=true
     sync_display="${C_RED}↑$ahead ↓$behind${C_RESET}"
   else
@@ -355,7 +356,7 @@ _display_status_row() {
 
   if [[ "$JSON_OUTPUT" == true ]]; then
     local dirty=false
-    [[ -n "$st" ]] && dirty=true
+    (( ${changes:-0} > 0 )) && dirty=true
     # Map the unknown sentinel ("?") to JSON null; a bare ? is invalid JSON.
     local ahead_json="$ahead" behind_json="$behind"
     [[ "$ahead_json" == "$GROVE_UNKNOWN" ]] && ahead_json="null"
@@ -384,6 +385,9 @@ cmd_status() {
   local git_dir
   git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
+  # Per-repo DEFAULT_BASE / GROVE_STALE_THRESHOLD overrides apply here too.
+  load_repo_config "$git_dir"
+  stale_threshold="$GROVE_STALE_THRESHOLD"
 
   [[ "$JSON_OUTPUT" != true ]] && info "Fetching latest..."
   if ! cached_fetch "$git_dir" --all --prune --quiet; then
@@ -840,9 +844,10 @@ calculate_health_score() {
   local score=100
   local issues=()
 
-  # Check commits behind (max -30 points)
-  local counts; counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
-  local behind="${counts##* }"
+  # Check commits behind the base (max -30 points). "?" (base unresolved)
+  # scores nothing rather than reaching arithmetic.
+  local behind; behind="$(get_commits_behind "$wt_path" "$DEFAULT_BASE")"
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
   if (( behind > 50 )); then
     score=$((score - 30))
     issues+=("behind:$behind")
@@ -854,10 +859,20 @@ calculate_health_score() {
     issues+=("behind:$behind")
   fi
 
-  # Check uncommitted changes (max -20 points)
-  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
-  if [[ -n "$st" ]]; then
-    local changes; changes="$(count_lines "$st")"
+  # Check uncommitted changes (max -20 points). The status cache already
+  # holds the counts; only run git status when it does not.
+  local changes=0 untracked=0 st=""
+  if get_cached_status "$wt_path" changes >/dev/null; then
+    changes="$REPLY"
+    get_cached_status "$wt_path" untracked >/dev/null; untracked="$REPLY"
+  else
+    st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+    if [[ -n "$st" ]]; then
+      changes="$(count_lines "$st")"
+      untracked="$(count_matching "$st" '\?\?*')"
+    fi
+  fi
+  if (( changes > 0 )); then
     if (( changes > 20 )); then
       score=$((score - 20))
       issues+=("changes:$changes")
@@ -895,10 +910,6 @@ calculate_health_score() {
   fi
 
   # Check untracked files (max -5 points)
-  local untracked=0
-  if [[ -n "$st" ]]; then
-    untracked="$(count_matching "$st" '\?\?*')"
-  fi
   if (( untracked > 10 )); then
     score=$((score - 5))
     issues+=("untracked:$untracked")
@@ -975,10 +986,14 @@ cmd_health() {
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
+  load_repo_config "$git_dir"
 
-  # Collect worktrees once for reuse across all health checks
+  # Collect worktrees once for reuse across all health checks, and gather
+  # their statuses in parallel so each health score reads from the cache.
   local health_worktrees=()
   collect_worktrees "$git_dir" health_worktrees
+  clear_git_cache
+  collect_worktree_statuses "$git_dir"
 
   local wt_path="" branch=""
   local total_score=0 wt_count=0
@@ -1308,9 +1323,14 @@ cmd_dashboard() {
     repo_name="${${git_dir:t}%.git}"
     total_repos=$((total_repos + 1))
 
-    # Collect worktrees using shared helper
+    # Collect worktrees using shared helper. Each repo is graded against its
+    # own DEFAULT_BASE, and its statuses are gathered once, in parallel, so
+    # the per-worktree health score below reads them from the cache.
     local dash_worktrees=()
     collect_worktrees "$git_dir" dash_worktrees
+    load_repo_config "$git_dir"
+    clear_git_cache
+    collect_worktree_statuses "$git_dir"
 
     repo_wt_count=0
     repo_dirty=0
@@ -1335,8 +1355,12 @@ cmd_dashboard() {
       score="${rest%%|*}"
       repo_grade_sum=$((repo_grade_sum + score))
 
-      # Check dirty
-      st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+      # Check dirty (cache first; git status only if the cache has no entry)
+      if get_cached_status "$wt_path" dirty >/dev/null; then
+        [[ "$REPLY" == dirty ]] && st=dirty || st=""
+      else
+        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+      fi
       if [[ -n "$st" ]]; then
         repo_dirty=$((repo_dirty + 1))
         total_dirty=$((total_dirty + 1))

@@ -4,6 +4,11 @@
 # Git result cache (cleared between commands)
 typeset -gA _GROVE_GIT_CACHE
 typeset -gA _GROVE_STATUS_CACHE
+# The base ref the status cache's base_behind field was computed against, and
+# whether it resolved. Helpers that take a base consult the cache only when
+# asked about this same base.
+typeset -g _GROVE_STATUS_BASE=""
+typeset -g _GROVE_STATUS_BASE_OK=false
 
 # Sentinel branch name for detached-HEAD worktrees (see iterate_worktrees).
 # Consumers treat this as the "branch" so detached worktrees stay visible.
@@ -101,6 +106,8 @@ clear_fetch_cache() {
 clear_git_cache() {
   _GROVE_GIT_CACHE=()
   _GROVE_STATUS_CACHE=()
+  _GROVE_STATUS_BASE=""
+  _GROVE_STATUS_BASE_OK=false
 }
 
 # iterate_worktrees — Call a callback(path, branch) for each worktree in a repo
@@ -142,15 +149,86 @@ iterate_worktrees() {
   fi
 }
 
-# collect_worktree_statuses — Gather SHA, dirty, ahead/behind for all worktrees into cache
+# _worktree_status_record — Gather one worktree's status in three git calls
+#
+# Arguments:
+#   $1 - worktree path
+#   $2 - base ref already verified to resolve, or "" when it does not
+#
+# Sets REPLY to "sha|dirty|ahead|behind|timestamp|changes|untracked|base_behind":
+#   ahead/behind  - against the branch's upstream ("?" when it has none)
+#   changes       - porcelain entries, untracked files included (so "dirty"
+#                   agrees with `info`, `status` and the health score)
+#   base_behind   - commits the base has that HEAD lacks ("?" if no base)
+# Returns 1 when git cannot read the worktree.
+_worktree_status_record() {
+  local wt_path="$1" base="$2"
+  local out
+  out="$(git -C "$wt_path" status --porcelain=v2 --branch 2>/dev/null)" || return 1
+
+  # porcelain v2 headers carry the SHA and, only when an upstream is set and
+  # resolves, "# branch.ab +A -B". No header means ahead/behind are unknown,
+  # so a never-pushed branch never looks fully synced.
+  local line ab sha="unknown" ahead="$GROVE_UNKNOWN" behind="$GROVE_UNKNOWN"
+  local -i changes=0 untracked=0
+  for line in "${(@f)out}"; do
+    case "$line" in
+      "# branch.oid "*)
+        sha="${line#\# branch.oid }"
+        [[ "$sha" == "(initial)" ]] && sha="unknown" || sha="${sha:0:7}"
+        ;;
+      "# branch.ab "*)
+        ab="${line#\# branch.ab }"
+        ahead="${${ab%% *}#+}"
+        behind="${${ab##* }#-}"
+        ;;
+      "#"*|"") ;;
+      "? "*) changes+=1; untracked+=1 ;;
+      *) changes+=1 ;;
+    esac
+  done
+  [[ "$ahead" == "$GROVE_UNKNOWN" || "$ahead" =~ ^[0-9]+$ ]] || ahead=0
+  [[ "$behind" == "$GROVE_UNKNOWN" || "$behind" =~ ^[0-9]+$ ]] || behind=0
+
+  local dirty=clean
+  (( changes > 0 )) && dirty=dirty
+
+  local timestamp
+  timestamp="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || timestamp=0
+  [[ "$timestamp" =~ ^[0-9]+$ ]] || timestamp=0
+
+  local base_behind="$GROVE_UNKNOWN"
+  if [[ -n "$base" ]]; then
+    base_behind="$(git -C "$wt_path" rev-list --count "HEAD..$base" 2>/dev/null)" || base_behind=0
+    [[ "$base_behind" =~ ^[0-9]+$ ]] || base_behind=0
+  fi
+
+  REPLY="$sha|$dirty|$ahead|$behind|$timestamp|$changes|$untracked|$base_behind"
+}
+
+# collect_worktree_statuses — Gather status for all worktrees into the cache
 #
 # The per-worktree git calls run CONCURRENTLY (see parallel_collect). Walking
 # them one at a time cost roughly 0.65s per worktree on a large repo, so this
 # alone spent ~10s on a repo with fifteen worktrees before anything was printed
 # — the dominant half of a `grove ls` that felt like a hang from the desktop app.
+#
+# Arguments:
+#   $1 - git directory
+#   $2 - base ref for base_behind (default: $DEFAULT_BASE); validated and
+#        resolved once here, not once per worktree
 collect_worktree_statuses() {
   local git_dir="$1"
   _GROVE_STATUS_CACHE=()
+  _GROVE_STATUS_BASE="${2:-$DEFAULT_BASE}"
+  _GROVE_STATUS_BASE_OK=false
+  validate_git_ref "$_GROVE_STATUS_BASE" "base ref"
+  if [[ -n "$_GROVE_STATUS_BASE" ]] &&
+     git --git-dir="$git_dir" rev-parse --verify --quiet "$_GROVE_STATUS_BASE" >/dev/null 2>&1; then
+    _GROVE_STATUS_BASE_OK=true
+  fi
+  local _cws_base=""
+  [[ "$_GROVE_STATUS_BASE_OK" == true ]] && _cws_base="$_GROVE_STATUS_BASE"
 
   # Callback that gathers status for a single worktree.
   #
@@ -162,34 +240,7 @@ collect_worktree_statuses() {
     REPLY=""
     # Verify the worktree has a .git reference (file or directory)
     [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || return 0
-
-    local wt_sha wt_dirty wt_ahead wt_behind wt_timestamp wt_counts
-    wt_sha="$(git -C "$wt_path" rev-parse --short HEAD 2>/dev/null)" || wt_sha="unknown"
-
-    if git -C "$wt_path" diff --quiet HEAD 2>/dev/null && \
-       git -C "$wt_path" diff --cached --quiet HEAD 2>/dev/null; then
-      wt_dirty="clean"
-    else
-      wt_dirty="dirty"
-    fi
-
-    # Distinguish "no upstream" (never-pushed branch — ahead/behind unknown) from a
-    # genuine 0/0. Without this guard a never-pushed branch would look fully synced.
-    # The unknown sentinel ("?") is cached so JSON consumers can map it to null.
-    if git -C "$wt_path" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
-      wt_counts="$(git -C "$wt_path" rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)" || wt_counts="0	0"
-      wt_ahead="${wt_counts%%	*}"
-      wt_behind="${wt_counts##*	}"
-      [[ "$wt_ahead" =~ ^[0-9]+$ ]] || wt_ahead=0
-      [[ "$wt_behind" =~ ^[0-9]+$ ]] || wt_behind=0
-    else
-      wt_ahead="$GROVE_UNKNOWN"
-      wt_behind="$GROVE_UNKNOWN"
-    fi
-
-    wt_timestamp="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || wt_timestamp="0"
-
-    REPLY="$wt_sha|$wt_dirty|$wt_ahead|$wt_behind|$wt_timestamp"
+    _worktree_status_record "$wt_path" "$_cws_base" || REPLY=""
   }
 
   # Gather the paths first — one cheap `git worktree list` — so the expensive
@@ -215,28 +266,28 @@ collect_worktree_statuses() {
 }
 
 # get_cached_status — Retrieve a single status field from the worktree cache
+#
+# Fields: sha dirty ahead behind timestamp changes untracked base_behind all.
+# Sets REPLY as well as printing, so hot paths can call it without a subshell.
 get_cached_status() {
   local wt_path="$1"
   local field="$2"
+  REPLY=""
 
   local cached="${_GROVE_STATUS_CACHE[$wt_path]:-}"
   [[ -z "$cached" ]] && return 1
 
-  # Parse using parameter expansion (more reliable than IFS splitting)
-  local rest="$cached"
-  local f_sha="${rest%%|*}"; rest="${rest#*|}"
-  local f_dirty="${rest%%|*}"; rest="${rest#*|}"
-  local f_ahead="${rest%%|*}"; rest="${rest#*|}"
-  local f_behind="${rest%%|*}"; rest="${rest#*|}"
-  local f_timestamp="$rest"
-
+  local -a f=("${(@s:|:)cached}")
   case "$field" in
-    sha)       print -r -- "$f_sha" ;;
-    dirty)     print -r -- "$f_dirty" ;;
-    ahead)     print -r -- "$f_ahead" ;;
-    behind)    print -r -- "$f_behind" ;;
-    timestamp) print -r -- "$f_timestamp" ;;
-    all)       print -r -- "$cached" ;;
+    sha)         REPLY="${f[1]}" ;;
+    dirty)       REPLY="${f[2]}" ;;
+    ahead)       REPLY="${f[3]}" ;;
+    behind)      REPLY="${f[4]}" ;;
+    timestamp)   REPLY="${f[5]}" ;;
+    changes)     REPLY="${f[6]:-0}" ;;
+    untracked)   REPLY="${f[7]:-0}" ;;
+    base_behind) REPLY="${f[8]:-$GROVE_UNKNOWN}" ;;
+    all)         REPLY="$cached" ;;
     *)
       # Unknown field requested — signal the caller rather than silently returning
       # success with no output.
@@ -244,6 +295,16 @@ get_cached_status() {
       return 1
       ;;
   esac
+  print -r -- "$REPLY"
+}
+
+# cached_base_behind — Set REPLY to the cached commits-behind count for a worktree
+# against $2, when the cache holds it for that same base. Returns 1 otherwise.
+cached_base_behind() {
+  local wt_path="$1" base="$2"
+  REPLY=""
+  [[ -n "$base" && "$base" == "$_GROVE_STATUS_BASE" ]] || return 1
+  get_cached_status "$wt_path" base_behind >/dev/null || return 1
 }
 
 # has_cached_status — Return 0 if worktree status cache has data for the given path
@@ -492,7 +553,11 @@ get_last_commit_age() {
   local now epoch_seconds age_seconds age_days
 
   now="$(_get_now)"
-  epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "?"; return 0; }
+  if get_cached_status "$wt_path" timestamp >/dev/null && [[ "$REPLY" =~ ^[1-9][0-9]*$ ]]; then
+    epoch_seconds="$REPLY"
+  else
+    epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "?"; return 0; }
+  fi
 
   # Handle future timestamps (clock skew, timezone issues)
   if (( epoch_seconds > now )); then
@@ -541,7 +606,11 @@ get_commit_age_days() {
   local now epoch_seconds age_seconds
 
   now="$(_get_now)"
-  epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "0"; return 0; }
+  if get_cached_status "$wt_path" timestamp >/dev/null && [[ "$REPLY" =~ ^[1-9][0-9]*$ ]]; then
+    epoch_seconds="$REPLY"
+  else
+    epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "0"; return 0; }
+  fi
 
   # Handle future timestamps (clock skew, timezone issues)
   if (( epoch_seconds > now )); then
@@ -566,21 +635,21 @@ get_commit_age_days() {
 # so callers can tell "unknown" from a confident "not merged".
 is_branch_merged() {
   local wt_path="$1" base="${2:-origin/staging}"
-  local branch_head base_head
 
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
 
   # Guard: if the base ref is unresolved (not fetched / misconfigured) we cannot
   # determine merge status — signal "unknown" rather than a false "not merged".
-  if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
+  # The status cache already resolved its base once; reuse that answer.
+  if [[ -n "$_GROVE_STATUS_BASE" && "$base" == "$_GROVE_STATUS_BASE" ]]; then
+    [[ "$_GROVE_STATUS_BASE_OK" == true ]] || return 2
+  elif ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
     return 2
   fi
 
-  branch_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || return 1
-
   # Check if the base branch contains this commit
-  if git -C "$wt_path" merge-base --is-ancestor "$branch_head" "$base" 2>/dev/null; then
+  if git -C "$wt_path" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
     return 0
   fi
   return 1
@@ -621,6 +690,12 @@ get_commits_behind() {
 
   # Validate base ref for security
   validate_git_ref "$base" "base ref"
+
+  # Reuse the status cache when it was built against this same base.
+  if cached_base_behind "$wt_path" "$base"; then
+    print -r -- "$REPLY"
+    return 0
+  fi
 
   if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
     print -r -- "$GROVE_UNKNOWN"
