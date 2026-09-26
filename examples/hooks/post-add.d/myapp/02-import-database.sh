@@ -23,11 +23,13 @@ fi
 # Load grove config for database settings
 if [[ -f "$HOME/.groverc" ]]; then
   DB_HOST="${DB_HOST:-$(grep '^DB_HOST=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
+  DB_PORT="${DB_PORT:-$(grep '^DB_PORT=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
   DB_USER="${DB_USER:-$(grep '^DB_USER=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
   DB_PASSWORD="${DB_PASSWORD:-$(grep '^DB_PASSWORD=' "$HOME/.groverc" 2>/dev/null | cut -d= -f2-)}"
 fi
 
 DB_HOST="${DB_HOST:-127.0.0.1}"
+DB_PORT="${DB_PORT:-3306}"
 DB_USER="${DB_USER:-root}"
 DB_PASSWORD="${DB_PASSWORD:-}"
 
@@ -37,7 +39,7 @@ if ! command -v mysql >/dev/null 2>&1; then
 fi
 
 # Build mysql command
-mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER")
 [[ -n "$DB_PASSWORD" ]] && mysql_cmd+=(-p"$DB_PASSWORD")
 
 echo "  Importing database from $DB_DUMP..."

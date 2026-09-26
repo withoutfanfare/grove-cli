@@ -306,3 +306,34 @@ cmd_unlock myrepo 2>&1"
   [ -f "$wts/wt-main/index.lock" ]
   [[ "$output" == *"in use"* ]]
 }
+
+@test "cmd_repair: text summary does not call a damaged repo healthy when damage remains" {
+  setup_repair_repo
+  echo "garbage" > "$TEST_TEMP_DIR/wt-feature/.git"
+  run_repair_zsh "cmd_repair myrepo 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"No issues found in myrepo"* ]]
+  [[ "$output" == *"Found 1 issue(s) in myrepo, fixed 0"* ]]
+}
+
+@test "cmd_unlock: a lock that rm cannot remove is not reported as removed" {
+  setup_repair_repo
+  local wts="$HERD_ROOT/myrepo.git/worktrees"
+  : > "$wts/wt-feature/index.lock"
+
+  run zsh -c "source '$MAINT_FNS'
+source '$GROVE_ROOT/lib/01-core.sh' 2>/dev/null
+source '$GROVE_ROOT/lib/11-resilience.sh'
+info() { :; }; ok() { print -r -- \"OK: \$1\" >&2; }; warn() { print -r -- \"WARN: \$1\" >&2; }; dim() { :; }
+C_BOLD='' C_RESET='' C_CYAN='' C_MAGENTA='' C_DIM=''
+_lock_file_in_use() { return 1; }
+rm() { :; }   # stands in for a removal that fails (root ignores permissions)
+validate_name() { :; }; ensure_bare_repo() { :; }; detect_current_worktree() { return 1; }
+git_dir_for() { print -r -- \"\$HERD_ROOT/\$1.git\"; }
+FORCE=true
+cmd_unlock myrepo 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Could not remove lock"* ]]
+  [[ "$output" != *"Removed lock"* ]]
+  [[ "$output" == *"No lock files removed"* ]]
+}

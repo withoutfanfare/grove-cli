@@ -11,11 +11,12 @@
 #   source "$(dirname "$0")/../_lib/load-config.sh"
 #
 # After sourcing, these variables are available:
-#   DB_HOST, DB_USER, DB_PASSWORD, DB_CREATE, DB_BACKUP, DB_BACKUP_DIR
+#   DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_CREATE, DB_BACKUP, DB_BACKUP_DIR
 #   HERD_ROOT, HERD_CONFIG, DEFAULT_BASE, PROTECTED_BRANCHES
 
 # Set defaults
 DB_HOST="${DB_HOST:-127.0.0.1}"
+DB_PORT="${DB_PORT:-3306}"
 DB_USER="${DB_USER:-root}"
 DB_PASSWORD="${DB_PASSWORD:-}"
 DB_CREATE="${DB_CREATE:-true}"
@@ -85,6 +86,7 @@ _load_config_file() {
       HERD_ROOT) HERD_ROOT="$value" ;;
       HERD_CONFIG) HERD_CONFIG="$value" ;;
       DB_HOST) DB_HOST="$value" ;;
+      DB_PORT) DB_PORT="$value" ;;
       DB_USER) DB_USER="$value" ;;
       DB_PASSWORD) DB_PASSWORD="$value" ;;
       DB_CREATE) DB_CREATE="$value" ;;
@@ -119,5 +121,5 @@ if [[ -n "$GROVE_REPO" ]]; then
 fi
 
 # Export for subprocesses
-export DB_HOST DB_USER DB_PASSWORD DB_CREATE DB_BACKUP DB_BACKUP_DIR
+export DB_HOST DB_PORT DB_USER DB_PASSWORD DB_CREATE DB_BACKUP DB_BACKUP_DIR
 export HERD_ROOT HERD_CONFIG DEFAULT_BASE PROTECTED_BRANCHES

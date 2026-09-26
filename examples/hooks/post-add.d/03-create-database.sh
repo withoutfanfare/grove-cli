@@ -42,7 +42,7 @@ if ! command -v mysql >/dev/null 2>&1; then
 fi
 
 # Build mysql command
-mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
 # Check if database already exists
 if ! database_exists=$(MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" \

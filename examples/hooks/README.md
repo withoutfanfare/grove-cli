@@ -404,13 +404,13 @@ the variables below stay at their environment defaults. After sourcing, these
 variables are available:
 
 ```text
-DB_HOST, DB_USER, DB_PASSWORD, DB_CREATE, DB_BACKUP, DB_BACKUP_DIR
+DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_CREATE, DB_BACKUP, DB_BACKUP_DIR
 HERD_ROOT, HERD_CONFIG, DEFAULT_BASE, PROTECTED_BRANCHES
 ```
 
 Three caveats:
 
-- **The loader supplies built-in defaults only for** `DB_HOST`, `DB_USER`,
+- **The loader supplies built-in defaults only for** `DB_HOST`, `DB_PORT` (3306), `DB_USER`,
   `DB_PASSWORD`, `DB_CREATE`, `DB_BACKUP`, `DB_BACKUP_DIR`, `HERD_ROOT`, and
   `HERD_CONFIG`. `DEFAULT_BASE` and `PROTECTED_BRANCHES` are set **only if a
   config file defines them** — a hook reading `$DEFAULT_BASE` will get an empty

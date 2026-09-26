@@ -121,7 +121,8 @@ _build_all_for_repo() {
     wt_path="${wt_entry%%|*}"
     wt_branch="${wt_entry##*|}"
     if [[ -f "$wt_path/package.json" ]]; then
-      operations+=("$wt_branch|$wt_path|npm run build")
+      parallel_op "$wt_branch" "$wt_path" "npm run build"
+      operations+=("$REPLY")
     fi
   done
 
@@ -236,7 +237,8 @@ _exec_all_for_repo() {
   for wt_entry in "${worktrees[@]}"; do
     wt_path="${wt_entry%%|*}"
     wt_branch="${wt_entry##*|}"
-    operations+=("$wt_branch|$wt_path|$cmd_str")
+    parallel_op "$wt_branch" "$wt_path" "$cmd_str"
+    operations+=("$REPLY")
   done
 
   parallel_run report_results "${operations[@]}"

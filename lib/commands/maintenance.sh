@@ -337,7 +337,13 @@ _unlock_lock_file() {
     warn "Lock is under 5 minutes old, not removing: $label ${C_DIM}(use -f if no git command is running)${C_RESET}"
     return 1
   fi
-  rm -f "$lock_file"
+  # rm -f exits 0 even when it cannot remove the file (e.g. an unwritable
+  # admin dir), so confirm the lock is actually gone before claiming it.
+  rm -f "$lock_file" 2>/dev/null
+  if [[ -e "$lock_file" ]]; then
+    warn "Could not remove lock: $label"
+    return 1
+  fi
   ok "Removed lock: $label"
 }
 
@@ -615,10 +621,12 @@ _repair_repo() {
   fi
 
   print -r -- ""
-  if (( fixed > 0 )); then
+  if (( found == 0 )); then
+    ok "No issues found in $repo"
+  elif (( fixed >= found )); then
     ok "Fixed $fixed issue(s) in $repo"
   else
-    ok "No issues found in $repo"
+    warn "Found $found issue(s) in $repo, fixed $fixed - run repair with --recovery to attempt automatic recovery"
   fi
 }
 

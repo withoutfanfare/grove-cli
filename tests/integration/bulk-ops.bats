@@ -234,6 +234,22 @@ seed_group() {
   [ ! -e "$GROVE_ROOT/PWNED" ]
 }
 
+@test "prune --all-repos: a '|' in HERD_ROOT is never run as shell code" {
+  # parallel_run splits "label|path|command" on the first two '|'. With this
+  # HERD_ROOT the old code ran "cd <T>/a" then "… | touch PWNED | …" under sh -c.
+  local T="$TEST_TEMP_DIR"
+  mkdir -p "$T/a"
+  local root="$T/a|$T|touch PWNED #"
+  mkdir -p "$root"
+  git init -q --bare "$root/app.git"
+
+  HOME="$TEST_HOME" HERD_ROOT="$root" GROVE_HOOKS_DIR="$GROVE_HOOKS_DIR" NO_COLOR=1 \
+    run zsh "$GROVE_SCRIPT" prune --all-repos
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"contains '|'"* ]]
+  [ ! -e "$T/a/PWNED" ]
+}
+
 # ============================================================================
 # #16 - single quote in a worktree path is handled, not exploited
 # ============================================================================

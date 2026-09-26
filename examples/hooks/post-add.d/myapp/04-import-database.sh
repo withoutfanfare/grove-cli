@@ -44,7 +44,7 @@ if ! command -v mysql >/dev/null 2>&1; then
 fi
 
 if [[ "${GROVE_FORCE_DB_IMPORT:-}" != "true" ]]; then
-  if ! table_count=$(MYSQL_PWD="${DB_PASSWORD:-}" mysql -h "$DB_HOST" -u "$DB_USER" -N -B \
+  if ! table_count=$(MYSQL_PWD="${DB_PASSWORD:-}" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B \
       -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='${GROVE_DB_NAME}';" 2>/dev/null); then
     echo "  Could not inspect database - refusing seed import"
     exit 1
@@ -60,7 +60,7 @@ if [[ "${GROVE_FORCE_DB_IMPORT:-}" != "true" ]]; then
 fi
 
 # Build mysql command
-mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER")
 
 echo "  Importing database from $DB_DUMP..."
 
