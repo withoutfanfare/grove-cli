@@ -50,7 +50,7 @@ fi
 
 # Check connectivity separately so an authentication or server failure is not
 # mistaken for a database that does not exist.
-mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
   echo "  Cannot reach MySQL - refusing removal without a database backup"
   exit 1
@@ -77,7 +77,7 @@ timestamp="$(date +%Y%m%d_%H%M%S)"
 backup_file="$backup_dir/${GROVE_DB_NAME}_${timestamp}.sql"
 
 # Build mysqldump command
-mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
+mysqldump_cmd=(mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER")
 
 echo "  Backing up database ${GROVE_DB_NAME}..."
 if MYSQL_PWD="${DB_PASSWORD:-}" "${mysqldump_cmd[@]}" "$GROVE_DB_NAME" > "$backup_file" 2>/dev/null; then

@@ -44,6 +44,25 @@ report_results() {
   fi
 }
 
+# parallel_op — Build one "label|path|command" operation for parallel_run (REPLY)
+#
+# The first two '|' delimit the fields, so a '|' inside the label or path (a
+# directory name, or HERD_ROOT itself) would shift the rest of the path into
+# the command field, which runs under sh -c. Such an operation is replaced by
+# one that fails without running anything, so it is still counted as a
+# failure (total == succeeded + failed) and never executed.
+#
+# Always returns 0 (safe as a bare statement under errexit).
+parallel_op() {
+  local label="$1" op_path="$2" command="$3"
+  if [[ "$label" == *"|"* || "$op_path" == *"|"* ]]; then
+    warn "Skipping '${label//|/¦}': its name or path contains '|'"
+    REPLY="${label//|/¦}|/|exit 1"
+    return 0
+  fi
+  REPLY="$label|$op_path|$command"
+}
+
 # parallel_run — Execute "label|path|command" operations in parallel with concurrency limiting
 #
 # CALLING CONVENTION (callers in lib/commands/*.sh MUST match this):

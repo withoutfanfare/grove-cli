@@ -44,7 +44,7 @@ if ! command -v mysql >/dev/null 2>&1; then
 fi
 
 # Build mysql command
-mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+mysql_cmd=(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B)
 
 if ! MYSQL_PWD="${DB_PASSWORD:-}" "${mysql_cmd[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
   echo "  Cannot reach MySQL - database was not dropped"

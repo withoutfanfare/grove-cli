@@ -260,6 +260,16 @@ load_repo_config() {
 
   _read_config_pairs "$repo_config" _apply_repo_config
 
+  # load_config validated the global threshold before capturing it; a per-repo
+  # override arrives after that, so check it here and fall back to the global
+  # value (it reaches arithmetic in is_branch_stale and the status rows).
+  if [[ ! "$GROVE_STALE_THRESHOLD" =~ ^[0-9]+$ ]]; then
+    local global_threshold="${GROVE_GLOBAL_STALE_THRESHOLD:-50}"
+    [[ "$global_threshold" =~ ^[0-9]+$ ]] || global_threshold=50
+    warn "Invalid GROVE_STALE_THRESHOLD '$GROVE_STALE_THRESHOLD' in ${repo_config}; using $global_threshold."
+    GROVE_STALE_THRESHOLD="$global_threshold"
+  fi
+
   # Validate DEFAULT_BASE here, once, before any caller fans work out to
   # parallel callbacks: validate_git_ref's error JSON raised inside a callback's
   # command substitution was captured as a field value, and the command still

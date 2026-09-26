@@ -881,3 +881,25 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"PHP not found"* ]]
 }
+
+@test "hook config loader reads, defaults and exports DB_PORT" {
+  printf 'DB_PORT=3307\n' > "$TEST_HOME/.groverc"
+  run env -u DB_PORT HOME="$TEST_HOME" GROVE_REPO="" bash -c '
+    source "$1/_lib/load-config.sh"
+    bash -c "printf \"port=%s\n\" \"\$DB_PORT\""
+  ' _ "$EXAMPLE_HOOKS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"port=3307"* ]]
+
+  rm "$TEST_HOME/.groverc"
+  run env -u DB_PORT HOME="$TEST_HOME" GROVE_REPO="" bash -c '
+    source "$1/_lib/load-config.sh"; printf "port=%s\n" "$DB_PORT"
+  ' _ "$EXAMPLE_HOOKS"
+  [[ "$output" == *"port=3306"* ]]
+}
+
+@test "bundled database hooks pass DB_PORT to every mysql and mysqldump call" {
+  local missing
+  missing="$(grep -rnE '(mysql|mysqldump) -h "\$DB_HOST"' "$EXAMPLE_HOOKS" --include='*.sh' | grep -v -- '-P "$DB_PORT"' || true)"
+  [ -z "$missing" ]
+}

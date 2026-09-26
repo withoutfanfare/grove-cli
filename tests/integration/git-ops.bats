@@ -381,3 +381,22 @@ files = {f['path']: f['status'] for f in json.load(sys.stdin)['files']}
 assert files == {'new': 'R', 'q\"uo te': 'M', 'café.txt': '?'}, files
 "
 }
+
+@test "pull-all --json: a failed fetch reports every worktree as failed, never up to date" {
+  local root="$TEST_TEMP_DIR/fetchfail"
+  mkdir -p "$root"
+  _setup_conflict_repo "$root"
+  # Point origin somewhere unreachable: the fetch fails, the local refs remain.
+  git --git-dir="$root/repo.git" config remote.origin.url "$root/does-not-exist.git"
+
+  run --separate-stderr -- zsh -c "source '$GIT_OPS_FNS'; JSON_OUTPUT=true; _pull_all_for_repo 'repo' '$root/repo.git'"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+w=d["worktrees"][0]
+assert w["success"] is False and w["already_up_to_date"] is False, w
+assert "Fetch failed" in w["message"], w
+assert d["summary"]["failed"]==1, d
+'
+}

@@ -216,3 +216,18 @@ _core() {
   [ "$status" -eq 0 ]
   [ "$output" = "0K" ]
 }
+
+@test "load_repo_config: an invalid per-repo GROVE_STALE_THRESHOLD falls back to the global value" {
+  mkdir -p "$TEST_TEMP_DIR/app.git"
+  printf 'GROVE_STALE_THRESHOLD=abc\n' > "$TEST_TEMP_DIR/app.git/.groveconfig"
+  _core "
+    warn() { print -r -- \"WARN: \$*\" >&2; }
+    validate_git_ref() { :; }
+    GROVE_GLOBAL_STALE_THRESHOLD=12
+    load_repo_config '$TEST_TEMP_DIR/app.git' 2>&1
+    print -r -- \"threshold=\$GROVE_STALE_THRESHOLD\"
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"threshold=12"* ]]
+  [[ "$output" == *"Invalid GROVE_STALE_THRESHOLD"* ]]
+}

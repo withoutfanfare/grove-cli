@@ -170,7 +170,15 @@ _pull_all_for_repo() {
   local git_dir="$2"
 
   [[ "$JSON_OUTPUT" != true ]] && dim "  Fetching latest..."
-  git --git-dir="$git_dir" fetch --all --prune --quiet 2>/dev/null || true
+  # The jobs below only rebase onto what this fetch brought in. If it fails,
+  # rebasing onto stale remote-tracking refs would report "up to date" for a
+  # pull that never happened, so every worktree is reported as failed instead.
+  local fetch_error=""
+  if ! fetch_error="$(git --git-dir="$git_dir" fetch --all --prune --quiet 2>&1)"; then
+    fetch_error="Fetch failed, nothing was pulled: ${fetch_error:-git fetch exited with an error}"
+  else
+    fetch_error=""
+  fi
 
   # Collect worktrees using shared helper
   local worktrees=()
@@ -221,7 +229,10 @@ _pull_all_for_repo() {
       local before_sha after_sha
 
       before_sha="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || before_sha=""
-      if ! git -C "$wt_path" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+      if [[ -n "$fetch_error" ]]; then
+        pull_output="$fetch_error"
+        pull_exit_code=1
+      elif ! git -C "$wt_path" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
         pull_output="There is no tracking information for the current branch."
         pull_exit_code=1
       else
@@ -486,7 +497,8 @@ cmd_prune() {
     for git_dir in "$HERD_ROOT"/*.git(N); do
       [[ -d "$git_dir" ]] || continue
       repo_name="${${git_dir:t}%.git}"
-      operations+=("$repo_name|$git_dir|git worktree prune -v")
+      parallel_op "$repo_name" "$git_dir" "git worktree prune -v"
+      operations+=("$REPLY")
     done
 
     if (( ${#operations[@]} == 0 )); then
