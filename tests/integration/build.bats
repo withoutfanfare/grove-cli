@@ -75,6 +75,6 @@ EOF
   run zsh "$BUILD_FIXTURE/build.sh" --output "$artifact"
 
   [ "$status" -eq 0 ]
-  mode="$(stat -f '%Lp' "$artifact" 2>/dev/null || stat -c '%a' "$artifact")"
+  mode="$(stat -c '%a' "$artifact" 2>/dev/null || stat -f '%Lp' "$artifact")"
   [ "$mode" = "755" ]
 }

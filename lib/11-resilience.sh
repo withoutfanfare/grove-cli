@@ -112,7 +112,7 @@ check_index_locks() {
     [[ -f "$lock_file" ]] || continue
 
     # Only stale locks (older than 5 minutes) are candidates for cleanup.
-    lock_age=$(($(_get_now) - $(stat -f %m "$lock_file" 2>/dev/null || stat -c %Y "$lock_file" 2>/dev/null || echo 0)))
+    lock_age=$(($(_get_now) - $(file_mtime "$lock_file" || echo 0)))
     (( lock_age > 300 )) || continue
 
     # A live git process may legitimately hold a lock for longer than 5 minutes

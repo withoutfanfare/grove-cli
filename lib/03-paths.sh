@@ -323,7 +323,7 @@ resolve_recent_shortcut() {
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
       if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git && -d "$wt_path" ]]; then
-        mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+        mtime="$(file_mtime "$wt_path" || echo 0)"
         entries+=("$mtime|$branch")
       fi
       wt_path=""
@@ -336,7 +336,7 @@ resolve_recent_shortcut() {
 
   # Handle last entry
   if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git && -d "$wt_path" ]]; then
-    mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+    mtime="$(file_mtime "$wt_path" || echo 0)"
     entries+=("$mtime|$branch")
   fi
 

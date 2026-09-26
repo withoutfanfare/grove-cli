@@ -16,16 +16,16 @@ verify_hook_path_security() {
   local owner perms group_digit other_digit
 
   while true; do
-    # Check ownership (macOS stat format, with Linux fallback)
-    owner="$(stat -Lf %u "$checked" 2>/dev/null || stat -Lc %u "$checked" 2>/dev/null)"
+    # Check ownership
+    owner="$(file_owner_uid "$checked")" || owner=""
     if [[ "$owner" != "$current_uid" ]]; then
       warn "$kind '$checked' is not owned by current user - skipping for security"
       return 1
     fi
 
-    # Check for group- or world-writable (macOS octal perms, with Linux fallback).
+    # Check for group- or world-writable (unreadable perms fail closed as 777).
     # Octal write bit (2) is set when the digit is one of 2,3,6,7.
-    perms="$(stat -Lf %Lp "$checked" 2>/dev/null || stat -Lc %a "$checked" 2>/dev/null)"
+    perms="$(file_perms_octal "$checked")" || perms="777"
     # Normalise to a 3-digit owner/group/other string.
     perms="${perms: -3}"
     group_digit="${perms:1:1}"

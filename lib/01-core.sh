@@ -23,6 +23,34 @@ _get_now() {
   print -r -- "$_GROVE_NOW"
 }
 
+# File metadata via zsh's own stat module. External `stat` is not portable:
+# BSD `stat -f %m` means "filesystem status" to GNU coreutils (Linux, or macOS
+# with Homebrew gnubin first on PATH), which prints a block of text and exits
+# non-zero, so a `stat -f … || stat -c …` fallback captures both outputs.
+# `-F b:zstat` loads only zstat, so the external `stat` is never shadowed.
+zmodload -F zsh/stat b:zstat 2>/dev/null
+
+# file_mtime — Print a path's modification time (epoch seconds); returns 1 if unreadable
+file_mtime() {
+  local -a _fm
+  zstat -A _fm +mtime -- "$1" 2>/dev/null || return 1
+  print -r -- "${_fm[1]}"
+}
+
+# file_owner_uid — Print the numeric owner uid of a path (symlinks followed)
+file_owner_uid() {
+  local -a _fo
+  zstat -A _fo +uid -- "$1" 2>/dev/null || return 1
+  print -r -- "${_fo[1]}"
+}
+
+# file_perms_octal — Print permission bits in octal (e.g. 755, 4755), symlinks followed
+file_perms_octal() {
+  local -a _fp
+  zstat -A _fp +mode -- "$1" 2>/dev/null || return 1
+  printf '%o\n' $(( _fp[1] & 8#7777 ))
+}
+
 # ensure_tool_path — Append standard package-manager, Herd, and system tool
 # directories when missing. Existing entries stay first so callers retain
 # their intentionally selected tool versions.

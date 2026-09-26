@@ -106,7 +106,7 @@ EOF
   [ "$(cat "$HOOK_TEST_DIR/mysql-pwd")" = 'placeholder#fragment' ]
   dump_file="$(find "$HOOK_TEST_DIR/backups" -type f -name '*.sql' -print -quit)"
   [ -n "$dump_file" ]
-  mode="$(stat -f '%Lp' "$dump_file" 2>/dev/null || stat -c '%a' "$dump_file")"
+  mode="$(stat -c '%a' "$dump_file" 2>/dev/null || stat -f '%Lp' "$dump_file")"
   [ "$mode" = "600" ]
 }
 
@@ -433,8 +433,8 @@ EOF
   run env GROVE_PATH="$HOOK_TEST_DIR/worktree" bash "$hook"
 
   [ "$status" -eq 0 ]
-  mode="$(stat -f '%Lp' "$HOOK_TEST_DIR/worktree/storage/logs/laravel.log" 2>/dev/null || \
-    stat -c '%a' "$HOOK_TEST_DIR/worktree/storage/logs/laravel.log")"
+  mode="$(stat -c '%a' "$HOOK_TEST_DIR/worktree/storage/logs/laravel.log" 2>/dev/null || \
+    stat -f '%Lp' "$HOOK_TEST_DIR/worktree/storage/logs/laravel.log")"
   [ "$mode" = "600" ]
 }
 
@@ -454,7 +454,7 @@ EOF
 
   [ "$status" -eq 0 ]
   local template="$TEST_HOME/Development/Code/Worktree/app/app-env/.env"
-  mode="$(stat -f '%Lp' "$template" 2>/dev/null || stat -c '%a' "$template")"
+  mode="$(stat -c '%a' "$template" 2>/dev/null || stat -f '%Lp' "$template")"
   [ "$mode" = "600" ]
 }
 
@@ -518,7 +518,7 @@ EOF
   [ "$status" -eq 0 ]
   backup="$(find "$TEST_HOME" -type f -name '.env.backup.*' -print -quit)"
   [ -n "$backup" ]
-  mode="$(stat -f '%Lp' "$backup" 2>/dev/null || stat -c '%a' "$backup")"
+  mode="$(stat -c '%a' "$backup" 2>/dev/null || stat -f '%Lp' "$backup")"
   [ "$mode" = "600" ]
 }
 
@@ -527,8 +527,8 @@ EOF
 
   run env GROVE_PATH="$HOOK_TEST_DIR/worktree" bash "$EXAMPLE_HOOKS/post-add.d/01-copy-env.sh"
   [ "$status" -eq 0 ]
-  mode="$(stat -f '%Lp' "$HOOK_TEST_DIR/worktree/.env" 2>/dev/null || \
-    stat -c '%a' "$HOOK_TEST_DIR/worktree/.env")"
+  mode="$(stat -c '%a' "$HOOK_TEST_DIR/worktree/.env" 2>/dev/null || \
+    stat -f '%Lp' "$HOOK_TEST_DIR/worktree/.env")"
   [ "$mode" = "600" ]
 
   mkdir -p \

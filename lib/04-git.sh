@@ -40,7 +40,7 @@ _fetch_cache_valid() {
   [[ -f "$cache_file" ]] || return 1
 
   local cache_time now
-  cache_time="$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null)" || return 1
+  cache_time="$(file_mtime "$cache_file")" || return 1
   now="$(_get_now)"
   _FETCH_CACHE_AGE=$((now - cache_time))
 
@@ -591,15 +591,7 @@ get_last_accessed_iso() {
   local wt_path="$1"
   local mtime
 
-  # Get modification time (epoch seconds) using OS-specific stat format
-  case "$GROVE_OS" in
-    Darwin)
-      mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || print -r -- "")"
-      ;;
-    *)
-      mtime="$(stat -c '%Y' "$wt_path" 2>/dev/null || print -r -- "")"
-      ;;
-  esac
+  mtime="$(file_mtime "$wt_path")" || mtime=""
 
   if [[ -z "$mtime" || ! "$mtime" =~ ^[0-9]+$ ]]; then
     print -r -- ""

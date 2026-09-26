@@ -131,7 +131,7 @@ cmd_info() {
 
   # Timestamps
   local created_at="" accessed_at="" last_commit_at=""
-  accessed_at="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo "")"
+  accessed_at="$(file_mtime "$wt_path")" || accessed_at=""
   last_commit_at="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || last_commit_at=""
 
   # Health score
@@ -326,7 +326,7 @@ cmd_recent() {
       wt_path="${wt_entry%%|*}"
       wt_branch="${wt_entry##*|}"
       [[ -d "$wt_path" ]] || continue
-      atime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+      atime="$(file_mtime "$wt_path" || echo 0)"
       # Resolve the URL HERE, while this repo's config (GROVE_URL_SUBDOMAIN) is
       # loaded — resolving it later would apply the last repo's subdomain to
       # every entry. Keep URLs outside the delimited records: APP_URL may

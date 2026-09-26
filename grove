@@ -97,6 +97,34 @@ _get_now() {
   print -r -- "$_GROVE_NOW"
 }
 
+# File metadata via zsh's own stat module. External `stat` is not portable:
+# BSD `stat -f %m` means "filesystem status" to GNU coreutils (Linux, or macOS
+# with Homebrew gnubin first on PATH), which prints a block of text and exits
+# non-zero, so a `stat -f … || stat -c …` fallback captures both outputs.
+# `-F b:zstat` loads only zstat, so the external `stat` is never shadowed.
+zmodload -F zsh/stat b:zstat 2>/dev/null
+
+# file_mtime — Print a path's modification time (epoch seconds); returns 1 if unreadable
+file_mtime() {
+  local -a _fm
+  zstat -A _fm +mtime -- "$1" 2>/dev/null || return 1
+  print -r -- "${_fm[1]}"
+}
+
+# file_owner_uid — Print the numeric owner uid of a path (symlinks followed)
+file_owner_uid() {
+  local -a _fo
+  zstat -A _fo +uid -- "$1" 2>/dev/null || return 1
+  print -r -- "${_fo[1]}"
+}
+
+# file_perms_octal — Print permission bits in octal (e.g. 755, 4755), symlinks followed
+file_perms_octal() {
+  local -a _fp
+  zstat -A _fp +mode -- "$1" 2>/dev/null || return 1
+  printf '%o\n' $(( _fp[1] & 8#7777 ))
+}
+
 # ensure_tool_path — Append standard package-manager, Herd, and system tool
 # directories when missing. Existing entries stay first so callers retain
 # their intentionally selected tool versions.
@@ -1243,7 +1271,7 @@ resolve_recent_shortcut() {
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
       if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git && -d "$wt_path" ]]; then
-        mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+        mtime="$(file_mtime "$wt_path" || echo 0)"
         entries+=("$mtime|$branch")
       fi
       wt_path=""
@@ -1256,7 +1284,7 @@ resolve_recent_shortcut() {
 
   # Handle last entry
   if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != *.git && -d "$wt_path" ]]; then
-    mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+    mtime="$(file_mtime "$wt_path" || echo 0)"
     entries+=("$mtime|$branch")
   fi
 
@@ -1463,7 +1491,7 @@ _fetch_cache_valid() {
   [[ -f "$cache_file" ]] || return 1
 
   local cache_time now
-  cache_time="$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null)" || return 1
+  cache_time="$(file_mtime "$cache_file")" || return 1
   now="$(_get_now)"
   _FETCH_CACHE_AGE=$((now - cache_time))
 
@@ -2014,15 +2042,7 @@ get_last_accessed_iso() {
   local wt_path="$1"
   local mtime
 
-  # Get modification time (epoch seconds) using OS-specific stat format
-  case "$GROVE_OS" in
-    Darwin)
-      mtime="$(stat -f '%m' "$wt_path" 2>/dev/null || print -r -- "")"
-      ;;
-    *)
-      mtime="$(stat -c '%Y' "$wt_path" 2>/dev/null || print -r -- "")"
-      ;;
-  esac
+  mtime="$(file_mtime "$wt_path")" || mtime=""
 
   if [[ -z "$mtime" || ! "$mtime" =~ ^[0-9]+$ ]]; then
     print -r -- ""
@@ -2480,16 +2500,16 @@ verify_hook_path_security() {
   local owner perms group_digit other_digit
 
   while true; do
-    # Check ownership (macOS stat format, with Linux fallback)
-    owner="$(stat -Lf %u "$checked" 2>/dev/null || stat -Lc %u "$checked" 2>/dev/null)"
+    # Check ownership
+    owner="$(file_owner_uid "$checked")" || owner=""
     if [[ "$owner" != "$current_uid" ]]; then
       warn "$kind '$checked' is not owned by current user - skipping for security"
       return 1
     fi
 
-    # Check for group- or world-writable (macOS octal perms, with Linux fallback).
+    # Check for group- or world-writable (unreadable perms fail closed as 777).
     # Octal write bit (2) is set when the digit is one of 2,3,6,7.
-    perms="$(stat -Lf %Lp "$checked" 2>/dev/null || stat -Lc %a "$checked" 2>/dev/null)"
+    perms="$(file_perms_octal "$checked")" || perms="777"
     # Normalise to a 3-digit owner/group/other string.
     perms="${perms: -3}"
     group_digit="${perms:1:1}"
@@ -3964,7 +3984,7 @@ check_index_locks() {
     [[ -f "$lock_file" ]] || continue
 
     # Only stale locks (older than 5 minutes) are candidates for cleanup.
-    lock_age=$(($(_get_now) - $(stat -f %m "$lock_file" 2>/dev/null || stat -c %Y "$lock_file" 2>/dev/null || echo 0)))
+    lock_age=$(($(_get_now) - $(file_mtime "$lock_file" || echo 0)))
     (( lock_age > 300 )) || continue
 
     # A live git process may legitimately hold a lock for longer than 5 minutes
@@ -9545,7 +9565,7 @@ cmd_info() {
 
   # Timestamps
   local created_at="" accessed_at="" last_commit_at=""
-  accessed_at="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo "")"
+  accessed_at="$(file_mtime "$wt_path")" || accessed_at=""
   last_commit_at="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || last_commit_at=""
 
   # Health score
@@ -9740,7 +9760,7 @@ cmd_recent() {
       wt_path="${wt_entry%%|*}"
       wt_branch="${wt_entry##*|}"
       [[ -d "$wt_path" ]] || continue
-      atime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+      atime="$(file_mtime "$wt_path" || echo 0)"
       # Resolve the URL HERE, while this repo's config (GROVE_URL_SUBDOMAIN) is
       # loaded — resolving it later would apply the last repo's subdomain to
       # every entry. Keep URLs outside the delimited records: APP_URL may
