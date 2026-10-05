@@ -170,14 +170,33 @@ HOOK
   grep -qx 'pre-rm|demo__original|https://new-alias.test' "$HERD_ROOT/hook-events"
 }
 
-@test "legacy alias: ambiguous database identity blocks removal before hooks" {
+@test "legacy alias: ambiguous database identity blocks unforced removal before hooks" {
   add_worktree feature/legacy old-alias
   record_hooks
-  grove_run rm demo feature/legacy --force --drop-db --json
+  grove_run rm demo feature/legacy --drop-db --json
   assert_json_error
   [[ "$output" == *DATABASE_UNKNOWN* ]]
   [ -d "$HERD_ROOT/demo-worktrees/old-alias" ]
   [ ! -e "$HERD_ROOT/hook-events" ]
+}
+
+# A forced removal must not depend on the database: it removes the worktree but
+# never backs up or drops a database it cannot identify.
+record_db_flags() {
+  cat > "$GROVE_HOOKS_DIR/post-rm" <<'HOOK'
+#!/bin/sh
+printf 'db=%s|drop=%s|nobackup=%s\n' "$GROVE_DB_NAME" "${GROVE_DROP_DB:-}" "${GROVE_NO_BACKUP:-}" >> "$HERD_ROOT/db-flags"
+HOOK
+  chmod +x "$GROVE_HOOKS_DIR/post-rm"
+}
+
+@test "legacy alias: forced removal with an unknown database leaves databases alone" {
+  add_worktree feature/legacy old-alias
+  record_db_flags
+  grove_run rm demo feature/legacy --force --drop-db --json
+  [ "$status" -eq 0 ]
+  [ ! -d "$HERD_ROOT/demo-worktrees/old-alias" ]
+  grep -qx 'db=|drop=|nobackup=true' "$HERD_ROOT/db-flags"
 }
 
 @test "rm: a broken database record cannot fall back to a guessed name" {
@@ -186,9 +205,21 @@ HOOK
   sidecar="$(git -C "$HERD_ROOT/demo-worktrees/feature-broken" rev-parse --git-path grove-database)"
   ln -s "$TEST_TEMP_DIR/missing-record" "$sidecar"
   record_hooks
-  grove_run rm demo feature/broken --force --drop-db --json
+  grove_run rm demo feature/broken --drop-db --json
   assert_json_error
   [[ "$output" == *DATABASE_UNKNOWN* ]]
   [ -d "$HERD_ROOT/demo-worktrees/feature-broken" ]
   [ ! -e "$HERD_ROOT/hook-events" ]
+}
+
+@test "rm: forced removal with a broken database record drops nothing" {
+  add_worktree feature/broken feature-broken
+  local sidecar
+  sidecar="$(git -C "$HERD_ROOT/demo-worktrees/feature-broken" rev-parse --git-path grove-database)"
+  ln -s "$TEST_TEMP_DIR/missing-record" "$sidecar"
+  record_db_flags
+  grove_run rm demo feature/broken --force --drop-db --json
+  [ "$status" -eq 0 ]
+  [ ! -d "$HERD_ROOT/demo-worktrees/feature-broken" ]
+  grep -qx 'db=|drop=|nobackup=true' "$HERD_ROOT/db-flags"
 }

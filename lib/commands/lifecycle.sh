@@ -375,8 +375,17 @@ cmd_rm() {
   local wt_path; wt_path="$(resolve_worktree_path "$repo" "$branch")" ||
     error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
-    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
+  # A forced removal must not depend on the database. When it cannot be
+  # identified, remove the worktree but never back up or drop a guessed name.
+  local db_name
+  if ! db_name="$(db_name_for "$repo" "$branch" "$wt_path")"; then
+    [[ "$FORCE" == true ]] ||
+      error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env, or use -f to remove without touching any database" 5
+    warn "Cannot determine database for '$branch' - removing without backing up or dropping any database"
+    db_name=""
+    DROP_DB=false
+    NO_BACKUP=true
+  fi
   local site_name="${wt_path:t}"
 
   ensure_bare_repo "$git_dir"
