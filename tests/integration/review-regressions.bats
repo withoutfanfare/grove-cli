@@ -93,6 +93,31 @@ HOOK
   [ -d "$HERD_ROOT/demo-worktrees/feature-collision" ]
 }
 
+@test "rm --path: a detached worktree is removed by its folder, keeping its branch" {
+  add_worktree feature/parked feature-parked
+  git -C "$HERD_ROOT/demo-worktrees/feature-parked" checkout -q --detach
+  grove_run rm -f --delete-branch --path="$HERD_ROOT/demo-worktrees/feature-parked" demo --json
+  [ "$status" -eq 0 ]
+  [ ! -d "$HERD_ROOT/demo-worktrees/feature-parked" ]
+  git --git-dir="$HERD_ROOT/demo.git" rev-parse -q --verify refs/heads/feature/parked
+}
+
+@test "rm --path: a worktree on a branch must be removed by its branch" {
+  add_worktree feature/attached feature-attached
+  grove_run rm -f --path="$HERD_ROOT/demo-worktrees/feature-attached" demo --json
+  assert_json_error
+  [[ "$output" == *WORKTREE_NOT_FOUND* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/feature-attached" ]
+}
+
+@test "rm --path: a folder that is not one of the repo's worktrees is refused" {
+  mkdir -p "$HERD_ROOT/demo-worktrees/not-a-worktree"
+  grove_run rm -f --path="$HERD_ROOT/demo-worktrees/not-a-worktree" demo --json
+  assert_json_error
+  [[ "$output" == *WORKTREE_NOT_FOUND* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/not-a-worktree" ]
+}
+
 @test "add --json: a new branch emits one JSON document" {
   grove_run add demo feature/new main --force --json
   [ "$status" -eq 0 ]

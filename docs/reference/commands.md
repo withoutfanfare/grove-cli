@@ -124,6 +124,7 @@ If `branch` is omitted and `fzf` is installed, an interactive picker is shown.
 |------|-------------|
 | `-f`, `--force` | Skip the protected branch check (never the removal gate) |
 | `--delete-branch` | Also delete the local git branch |
+| `--path=<path>` | Remove a detached worktree (one with no branch) by its folder instead of a branch; only a registered, detached worktree of the repo qualifies |
 | `--drop-db` | Request that the database be dropped (delegated to hooks) |
 | `--no-backup` | Request that the database backup be skipped (delegated to hooks) |
 | `--json` | Output result as JSON |

@@ -185,6 +185,27 @@ resolve_worktree_path() {
   print -r -- "$actual_path"
 }
 
+# resolve_detached_worktree_path — Resolve a detached worktree by its folder.
+# A detached worktree has no branch to name it by, so `rm --path` targets the
+# folder instead. Only an exact, registered, detached worktree of this repo
+# qualifies: a worktree on a branch must still be removed by its branch.
+resolve_detached_worktree_path() {
+  local repo="$1" target="${2:A}" git_dir line wt="" detached=false
+  git_dir="$(git_dir_for "$repo")"
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) wt="${line#worktree }"; detached=false ;;
+      detached) detached=true ;;
+      "")
+        if [[ "$detached" == true && "${wt:A}" == "$target" && -d "$target" ]]; then
+          print -r -- "$target"; return 0
+        fi
+        wt="" ;;
+    esac
+  done < <(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null; print)
+  return 1
+}
+
 # detect_current_worktree — Auto-detect repo and branch from cwd (sets DETECTED_REPO/BRANCH)
 detect_current_worktree() {
   DETECTED_REPO=""
