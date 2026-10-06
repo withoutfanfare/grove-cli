@@ -89,6 +89,7 @@ usage() {
   print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add)"
   print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
+  print -r -- "  ${C_YELLOW}--path=<path>${C_RESET}        Remove a detached worktree by its folder (with rm)"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
   print -r -- "  ${C_YELLOW}--no-cache${C_RESET}           Bypass fetch cache (always fetch fresh)"
@@ -206,7 +207,7 @@ parse_flags() {
     if (( user_cmd_at > 0 && ${#REMAINING_ARGS[@]} >= user_cmd_at )) && [[ "$1" == -?* ]]; then
       case "$1" in
         --|--json|--pretty) ;;
-        -q|--quiet|-f|--force|-i|--interactive|--delete-branch|--drop-db|--no-backup|\
+        -q|--quiet|-f|--force|-i|--interactive|--delete-branch|--drop-db|--no-backup|--path=*|\
         --dry-run|--check|--all-repos|--recovery|--no-cache|--refresh|--template=*|-t|\
         --dir|--dir=*|--as|--as=*|-v|--version|-h|--help)
           setup_colors
@@ -226,6 +227,7 @@ parse_flags() {
       --json) JSON_OUTPUT=true ;;
       --delete-branch) DELETE_BRANCH=true ;;
       --drop-db) DROP_DB=true ;;
+      --path=*) RM_PATH="${1#--path=}" ;;
       --no-backup) NO_BACKUP=true ;;
       --dry-run) DRY_RUN=true ;;
       --pretty) PRETTY_JSON=true ;;

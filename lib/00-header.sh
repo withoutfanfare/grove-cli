@@ -47,6 +47,7 @@ JSON_OUTPUT=false
 PRETTY_JSON=false
 DRY_RUN=false
 DELETE_BRANCH=false
+RM_PATH=""
 DROP_DB=false
 NO_BACKUP=false
 INTERACTIVE=false

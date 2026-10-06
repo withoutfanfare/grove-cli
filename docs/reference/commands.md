@@ -124,6 +124,7 @@ If `branch` is omitted and `fzf` is installed, an interactive picker is shown.
 |------|-------------|
 | `-f`, `--force` | Skip the protected branch check (never the removal gate) |
 | `--delete-branch` | Also delete the local git branch |
+| `--path=<path>` | Remove a detached worktree (one with no branch) by its folder instead of a branch; only a registered, detached worktree of the repo qualifies |
 | `--drop-db` | Request that the database be dropped (delegated to hooks) |
 | `--no-backup` | Request that the database backup be skipped (delegated to hooks) |
 | `--json` | Output result as JSON |
@@ -186,7 +187,7 @@ New worktrees record their database name in the per-worktree Git administrative 
 git rev-parse --git-path grove-database
 ```
 
-That identity survives `grove move`. For a legacy worktree without this file, Grove first parses a literal `DB_DATABASE` value from `.env`; it never sources or evaluates the file. If neither exists, Grove uses the canonical branch-derived database only when the worktree still has its canonical folder. A renamed or aliased legacy folder is ambiguous and operations needing the database (`info`, `pull`, `sync`, `move` and `rm`) fail with `DATABASE_UNKNOWN` rather than guessing.
+That identity survives `grove move`. For a legacy worktree without this file, Grove first parses a literal `DB_DATABASE` value from `.env`; it never sources or evaluates the file. If neither exists, Grove uses the canonical branch-derived database only when the worktree still has its canonical folder. A renamed or aliased legacy folder is ambiguous and operations needing the database (`info`, `pull`, `sync`, `move` and `rm`) fail with `DATABASE_UNKNOWN` rather than guessing. The exception is `rm -f`: a forced removal does not depend on the database, so it removes the worktree with a warning and skips the database backup and drop (`--drop-db` is ignored) instead of acting on a guessed name.
 
 Resolve the ambiguity by confirming the real database, then either set `DB_DATABASE` in the worktree's `.env` or write the confirmed name to the path printed by `git rev-parse --git-path grove-database`. Database names must contain only letters, numbers, underscores, dots, and be at most 64 characters.
 
