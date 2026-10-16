@@ -19,6 +19,14 @@ setup_test_environment() {
   export GROVE_CONFIG="$TEST_TEMP_DIR/test.groverc"
   : > "$GROVE_CONFIG"
 
+  # Keep git hermetic too: the developer's global git config can ignore files
+  # (a global '*.env' rule hides an untracked .env from `git status`), sign
+  # commits or rename the default branch. Tests get an identity and nothing
+  # else. excludesFile is set because git otherwise falls back to
+  # ~/.config/git/ignore.
+  export GIT_CONFIG_GLOBAL="$TEST_TEMP_DIR/gitconfig"
+  printf '[user]\n\tname = Grove Test\n\temail = test@example.invalid\n[core]\n\texcludesFile = /dev/null\n' > "$GIT_CONFIG_GLOBAL"
+
   # Create a minimal test hooks directory
   export GROVE_HOOKS_DIR="$TEST_TEMP_DIR/.grove/hooks"
   mkdir -p "$GROVE_HOOKS_DIR"
