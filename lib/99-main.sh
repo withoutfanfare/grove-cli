@@ -15,6 +15,7 @@ usage() {
   print -r -- "           ${C_DIM}--dry-run${C_RESET}                     Preview without creating"
   print -r -- "           ${C_DIM}--interactive, -i${C_RESET}             Guided creation wizard"
   print -r -- "  ${C_GREEN}rm${C_RESET}       ${C_DIM}<repo> [branch]${C_RESET}            Remove worktree"
+  print -r -- "           ${C_DIM}--dry-run${C_RESET}                     Preview without removing"
   print -r -- "  ${C_GREEN}move${C_RESET}     ${C_DIM}<repo> <branch> <new-name>${C_RESET}  Rename/move worktree"
   print -r -- "  ${C_GREEN}ls${C_RESET}       ${C_DIM}<repo>${C_RESET}                     List worktrees"
   print -r -- "  ${C_GREEN}repos${C_RESET}                               List all repositories"
@@ -86,7 +87,7 @@ usage() {
   print -r -- "  ${C_YELLOW}-i, --interactive${C_RESET}    Launch interactive worktree creation wizard"
   print -r -- "  ${C_YELLOW}--json${C_RESET}               Output in JSON format"
   print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
-  print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add)"
+  print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add, rm, clean)"
   print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
   print -r -- "  ${C_YELLOW}--path=<path>${C_RESET}        Remove a detached worktree by its folder (with rm)"
@@ -333,6 +334,15 @@ main() {
 
   local cmd="${1:-}"
   shift || true
+
+  # Only these commands can preview. Any other would ignore the flag and act
+  # for real, so refuse it rather than let a "preview" change things.
+  if [[ "$DRY_RUN" == true ]]; then
+    case "$cmd" in
+      add|rm|clean|help|"") ;;
+      *) die "--dry-run is not supported by 'grove $cmd' (only add, rm and clean)" ;;
+    esac
+  fi
 
   # Handle interactive mode for add command
   if [[ "$INTERACTIVE" == true ]]; then

@@ -323,6 +323,65 @@ assert row['health_grade'] in 'ABCDF', row
   [[ "$stderr" == *"post-rm-hook-output"* ]]
 }
 
+@test "rm --dry-run: previews the removal and changes nothing" {
+  local seed="$TEST_TEMP_DIR/seed"
+  local branch="feature/preview"
+  local wt_path="$HERD_ROOT/testrepo-worktrees/feature-preview"
+  local marker="$TEST_TEMP_DIR/hooks-ran"
+  mkdir -p "$TEST_TEMP_DIR/home"
+  git init -q -b main "$seed"
+  git -C "$seed" config user.email test@example.invalid
+  git -C "$seed" config user.name Grove-Test
+  git -C "$seed" commit -q --allow-empty -m init
+  git clone -q --bare "$seed" "$HERD_ROOT/testrepo.git"
+  git --git-dir="$HERD_ROOT/testrepo.git" worktree add -q -b "$branch" "$wt_path" HEAD
+
+  # Each hook leaves a mark, so a hook that runs cannot go unnoticed.
+  mkdir -p "$GROVE_HOOKS_DIR/pre-rm.d" "$GROVE_HOOKS_DIR/post-rm.d"
+  printf '#!/bin/sh\necho pre-rm >> "%s"\n' "$marker" > "$GROVE_HOOKS_DIR/pre-rm.d/01-mark.sh"
+  printf '#!/bin/sh\necho post-rm >> "%s"\n' "$marker" > "$GROVE_HOOKS_DIR/post-rm.d/02-drop-database.sh"
+  chmod +x "$GROVE_HOOKS_DIR/pre-rm.d/01-mark.sh" "$GROVE_HOOKS_DIR/post-rm.d/02-drop-database.sh"
+
+  run --separate-stderr env \
+    HOME="$TEST_TEMP_DIR/home" \
+    PATH="/usr/bin:/bin" \
+    HERD_ROOT="$HERD_ROOT" \
+    GROVE_HOOKS_DIR="$GROVE_HOOKS_DIR" \
+    NO_COLOR=1 \
+    zsh "$GROVE_SCRIPT" rm testrepo "$branch" --dry-run --delete-branch --drop-db
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Dry Run Preview"* ]]
+  [[ "$output" == *"$wt_path"* ]]
+  [[ "$output" == *"02-drop-database.sh"* ]]
+  [[ "$output" != *"Worktree removed"* ]]
+  [ ! -e "$marker" ]
+  [ -d "$wt_path" ]
+  git --git-dir="$HERD_ROOT/testrepo.git" worktree list | grep -qF "$wt_path"
+  git --git-dir="$HERD_ROOT/testrepo.git" show-ref --verify --quiet "refs/heads/$branch"
+
+  # The real removal still works, and runs the hooks the preview listed.
+  run --separate-stderr env \
+    HOME="$TEST_TEMP_DIR/home" \
+    PATH="/usr/bin:/bin" \
+    HERD_ROOT="$HERD_ROOT" \
+    GROVE_HOOKS_DIR="$GROVE_HOOKS_DIR" \
+    NO_COLOR=1 \
+    zsh "$GROVE_SCRIPT" rm testrepo "$branch" --delete-branch
+
+  [ "$status" -eq 0 ]
+  [ ! -d "$wt_path" ]
+  ! git --git-dir="$HERD_ROOT/testrepo.git" show-ref --verify --quiet "refs/heads/$branch"
+  [ "$(cat "$marker")" = "$(printf 'pre-rm\npost-rm')" ]
+}
+
+@test "--dry-run: refused by commands that cannot preview" {
+  run_grove pull testrepo main --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--dry-run"* ]]
+  [[ "$output" == *"pull"* ]]
+}
+
 # ============================================================================
 # Validation - error cases
 # ============================================================================

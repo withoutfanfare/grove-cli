@@ -407,6 +407,46 @@ cmd_rm() {
     error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use -f to force removal" 4
   fi
 
+  # Dry-run mode - say what would happen, then stop before any hook, git or
+  # Herd action. The gate and the hook listing only read.
+  if [[ "${DRY_RUN:-false}" == true ]]; then
+    print -r -- ""
+    print -r -- "${C_BOLD}Dry Run Preview${C_RESET}"
+    print -r -- ""
+    print -r -- "  Repository:  ${C_CYAN}$repo${C_RESET}"
+    print -r -- "  Branch:      ${C_MAGENTA}${branch:-(detached)}${C_RESET}"
+    print -r -- "  Path:        $wt_path"
+    print -r -- "  Herd site:   ${C_CYAN}$site_name${C_RESET} ($app_url)"
+    if [[ "$DROP_DB" == true ]]; then
+      print -r -- "  Database:    ${C_CYAN}${db_name}${C_RESET} - dropped by the post-rm hooks (--drop-db)"
+    else
+      print -r -- "  Database:    ${C_CYAN}${db_name:-unknown}${C_RESET} - kept"
+    fi
+    print -r -- ""
+    print -r -- "${C_BOLD}Actions:${C_RESET}"
+    if removal_gate "$wt_path"; then
+      print -r -- "  1. Removal check: nothing unsaved would be lost"
+    else
+      print -r -- "  1. Removal check: ${C_YELLOW}blocked${C_RESET}"
+      print -r -- "${C_YELLOW}$REPLY${C_RESET}"
+    fi
+    print -r -- "  2. Run pre-rm hooks:"
+    run_hooks "pre-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" ||
+      print -r -- "     ${C_YELLOW}a pre-rm hook would stop the removal${C_RESET}"
+    print -r -- "  3. Remove the worktree folder and its git entry"
+    if [[ "$DELETE_BRANCH" == true && -n "$branch" ]]; then
+      print -r -- "  4. Delete branch: $branch"
+    else
+      print -r -- "  4. Keep the branch"
+    fi
+    print -r -- "  5. Run post-rm hooks:"
+    run_hooks "post-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" || true
+    print -r -- "  6. Restart Herd"
+    print -r -- ""
+    print -r -- "${C_DIM}Run without --dry-run to remove${C_RESET}"
+    return 0
+  fi
+
   # The removal gate. Deliberately BEFORE the pre-rm hooks and before git
   # touches anything, and deliberately not conditioned on $FORCE: -f forces git,
   # it does not accept the loss of unsaved work. The gate says exactly what

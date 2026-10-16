@@ -76,6 +76,12 @@ _run_single_hook() {
   local db_name="$8"
   local hook_name="$9"
 
+  # A dry run names the hook and stops there: a hook may act for real.
+  if [[ "${DRY_RUN:-false}" == true ]]; then
+    print -r -- "     ${hook_script#$GROVE_HOOKS_DIR/}"
+    return 0
+  fi
+
   # The subshell's exit status (and therefore this function's return value) is
   # the hook's own exit status, so callers can gate on pre-* hook failures.
   (
@@ -152,7 +158,7 @@ run_hooks() {
     if ! verify_hook_security "$hook_file"; then
       [[ $is_gating -eq 1 ]] && overall_status=1
     else
-      info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
+      [[ "${DRY_RUN:-false}" == true ]] || info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
       if ! _run_single_hook "$hook_file" "Hook ${C_CYAN}$hook_name${C_RESET}" \
         "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
         [[ $is_gating -eq 1 ]] && overall_status=1
@@ -224,7 +230,7 @@ run_hooks() {
       display_path="$script_name"
       [[ "$hook_script" == "$repo_hooks_d/"* ]] && display_path="$repo/$script_name"
 
-      info "Running ${C_CYAN}$hook_name.d/$display_path${C_RESET}..."
+      [[ "${DRY_RUN:-false}" == true ]] || info "Running ${C_CYAN}$hook_name.d/$display_path${C_RESET}..."
       if ! _run_single_hook "$hook_script" "  $display_path" \
         "$repo" "$branch" "$branch_slug" "$wt_path" "$app_url" "$db_name" "$hook_name"; then
         [[ $is_gating -eq 1 ]] && overall_status=1
