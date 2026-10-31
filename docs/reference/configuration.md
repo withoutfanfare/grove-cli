@@ -324,7 +324,7 @@ GROVE_SKIP_DB=true GROVE_SKIP_COMPOSER=true grove add example-app feature/ui
 | Variable | Skips | Honoured by example hook |
 |---|---|---|
 | `GROVE_SKIP_DB=true` | Database creation | `post-add.d/03-create-database.sh` |
-| `GROVE_SKIP_HERD=true` | Herd link/secure | `post-add.d/04-herd-secure.sh` |
+| `GROVE_SKIP_HERD=true` | Herd link/secure and the built-in service/application restart | `post-add.d/04-herd-secure.sh` and `restart_herd_service` |
 | `GROVE_SKIP_COMPOSER=true` | `composer install` | `post-add.d/05-composer-install.sh` |
 | `GROVE_SKIP_NPM=true` | `npm install` | `post-add.d/06-npm-install.sh` |
 | `GROVE_SKIP_BUILD=true` | Asset build | `post-add.d/07-build-assets.sh` |

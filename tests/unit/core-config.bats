@@ -34,6 +34,18 @@ _core() {
   "
 }
 
+@test "Herd skip prevents service and application restart" {
+  _core 'herd() { print unexpected-herd; }; osascript() { print unexpected-app; }; GROVE_SKIP_HERD=true; restart_herd_service; print skipped'
+  [ "$status" -eq 0 ]
+  [ "$output" = "skipped" ]
+}
+
+@test "Herd restart still runs when not skipped" {
+  _core 'info() { :; }; dim() { :; }; ok() { :; }; herd() { print herd >> "$TEST_TEMP_DIR/restarts"; }; osascript() { cat >/dev/null; print app >> "$TEST_TEMP_DIR/restarts"; }; GROVE_SKIP_HERD=false; restart_herd_service'
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_TEMP_DIR/restarts")" = $'herd\napp' ]
+}
+
 # ============================================================================
 # to_json_bool — loose value -> strict JSON boolean
 # ============================================================================

@@ -401,6 +401,9 @@ notify() {
 # Restart Herd service with nginx reload
 # Uses AppleScript to gracefully restart Herd with delays for stability
 restart_herd_service() {
+  # Automated callers may prepare a worktree without disrupting running sites.
+  [[ "${GROVE_SKIP_HERD:-}" == "true" ]] && return 0
+
   # Only run if herd is installed
   command -v herd >/dev/null 2>&1 || return 0
 
