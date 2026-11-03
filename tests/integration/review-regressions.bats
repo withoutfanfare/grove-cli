@@ -399,3 +399,90 @@ add_protected_worktree() {
   [[ "$output" == *GIT_ERROR* ]]
   [ -d "$HERD_ROOT/demo-worktrees/staging" ]
 }
+
+# Pull and sync never touch a database, so an agent worktree with no database
+# of its own (or one sharing a local database through .env) must still update.
+# Their hooks might migrate, so they run only against a recorded database.
+add_tracking_worktree() {
+  git --git-dir="$HERD_ROOT/demo.git" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  git --git-dir="$HERD_ROOT/demo.git" fetch -q origin
+  add_worktree "$1" "$2"
+  git -C "$HERD_ROOT/demo-worktrees/$2" branch -q --set-upstream-to=origin/main
+  git -C "$TEST_TEMP_DIR/seed" commit -q --allow-empty -m upstream
+}
+
+database_sidecar() {
+  git -C "$HERD_ROOT/demo-worktrees/$1" rev-parse --git-path grove-database
+}
+
+@test "pull and sync: a worktree with no database updates and skips its hooks" {
+  add_tracking_worktree t3/review-ci-test-tiers review-ci-test-tiers
+  # No hooks installed: nothing is skipped, so nothing to warn about.
+  grove_run pull demo t3/review-ci-test-tiers --json
+  [ "$status" -eq 0 ]
+  [[ "$stderr" != *Skipped* ]]
+  OUTPUT="$output" python3 -c 'import json,os; d=json.loads(os.environ["OUTPUT"]); assert d["success"] is True and d["commits_pulled"] == 1'
+
+  record_hooks
+  git -C "$TEST_TEMP_DIR/seed" commit -q --allow-empty -m again
+  grove_run pull demo t3/review-ci-test-tiers --json
+  [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c 'import json,os; assert json.loads(os.environ["OUTPUT"])["success"] is True'
+  [[ "$stderr" == *'Skipped post-pull hooks'* ]]
+  grove_run sync demo t3/review-ci-test-tiers main --json
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'Skipped post-sync hooks'* ]]
+  grove_run pull demo t3/review-ci-test-tiers
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'Skipped post-pull hooks'* ]]
+
+  [ ! -e "$HERD_ROOT/hook-events" ]
+  [ ! -e "$(database_sidecar review-ci-test-tiers)" ]
+  [ ! -e "$HERD_ROOT/demo-worktrees/review-ci-test-tiers/.env" ]
+}
+
+@test "pull and sync: a worktree sharing a database leaves it unrecorded and unchanged" {
+  add_tracking_worktree codex/ci-test-tiers ci-test-tiers
+  # As in a real app, .env is ignored, so it does not make the worktree dirty.
+  mkdir -p "$HERD_ROOT/demo.git/info" && printf '.env\n' >> "$HERD_ROOT/demo.git/info/exclude"
+  printf 'DB_DATABASE=demo__main\n' > "$HERD_ROOT/demo-worktrees/ci-test-tiers/.env"
+  record_hooks
+  grove_run pull demo codex/ci-test-tiers --json
+  [ "$status" -eq 0 ]
+  grove_run sync demo codex/ci-test-tiers main --json
+  [ "$status" -eq 0 ]
+  # The database .env names explicitly is passed on, never rewritten or recorded.
+  grep -qx 'post-pull|demo__main|https://ci-test-tiers.test' "$HERD_ROOT/hook-events"
+  grep -qx 'post-sync|demo__main|https://ci-test-tiers.test' "$HERD_ROOT/hook-events"
+  [ "$(cat "$HERD_ROOT/demo-worktrees/ci-test-tiers/.env")" = 'DB_DATABASE=demo__main' ]
+  [ ! -e "$(database_sidecar ci-test-tiers)" ]
+}
+
+@test "pull and sync: a worktree with its own recorded database runs its hooks" {
+  add_tracking_worktree feature/own own-db
+  printf 'demo__own\n' > "$(database_sidecar own-db)"
+  record_hooks
+  grove_run pull demo feature/own --json
+  [ "$status" -eq 0 ]
+  grove_run sync demo feature/own main --json
+  [ "$status" -eq 0 ]
+  grep -qx 'post-pull|demo__own|https://own-db.test' "$HERD_ROOT/hook-events"
+  grep -qx 'post-sync|demo__own|https://own-db.test' "$HERD_ROOT/hook-events"
+  [ "$(cat "$(database_sidecar own-db)")" = 'demo__own' ]
+}
+
+@test "pull and sync: real git failures still fail for a worktree with no database" {
+  add_tracking_worktree t3/review-ci-cost-plan review-ci-cost-plan
+  git -C "$HERD_ROOT/demo-worktrees/review-ci-cost-plan" branch -q --unset-upstream
+  record_hooks
+  grove_run pull demo t3/review-ci-cost-plan --json
+  [ "$status" -eq 4 ]
+  OUTPUT="$output" python3 -c 'import json,os; assert json.loads(os.environ["OUTPUT"])["success"] is False'
+  [[ "$stderr" != *Skipped* ]]
+
+  printf 'unsaved\n' > "$HERD_ROOT/demo-worktrees/review-ci-cost-plan/dirty"
+  grove_run sync demo t3/review-ci-cost-plan main --json
+  [ "$status" -eq 4 ]
+  OUTPUT="$output" python3 -c 'import json,os; d=json.loads(os.environ["OUTPUT"]); assert d["success"] is False and d["dirty"] is True'
+  [ ! -e "$HERD_ROOT/hook-events" ]
+}

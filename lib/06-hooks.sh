@@ -119,6 +119,22 @@ _run_single_hook() {
   )
 }
 
+# skip_hooks_without_database — Return 0 (skip) when the database is unknown
+#
+# Pulling and rebasing never touch a database, so pull/sync proceed without
+# one. Their hooks might (migrations, cache rebuilds), so with no recorded
+# database they are skipped, with a warning when any would have run, rather
+# than run against whatever .env happens to point at.
+skip_hooks_without_database() {
+  local hook_name="$1" repo="$2" branch="$3" db_name="$4"
+  [[ -z "$db_name" ]] || return 1
+  setopt local_options bare_glob_qual
+  local -a pending=("$GROVE_HOOKS_DIR/$hook_name"(N) "$GROVE_HOOKS_DIR/$hook_name.d"/*(N-.) "$GROVE_HOOKS_DIR/$hook_name.d/$repo"/*(N-.))
+  (( ${#pending} == 0 )) ||
+    warn "Skipped $hook_name hooks: no database is recorded for '$branch' (record it in grove-database or DB_DATABASE in .env to run them)"
+  return 0
+}
+
 # run_hooks — Execute lifecycle hooks (global, numbered, and repo-specific) for an event
 run_hooks() {
   local hook_name="$1"

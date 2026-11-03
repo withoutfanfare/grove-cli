@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-11-03
+
+### Fixed
+- `pull` and `sync` no longer fail with `DATABASE_UNKNOWN` on a worktree with no recorded database, such as an agent worktree in a custom folder. Neither touches a database, so they update the worktree and skip their `post-pull`/`post-sync` hooks, with a warning, rather than run them against a guessed database. Git failures still fail.
+
 ## [4.2.0] - 2026-11-03
 
 ### Added

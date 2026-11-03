@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="4.2.0"
+readonly VERSION="4.2.1"
 
 # Defaults (can be overridden by config file or env vars)
 readonly _GROVE_ENV_HERD_ROOT="${HERD_ROOT:-}"
@@ -2778,6 +2778,22 @@ _run_single_hook() {
 
     exit $hook_status
   )
+}
+
+# skip_hooks_without_database — Return 0 (skip) when the database is unknown
+#
+# Pulling and rebasing never touch a database, so pull/sync proceed without
+# one. Their hooks might (migrations, cache rebuilds), so with no recorded
+# database they are skipped, with a warning when any would have run, rather
+# than run against whatever .env happens to point at.
+skip_hooks_without_database() {
+  local hook_name="$1" repo="$2" branch="$3" db_name="$4"
+  [[ -z "$db_name" ]] || return 1
+  setopt local_options bare_glob_qual
+  local -a pending=("$GROVE_HOOKS_DIR/$hook_name"(N) "$GROVE_HOOKS_DIR/$hook_name.d"/*(N-.) "$GROVE_HOOKS_DIR/$hook_name.d/$repo"/*(N-.))
+  (( ${#pending} == 0 )) ||
+    warn "Skipped $hook_name hooks: no database is recorded for '$branch' (record it in grove-database or DB_DATABASE in .env to run them)"
+  return 0
 }
 
 # run_hooks — Execute lifecycle hooks (global, numbered, and repo-specific) for an event
@@ -5958,8 +5974,9 @@ cmd_pull() {
 
   load_repo_config "$git_dir"
   local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
-    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
+  # Unknown is fine here: an agent worktree may have no database of its own.
+  # The name only feeds post-pull hooks, which skip_hooks_without_database guards.
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" || db_name=""
 
   # Capture pull output and exit code for JSON support
   local pull_output pull_exit_code=0
@@ -5988,7 +6005,8 @@ cmd_pull() {
 
     # Run post-pull hooks even for JSON output (only on success)
     if (( pull_exit_code == 0 )); then
-      run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
+      skip_hooks_without_database "post-pull" "$repo" "$branch" "$db_name" ||
+        run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
     fi
     # Normalise the failure exit to grove's curated GIT_ERROR code (4) so JSON and text
     # modes agree; raw git status (often 1) is meaningless to callers. Keep 0 on success.
@@ -6005,7 +6023,8 @@ cmd_pull() {
   ok "Pull complete"
 
   # Run post-pull hooks
-  run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
+  skip_hooks_without_database "post-pull" "$repo" "$branch" "$db_name" ||
+    run_hooks "post-pull" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 }
 
 # cmd_pull_all — Pull latest changes for all worktrees in a repository in parallel
@@ -6282,8 +6301,8 @@ cmd_sync() {
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
-  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" ||
-    error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env before continuing" 5
+  # As in cmd_pull: unknown only matters to post-sync hooks, which are guarded.
+  local db_name; db_name="$(db_name_for "$repo" "$branch" "$wt_path")" || db_name=""
 
   # Use provided base, or the worktree's configured base, or default
   [[ -n "$base" ]] || base="$(worktree_base_for "$wt_path" "$DEFAULT_BASE")"
@@ -6334,7 +6353,8 @@ cmd_sync() {
 
     # Run post-sync hooks even for JSON output (only on success)
     if (( sync_exit_code == 0 )); then
-      run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
+      skip_hooks_without_database "post-sync" "$repo" "$branch" "$db_name" ||
+        run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name" >/dev/null 2>&1
     fi
     # Normalise the failure exit to grove's curated GIT_ERROR code (4) so JSON and text
     # modes agree; raw git status (often 1) is meaningless to callers. Keep 0 on success.
@@ -6352,7 +6372,8 @@ cmd_sync() {
   ok "Sync complete"
 
   # Run post-sync hooks
-  run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
+  skip_hooks_without_database "post-sync" "$repo" "$branch" "$db_name" ||
+    run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 }
 
 # cmd_prune — Prune stale worktree references and optionally delete merged branches

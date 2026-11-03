@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="4.2.0"
+readonly VERSION="4.2.1"
 
 # Defaults (can be overridden by config file or env vars)
 readonly _GROVE_ENV_HERD_ROOT="${HERD_ROOT:-}"
