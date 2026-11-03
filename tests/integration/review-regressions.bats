@@ -55,6 +55,96 @@ HOOK
   [ ! -e "$HERD_ROOT/hook-events" ]
 }
 
+@test "rm and move refuse a worktree selected by a current-site link" {
+  add_worktree feature/live feature-live
+  ln -s demo-worktrees/feature-live "$HERD_ROOT/demo-current"
+  record_hooks
+
+  grove_run rm demo feature/live --json
+  assert_json_error
+  [[ "$output" == *WORKTREE_IN_USE* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/feature-live" ]
+
+  grove_run move demo feature/live renamed --json
+  assert_json_error
+  [[ "$output" == *WORKTREE_IN_USE* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/feature-live" ]
+  [ ! -e "$HERD_ROOT/hook-events" ]
+}
+
+@test "rm --drop-db refuses a legacy env-only database before running hooks" {
+  add_worktree feature/shared feature-shared
+  printf 'DB_DATABASE=shared\n' > "$HERD_ROOT/demo-worktrees/feature-shared/.env"
+  printf '.env\n' >> "$(git -C "$HERD_ROOT/demo-worktrees/feature-shared" rev-parse --git-path info/exclude)"
+  record_hooks
+
+  grove_run rm demo feature/shared --force --drop-db --json
+  assert_json_error
+  [[ "$output" == *DATABASE_UNSAFE* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/feature-shared" ]
+  [ ! -e "$HERD_ROOT/hook-events" ]
+}
+
+@test "fresh rebuilds assets without invoking php even with inherited or cached database settings" {
+  add_worktree feature/shared feature-shared
+  local wt="$HERD_ROOT/demo-worktrees/feature-shared"
+  printf 'DB_DATABASE=primary\n' > "$wt/.env"
+  touch "$wt/artisan"
+  mkdir -p "$wt/bootstrap/cache"
+  printf '<?php return ["database" => ["default" => "production"]];\n' > "$wt/bootstrap/cache/config.php"
+  printf '{}\n' > "$wt/package.json"
+  printf 'demo__feature_shared\n' > "$(git -C "$wt" rev-parse --git-path grove-database)"
+  mkdir -p "$TEST_TEMP_DIR/bin"
+  cat > "$TEST_TEMP_DIR/bin/php" <<'PHP'
+#!/bin/sh
+touch "$HERD_ROOT/php-was-called"
+PHP
+  chmod +x "$TEST_TEMP_DIR/bin/php"
+  cat > "$TEST_TEMP_DIR/bin/npm" <<'NPM'
+#!/bin/sh
+printf '%s\n' "$*" >> "$HERD_ROOT/npm-calls"
+NPM
+  chmod +x "$TEST_TEMP_DIR/bin/npm"
+
+  run --separate-stderr env HOME="$TEST_TEMP_DIR/home" PATH="$TEST_TEMP_DIR/bin:/usr/bin:/bin" \
+    DB_URL=mysql://example.invalid/shared DB_DATABASE=shared \
+    zsh "$GROVE_ROOT/grove" fresh demo feature/shared --force
+
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"Fresh complete"* ]]
+  [ ! -e "$HERD_ROOT/php-was-called" ]
+  [ "$(cat "$HERD_ROOT/npm-calls")" = $'ci\nrun build' ]
+  grep -qx DB_DATABASE=primary "$wt/.env"
+}
+
+@test "fresh propagates an asset install failure without claiming success" {
+  add_worktree feature/assets feature-assets
+  printf '{}\n' > "$HERD_ROOT/demo-worktrees/feature-assets/package.json"
+  mkdir -p "$TEST_TEMP_DIR/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_TEMP_DIR/bin/npm"
+  chmod +x "$TEST_TEMP_DIR/bin/npm"
+  run --separate-stderr env PATH="$TEST_TEMP_DIR/bin:/usr/bin:/bin" \
+    zsh "$GROVE_ROOT/grove" fresh demo feature/assets
+  [ "$status" -ne 0 ]
+  [[ "$output$stderr" != *"Fresh complete"* ]]
+}
+
+@test "rm --drop-db refuses a recorded database selected by a sibling worktree" {
+  add_worktree feature/owner feature-owner
+  add_worktree feature/borrower feature-borrower
+  local wt="$HERD_ROOT/demo-worktrees/feature-owner"
+  printf 'shared\n' > "$(git -C "$wt" rev-parse --git-path grove-database)"
+  printf 'DB_DATABASE=shared\n' > "$HERD_ROOT/demo-worktrees/feature-borrower/.env"
+  record_hooks
+
+  grove_run rm demo feature/owner --force --drop-db --json
+
+  assert_json_error
+  [[ "$output" == *DATABASE_UNSAFE* ]]
+  [ -d "$wt" ]
+  [ ! -e "$HERD_ROOT/hook-events" ]
+}
+
 @test "rm: a folder name cannot bypass protection of main" {
   git --git-dir="$HERD_ROOT/demo.git" worktree add -q "$HERD_ROOT/demo-worktrees/demo" main
   grove_run rm demo demo --json
@@ -247,4 +337,65 @@ HOOK
   [ "$status" -eq 0 ]
   [ ! -d "$HERD_ROOT/demo-worktrees/feature-broken" ]
   grep -qx 'db=|drop=|nobackup=true' "$HERD_ROOT/db-flags"
+}
+
+# --allow-protected lifts ONLY the protected-branch check. It is what a typed
+# branch-name confirmation maps to, so it must never carry -f's other powers.
+add_protected_worktree() {
+  add_worktree staging "$1"
+  printf 'demo__staging\n' > "$(git -C "$HERD_ROOT/demo-worktrees/$1" rev-parse --git-path grove-database)"
+}
+
+@test "rm --allow-protected removes a protected branch with a recorded database and a clear gate" {
+  add_protected_worktree staging
+  record_hooks
+  grove_run rm demo staging --json
+  assert_json_error
+  [[ "$output" == *PROTECTED_BRANCH* ]]
+
+  grove_run rm demo staging --allow-protected --json
+  [ "$status" -eq 0 ]
+  [ ! -d "$HERD_ROOT/demo-worktrees/staging" ]
+  grep -q '^pre-rm|demo__staging|' "$HERD_ROOT/hook-events"
+}
+
+@test "rm --allow-protected still refuses a worktree selected by a current-site link" {
+  add_protected_worktree staging
+  ln -s demo-worktrees/staging "$HERD_ROOT/demo-current"
+  record_hooks
+  grove_run rm demo staging --allow-protected --json
+  assert_json_error
+  [[ "$output" == *WORKTREE_IN_USE* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/staging" ]
+  [ ! -e "$HERD_ROOT/hook-events" ]
+}
+
+@test "rm --allow-protected still refuses an unknown database identity" {
+  add_worktree staging old-staging
+  record_hooks
+  grove_run rm demo staging --allow-protected --json
+  assert_json_error
+  [[ "$output" == *DATABASE_UNKNOWN* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/old-staging" ]
+  [ ! -e "$HERD_ROOT/hook-events" ]
+}
+
+@test "rm --allow-protected still stops at the removal gate" {
+  add_protected_worktree staging
+  touch "$HERD_ROOT/demo-worktrees/staging/unsaved"
+  record_hooks
+  grove_run rm demo staging --allow-protected --json
+  assert_json_error
+  [[ "$output" == *REMOVAL_BLOCKED* ]]
+  [ -f "$HERD_ROOT/demo-worktrees/staging/unsaved" ]
+  [ ! -e "$HERD_ROOT/hook-events" ]
+}
+
+@test "rm --allow-protected does not force git past a locked worktree" {
+  add_protected_worktree staging
+  git --git-dir="$HERD_ROOT/demo.git" worktree lock "$HERD_ROOT/demo-worktrees/staging"
+  grove_run rm demo staging --allow-protected --json
+  assert_json_error
+  [[ "$output" == *GIT_ERROR* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/staging" ]
 }

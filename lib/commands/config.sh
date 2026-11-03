@@ -3,12 +3,40 @@
 
 # cmd_config — Show current grove configuration
 cmd_config() {
+  local repo="${1:-}" git_dir=""
+  if [[ -n "$repo" ]]; then
+    validate_name "$repo" "repository"
+    git_dir="$(git_dir_for "$repo")"
+    ensure_bare_repo "$git_dir"
+    load_repo_config "$git_dir"
+  fi
+  # Record sources separately from values: resolution remains in load_config.
+  local -A sources
+  local key config_source
+  for key in HERD_ROOT DEFAULT_BASE PROTECTED_BRANCHES GROVE_HOOKS_DIR DB_CREATE DB_HOST DB_USER GROVE_URL_SUBDOMAIN; do sources[$key]=default; done
+  _record_config_source() {
+    local entry="$1"
+    [[ -n "${sources[$entry]-}" ]] || return 0
+    [[ "$entry" == HERD_ROOT && -n "${_GROVE_ENV_HERD_ROOT:-}" ]] && return 0
+    sources[$entry]="$config_source"
+  }
+  config_source="${GROVE_CONFIG:-$HOME/.groverc}"
+  _read_config_pairs "$config_source" _record_config_source
+  config_source="$HERD_ROOT/.groveconfig"
+  _read_config_pairs "$config_source" _record_config_source
+  if [[ -n "$git_dir" ]]; then
+    _record_repo_config_source() {
+      case "$1" in DEFAULT_BASE|PROTECTED_BRANCHES|GROVE_URL_SUBDOMAIN) sources[$1]="$git_dir/.groveconfig" ;; esac
+    }
+    _read_config_pairs "$git_dir/.groveconfig" _record_repo_config_source
+  fi
+  [[ -n "${_GROVE_ENV_HERD_ROOT:-}" ]] && sources[HERD_ROOT]=environment
   # Gather configuration values from environment/defaults
   local default_base="${DEFAULT_BASE:-main}"
   local protected="${PROTECTED_BRANCHES:-staging main master}"
   local config_dir="${GROVE_CONFIG_DIR:-$HOME/.grove}"
   local hooks_dir="${GROVE_HOOKS_DIR:-$config_dir/hooks}"
-  local repos_dir="${GROVE_REPOS_DIR:-$HOME/Code}"
+  local repos_dir="$HERD_ROOT"
   local hooks_enabled="true"
   [[ -d "$hooks_dir" ]] || hooks_enabled="false"
 
@@ -43,7 +71,13 @@ cmd_config() {
     if [[ -n "$url_sub" ]]; then
       json_escape "$url_sub"; url_sub_json="\"$REPLY\""
     fi
-    print -r -- "{\"success\": true, \"data\": {\"default_base_branch\": \"$_je_base\", \"protected_branches\": $protected_json, \"config_dir\": \"$_je_cdir\", \"hooks_dir\": \"$_je_hdir\", \"repos_dir\": \"$_je_rdir\", \"hooks_enabled\": $hooks_enabled, \"database\": {\"enabled\": $db_enabled, \"host\": \"$_je_dbh\", \"user\": \"$_je_dbu\"}, \"herd_enabled\": $herd_enabled, \"url_subdomain\": $url_sub_json}}"
+    local -a source_parts=()
+    for key in ${(ok)sources}; do
+      json_escape "${sources[$key]}"
+      source_parts+=("\"$key\":\"$REPLY\"")
+    done
+    local sources_json="{${(j:,:)source_parts}}"
+    print -r -- "{\"success\": true, \"data\": {\"default_base_branch\": \"$_je_base\", \"protected_branches\": $protected_json, \"config_dir\": \"$_je_cdir\", \"hooks_dir\": \"$_je_hdir\", \"repos_dir\": \"$_je_rdir\", \"herd_root\": \"$_je_rdir\", \"config_sources\": $sources_json, \"hooks_enabled\": $hooks_enabled, \"database\": {\"enabled\": $db_enabled, \"host\": \"$_je_dbh\", \"user\": \"$_je_dbu\"}, \"herd_enabled\": $herd_enabled, \"url_subdomain\": $url_sub_json}}"
   else
     print -r -- "grove Configuration"
     print -r -- "================"

@@ -14,6 +14,12 @@
 #   $5 - repository name
 _display_worktree() {
   local idx="$1" wt_path="$2" branch="$3" head="$4" repo="$5"
+  local base; base="$(worktree_base_for "$wt_path")"
+  local observed_head='' observed_base=''
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    observed_head="$(git -C "$wt_path" rev-parse --verify HEAD 2>/dev/null)" || observed_head=''
+    observed_base="$(git -C "$wt_path" rev-parse --verify "$base^{commit}" 2>/dev/null)" || observed_base=''
+  fi
   local folder="${wt_path:t}"
   # Detached worktrees arrive with the "(detached)" sentinel as their branch.
   # Normalise to an empty branch + a HEAD ref so downstream branch logic skips
@@ -104,15 +110,26 @@ _display_worktree() {
     last_accessed="$(get_last_accessed_iso "$wt_path")"
 
     # Derive merge status from health issues (avoids duplicate is_branch_merged
-    # call). Unknown (base ref unresolved) stays false: the contract is boolean.
+    # call). Unknown comparisons remain JSON null.
     if [[ ",$health_issues," != *",unmerged,"* && ",$health_issues," != *",merge-unknown,"* ]]; then
       merged=true
     fi
 
-    # Check if branch is stale (configurable commits behind base)
-    if [[ "$(is_branch_stale "$wt_path" "$DEFAULT_BASE" "${GROVE_STALE_THRESHOLD:-50}")" == "true" ]]; then
-      stale=true
+    [[ ",$health_issues," == *",merge-unknown,"* ]] && merged=null
+    stale="$(is_branch_stale "$wt_path" "$base" "${GROVE_STALE_THRESHOLD:-50}")"
+    local behind_base; behind_base="$(get_commits_behind "$wt_path" "$base")"
+    [[ "$behind_base" == "$GROVE_UNKNOWN" ]] && behind_base=null
+    local base_sha head_sha checked_at
+    base_sha="$(git -C "$wt_path" rev-parse --verify "$base^{commit}" 2>/dev/null)" || base_sha=''
+    head_sha="$(git -C "$wt_path" rev-parse --verify HEAD 2>/dev/null)" || head_sha=''
+    if [[ -z "$head_sha" || -z "$base_sha" || "$head_sha" != "$observed_head" || "$base_sha" != "$observed_base" ]]; then
+      merged=null stale=null behind_base=null
+      health_grade='?' health_score=0
     fi
+    checked_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    json_escape "$base"; local je_base="$REPLY"
+    local comparison="\"base_ref\":\"$je_base\",\"base_sha\":\"$base_sha\",\"head_sha\":\"$head_sha\",\"behind_base\":$behind_base,\"behind_threshold\":${GROVE_STALE_THRESHOLD:-50},\"checked_at\":\"$checked_at\""
+
 
     # Build JSON with new fields
     json_escape "$wt_path"; local _je_path="$REPLY"
@@ -142,7 +159,7 @@ _display_worktree() {
       json_item+="\"lastAccessed\": null, "
     fi
     json_item+="\"merged\": $merged, "
-    json_item+="\"stale\": $stale"
+    json_item+="\"stale\": $stale, $comparison"
     json_item+="}"
 
     REPLY="$json_item"
@@ -242,6 +259,7 @@ cmd_ls() {
 #   $5 - inactive days threshold
 _display_status_row() {
   local p="$1" b="$2" repo="$3" stale_threshold="$4" inactive_days="$5"
+  local base; base="$(worktree_base_for "$p")"
 
   local sha st state_icon state_color changes counts ahead behind
   local age age_days merged_icon sync_display is_stale is_inactive
@@ -295,7 +313,8 @@ _display_status_row() {
   # measure it), not behind the upstream shown in the sync column — a pushed
   # branch is usually level with its upstream however far behind base it is.
   # Never feed the unknown sentinel ("?") into arithmetic.
-  local base_behind; base_behind="$(get_commits_behind "$p" "$DEFAULT_BASE")"
+  local base_behind; base_behind="$(get_commits_behind "$p" "$base")"
+  [[ "$base_behind" == "$GROVE_UNKNOWN" ]] && is_stale=null
   if [[ "$base_behind" != "$GROVE_UNKNOWN" ]] && (( base_behind > stale_threshold )); then
     is_stale=true
     sync_display="${C_RED}↑$ahead ↓$behind${C_RESET}"
@@ -312,12 +331,13 @@ _display_status_row() {
 
   # Check if merged (cache result for reuse in JSON output)
   local merged=false merged_rc=0
-  is_branch_merged "$p" "$DEFAULT_BASE" || merged_rc=$?
+  is_branch_merged "$p" "$base" || merged_rc=$?
   if (( merged_rc == 0 )); then
     merged=true
     merged_icon="${C_DIM}✓${C_RESET}"
   elif (( merged_rc == 2 )); then
-    # Unknown (base ref unresolved): JSON stays boolean false, text shows "?".
+    # A failed comparison stays unknown in JSON as well as in text.
+    merged=null
     merged_icon="${C_DIM}?${C_RESET}"
   else
     merged_icon="${C_DIM}-${C_RESET}"
@@ -828,13 +848,14 @@ cmd_report() {
 #   e.g. "B|82|behind:12,changes:3"
 calculate_health_score() {
   local wt_path="$1"
-  local score=100
+  local base; base="$(worktree_base_for "$wt_path")"
+  local score=100 known=true
   local issues=()
 
   # Check commits behind the base (max -30 points). "?" (base unresolved)
   # scores nothing rather than reaching arithmetic.
-  local behind; behind="$(get_commits_behind "$wt_path" "$DEFAULT_BASE")"
-  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
+  local behind; behind="$(get_commits_behind "$wt_path" "$base")"
+  if [[ ! "$behind" =~ ^[0-9]+$ ]]; then known=false; issues+=(behind-unknown); behind=0; fi
   if (( behind > 50 )); then
     score=$((score - 30))
     issues+=("behind:$behind")
@@ -853,7 +874,7 @@ calculate_health_score() {
     changes="$REPLY"
     get_cached_status "$wt_path" untracked >/dev/null; untracked="$REPLY"
   else
-    st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+    st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || { st=""; known=false; issues+=(status-unknown); }
     if [[ -n "$st" ]]; then
       changes="$(count_lines "$st")"
       untracked="$(count_matching "$st" '\?\?*')"
@@ -888,12 +909,13 @@ calculate_health_score() {
   # Check merge status (max -10 points). Return 2 means the base ref does not
   # resolve, so merge status is unknown: flag it without the unmerged penalty.
   local merged_rc=0
-  is_branch_merged "$wt_path" "$DEFAULT_BASE" || merged_rc=$?
+  is_branch_merged "$wt_path" "$base" || merged_rc=$?
   if (( merged_rc == 1 )); then
     score=$((score - 10))
     issues+=("unmerged")
   elif (( merged_rc == 2 )); then
     issues+=("merge-unknown")
+    known=false
   fi
 
   # Check untracked files (max -5 points)
@@ -909,6 +931,7 @@ calculate_health_score() {
   # Calculate grade
   score_to_grade "$score"
   local grade="$REPLY"
+  if [[ "$known" != true ]]; then grade="?"; score=0; fi
 
   print -r -- "$grade|$score|${(j:,:)issues}"
 }
@@ -984,7 +1007,7 @@ cmd_health() {
 
   local wt_path="" branch=""
   local total_score=0 wt_count=0
-  local healthy_count=0 warning_count=0 critical_count=0
+  local healthy_count=0 warning_count=0 critical_count=0 unknown_count=0
 
   # Collect worktree health data
   local worktree_health=()
@@ -1007,7 +1030,10 @@ cmd_health() {
     wt_count=$((wt_count + 1))
 
     # Categorise health
-    if (( score >= 80 )); then
+    if [[ "$grade" == "?" ]]; then
+      unknown_count=$((unknown_count + 1))
+      warning_count=$((warning_count + 1))
+    elif (( score >= 80 )); then
       healthy_count=$((healthy_count + 1))
     elif (( score >= 60 )); then
       warning_count=$((warning_count + 1))
@@ -1034,6 +1060,7 @@ cmd_health() {
     avg_score=$((total_score / wt_count))
     score_to_grade "$avg_score"
     avg_grade="$REPLY"
+    (( unknown_count == 0 )) || avg_grade="?"
   fi
 
   # JSON output

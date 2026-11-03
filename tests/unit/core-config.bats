@@ -34,6 +34,23 @@ _core() {
   "
 }
 
+@test "load_config: exported HERD_ROOT wins over global and project config" {
+  printf 'HERD_ROOT=/wrong/global\n' > "$GROVE_CONFIG"
+  printf 'HERD_ROOT=/wrong/project\nDEFAULT_BASE=origin/project\n' > "$HERD_ROOT/.groveconfig"
+  _core "source '$GROVE_ROOT/lib/00-header.sh'; load_config; print -r -- \"\$HERD_ROOT|\$DEFAULT_BASE\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "$HERD_ROOT|origin/project" ]
+}
+
+@test "load_config: global HERD_ROOT is used when environment is unset" {
+  local root="$HERD_ROOT"
+  printf 'HERD_ROOT=%s\n' "$root" > "$GROVE_CONFIG"
+  unset HERD_ROOT
+  _core "source '$GROVE_ROOT/lib/00-header.sh'; load_config; print -r -- \"\$HERD_ROOT\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "$root" ]
+}
+
 @test "Herd skip prevents service and application restart" {
   _core 'herd() { print unexpected-herd; }; osascript() { print unexpected-app; }; GROVE_SKIP_HERD=true; restart_herd_service; print skipped'
   [ "$status" -eq 0 ]

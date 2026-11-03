@@ -9,8 +9,7 @@
 # would silently report whatever base the last one happened to set.
 #
 # The fix is `git rev-parse --git-path grove-base`, which resolves to each
-# worktree's own administrative directory. The legacy config is still read, so
-# worktrees created before the change keep working.
+# worktree's own administrative directory. Shared legacy config is ignored.
 
 load '../test-helper'
 
@@ -87,13 +86,18 @@ run_zsh() {
   [ "$status" -ne 0 ]
 }
 
-@test "worktree_base_for: reads a legacy grove.base when no sidecar exists" {
-  # A worktree created before the sidecar existed must keep working.
+@test "worktree_base_for: ignores a shared legacy base when no sidecar exists" {
   git -C "$WT_A" config --local grove.base 'origin/legacy'
 
   run_zsh "worktree_base_for '$WT_A'"
   [ "$status" -eq 0 ]
-  [[ "$output" == "origin/legacy" ]]
+  [[ "$output" == "origin/main" ]]
+}
+
+@test "worktree_base_for: setting one worktree does not change an unset sibling" {
+  run_zsh "set_worktree_base '$WT_A' origin/release-x; worktree_base_for '$WT_B'"
+  [ "$status" -eq 0 ]
+  [ "$output" = origin/main ]
 }
 
 @test "worktree_base_for: the sidecar wins over the legacy config" {
@@ -135,14 +139,14 @@ run_zsh() {
   [[ "$output" == "origin/fallback" ]]
 }
 
-@test "set_worktree_base: still records the legacy config so an older grove finds a base" {
-  # Compatibility for at least one release (specification §Rollback strategy).
+@test "set_worktree_base: does not change the shared legacy config" {
+  git -C "$WT_A" config --local grove.base origin/legacy
   run_zsh "set_worktree_base '$WT_A' 'origin/staging'"
   [ "$status" -eq 0 ]
 
   run git -C "$WT_A" config --local --get grove.base
   [ "$status" -eq 0 ]
-  [[ "$output" == "origin/staging" ]]
+  [[ "$output" == "origin/legacy" ]]
 }
 
 @test "worktree_base_for: a non-worktree path degrades to the fallback without erroring" {

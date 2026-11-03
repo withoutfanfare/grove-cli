@@ -24,6 +24,11 @@ else
   DB_CREATE="${DB_CREATE:-true}"
 fi
 
+if [[ "$DB_CREATE" == "true" && -z "${GROVE_DB_NAME:-}" ]]; then
+  echo "Cannot configure .env without a database identity" >&2
+  exit 1
+fi
+
 cd "$GROVE_PATH" || exit 0
 
 # Extract domain from GROVE_URL (e.g., https://pruning001.test -> pruning001.test)

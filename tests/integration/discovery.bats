@@ -68,6 +68,7 @@ make_repo_worktree() {
       git -C "$wt" commit -q --allow-empty -m old
     mkdir -p "$wt/node_modules/pkg"
     printf 'x%.0s' {1..2000} > "$wt/node_modules/pkg/file.js"
+    touch -t 200001010000 "$wt" "$(git -C "$wt" rev-parse --git-path index)"
   fi
 }
 
@@ -111,6 +112,29 @@ make_repo_worktree() {
   # Dry-run must not prompt for confirmation.
   [[ "$output" != *"Delete node_modules/vendor"* ]]
   [ -d "$nm" ]
+}
+
+@test "grove clean single repo previews and requires confirmation" {
+  make_repo_worktree alpha feature/x alpha-wt old
+  run_grove clean alpha
+  [ "$status" -eq 0 ]
+  [ -d "$HERD_ROOT/alpha-wt/node_modules" ]
+}
+
+@test "grove clean preserves dependencies when worktree has current changes" {
+  make_repo_worktree alpha feature/x alpha-wt old
+  printf 'new work\n' > "$HERD_ROOT/alpha-wt/new-work"
+  run_grove clean alpha --force
+  [ "$status" -eq 0 ]
+  [ -d "$HERD_ROOT/alpha-wt/node_modules" ]
+}
+
+@test "grove clean does not treat a newly created worktree as an old commit" {
+  make_repo_worktree alpha feature/x alpha-wt old
+  touch "$HERD_ROOT/alpha-wt"
+  run_grove clean alpha --force
+  [ "$status" -eq 0 ]
+  [ -d "$HERD_ROOT/alpha-wt/node_modules" ]
 }
 
 # ============================================================================

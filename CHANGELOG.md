@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-03
+
+### Added
+- Non-mutating `prune-plan`, confirmed-scope `prune-execute` and read-only `removal-check` JSON commands for the desktop app.
+- A maintained removal checker embedded in the single-file distribution; failed Git queries, malformed leases and locks block automated removal.
+- Per-worktree comparison refs, commits, thresholds and observation times; failed comparisons remain unknown.
+
+### Fixed
+- Configuration reports use the CLI's effective repository values and selected global file, preserving environment precedence.
+- Pruning uses Git's checked-out-branch protection and excludes the comparison base. The build preserves executable permissions and exits successfully after atomic replacement.
+
+
 ### Added
 - **`grove rm --path=<path> <repo>`** - Removes a detached worktree by its folder. A detached worktree has no branch, and `rm` only accepted a branch name, so detached worktrees could not be removed through Grove at all. The path must be a registered, detached worktree of that repository; a worktree on a branch is still removed by its branch, and the removal gate and hooks run as usual
 - **`GROVE_SKIP_PUSH` template flag** - `grove add` has always pushed a brand-new branch to `origin` the moment the worktree exists, with no way to opt out. A template can now set `GROVE_SKIP_PUSH=true` to keep the branch local: `add` prints the `git push -u origin <branch>` it skipped, and `--dry-run` shows the flag and the skipped step. The default is unchanged. Like the other skip flags it belongs in the template - loading a template resets it, so an exported value only counts when no template is used

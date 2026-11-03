@@ -546,7 +546,7 @@ EOF
 
   printf 'APP_KEY=fallback\n' > "$HOOK_TEST_DIR/worktree/.env"
   run env HOME="$TEST_HOME" GROVE_PATH="$HOOK_TEST_DIR/worktree" GROVE_REPO=myapp \
-    bash "$EXAMPLE_HOOKS/post-add.d/myapp/02-symlink-env.sh"
+    bash "$EXAMPLE_HOOKS/post-add.d/myapp/01-symlink-env.sh"
   [ "$status" -eq 0 ]
   [ -L "$HOOK_TEST_DIR/worktree/.env" ]
   [ "$(readlink "$HOOK_TEST_DIR/worktree/.env")" = "$TEST_HOME/Code/Worktree/myapp/myapp-env/.env" ]
@@ -902,4 +902,84 @@ EOF
   local missing
   missing="$(grep -rnE '(mysql|mysqldump) -h "\$DB_HOST"' "$EXAMPLE_HOOKS" --include='*.sh' | grep -v -- '-P "$DB_PORT"' || true)"
   [ -z "$missing" ]
+}
+
+# Run the merged post-add env sequence for a _laravel-linked repo, in hook order.
+run_env_sequence() {
+  local hook
+  for hook in 01-copy-env.sh 02-configure-env.sh _laravel/02-copy-env.sh _laravel/03-configure-env.sh; do
+    env HOME="$TEST_HOME" GROVE_PATH="$HOOK_TEST_DIR/worktree" GROVE_REPO=app \
+      GROVE_URL=https://app-feature.test GROVE_DB_NAME=app__feature DB_CREATE=true \
+      bash "$EXAMPLE_HOOKS/post-add.d/$hook" || return 1
+  done
+}
+
+@test "combined env hooks use the pre-built template and preserve existing .env files" {
+  local wt="$HOOK_TEST_DIR/worktree" tpl="$TEST_HOME/Development/Code/Worktree/app/app-env/.env"
+  mkdir -p "${tpl%/*}"
+  printf 'APP_URL=http://localhost\nAPP_KEY=fallback\n' > "$wt/.env.example"
+  printf 'APP_URL=http://template.test\nAPP_KEY=template\nDB_DATABASE=app\n' > "$tpl"
+
+  # Fresh worktree: the template wins and is configured, not the .env.example copy.
+  run run_env_sequence
+  [ "$status" -eq 0 ]
+  grep -qx 'APP_KEY=template' "$wt/.env"
+  grep -qx 'APP_URL=https://app-feature.test' "$wt/.env"
+  grep -qx 'DB_DATABASE=app__feature' "$wt/.env"
+  [ "$(grep -c 'APP_URL=http://template.test' "$tpl")" -eq 1 ]
+
+  # An existing custom .env keeps its contents.
+  printf 'APP_URL=http://custom.test\nAPP_KEY=custom\n' > "$wt/.env"
+  run run_env_sequence
+  [ "$status" -eq 0 ]
+  grep -qx 'APP_KEY=custom' "$wt/.env"
+
+  # An existing .env symlink stays a symlink to the same file.
+  rm "$wt/.env"
+  printf 'APP_KEY=linked\n' > "$HOOK_TEST_DIR/shared.env"
+  ln -s "$HOOK_TEST_DIR/shared.env" "$wt/.env"
+  run run_env_sequence
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$wt/.env")" = "$HOOK_TEST_DIR/shared.env" ]
+  grep -qx 'APP_KEY=linked' "$HOOK_TEST_DIR/shared.env"
+
+  # No template: falls back to a configured .env.example copy.
+  rm "$wt/.env" "$tpl"
+  run run_env_sequence
+  [ "$status" -eq 0 ]
+  grep -qx 'APP_KEY=fallback' "$wt/.env"
+  grep -qx 'APP_URL=https://app-feature.test' "$wt/.env"
+}
+
+@test "merged hook order links the myapp template before configuring the fallback" {
+  local fixture="$HOOK_TEST_DIR/merged-hooks" wt="$HOOK_TEST_DIR/worktree"
+  local template="$TEST_HOME/Code/Worktree/myapp/myapp-env/.env"
+  mkdir -p "$fixture/post-add.d/myapp" "${template%/*}"
+  printf 'APP_URL=http://localhost\nAPP_KEY=fallback\n' > "$wt/.env.example"
+  printf 'APP_URL=http://template.test\nAPP_KEY=template\n' > "$template"
+  cp "$EXAMPLE_HOOKS/post-add.d/01-copy-env.sh" "$EXAMPLE_HOOKS/post-add.d/02-configure-env.sh" "$fixture/post-add.d/"
+  cp "$EXAMPLE_HOOKS/post-add.d/myapp/01-symlink-env.sh" "$fixture/post-add.d/myapp/"
+  run env HOME="$TEST_HOME" GROVE_HOOKS_DIR="$fixture" zsh -c '
+    for module in 00-header 01-core 02-validation 03-paths 06-hooks; do
+      source "$GROVE_ROOT/lib/$module.sh"
+    done
+    run_hooks post-add myapp feature/test "$HOOK_TEST_DIR/worktree" https://myapp-feature.test myapp__feature
+  '
+  [ "$status" -eq 0 ]
+  [ -L "$wt/.env" ]
+  [ "$(readlink "$wt/.env")" = "$template" ]
+  grep -qx 'APP_KEY=template' "$wt/.env"
+  grep -qx 'APP_URL=http://template.test' "$wt/.env"
+
+  rm "$wt/.env"
+  printf 'APP_URL=http://custom.test\nAPP_KEY=custom\n' > "$wt/.env"
+  run env HOME="$TEST_HOME" GROVE_HOOKS_DIR="$fixture" zsh -c '
+    for module in 00-header 01-core 02-validation 03-paths 06-hooks; do
+      source "$GROVE_ROOT/lib/$module.sh"
+    done
+    run_hooks post-add myapp feature/test "$HOOK_TEST_DIR/worktree" https://myapp-feature.test myapp__feature
+  '
+  [ "$status" -eq 0 ]
+  [ ! -L "$wt/.env" ]
+  grep -qx 'APP_KEY=custom' "$wt/.env"
 }

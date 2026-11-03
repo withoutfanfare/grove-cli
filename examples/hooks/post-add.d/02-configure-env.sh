@@ -15,7 +15,9 @@
 #
 # Requires: .env file exists
 
-if [[ ! -f "${GROVE_PATH}/.env" ]]; then
+# A shared symlink is configured by its repo-specific hook. BSD sed -i also
+# refuses symlinks, so never claim this early pass updated one.
+if [[ ! -f "${GROVE_PATH}/.env" || -L "${GROVE_PATH}/.env" ]]; then
   exit 0
 fi
 

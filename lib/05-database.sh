@@ -108,6 +108,36 @@ set_worktree_database() {
   return 1
 }
 
+# Destructive operations require an explicit identity and must not affect a
+# database selected by another registered worktree. REPLY explains a refusal.
+worktree_database_is_private() {
+  local repo="$1" wt_path="$2" db_name="$3" require_env="${4:-false}"
+  local sidecar actual="" other_path other_db entry
+  REPLY="database ownership could not be verified for '$wt_path'"
+  sidecar="$(worktree_database_file "$wt_path")" || return 1
+  [[ -f "$sidecar" && -r "$sidecar" && "$(<"$sidecar")" == "$db_name" ]] || return 1
+  actual="$(_read_config_pairs "$wt_path/.env" _database_env_pair)" || return 1
+  if [[ "$require_env" == true && -z "$actual" ]] || [[ -n "$actual" && "$actual" != "$db_name" ]]; then
+    REPLY="the database selected by .env differs from the recorded worktree database '$db_name'"
+    return 1
+  fi
+
+  local -a siblings=()
+  collect_worktrees "$(git_dir_for "$repo")" siblings
+  for entry in "${siblings[@]}"; do
+    other_path="${entry%%|*}"
+    [[ "${other_path:A}" != "${wt_path:A}" ]] || continue
+    other_db="$(_read_config_pairs "$other_path/.env" _database_env_pair)" || return 1
+    sidecar="$(worktree_database_file "$other_path")" || return 1
+    if [[ "$other_db" == "$db_name" ]] || [[ -f "$sidecar" && "$(<"$sidecar")" == "$db_name" ]]; then
+      REPLY="database '$db_name' is also selected by worktree '$other_path'"
+      return 1
+    fi
+  done
+  REPLY=""
+  return 0
+}
+
 # _validate_database_name — Reject unsafe MySQL identifiers supplied by hooks
 _validate_database_name() {
   local db_name="${1:-}"

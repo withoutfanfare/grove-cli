@@ -39,7 +39,7 @@ usage() {
   print -r -- "  ${C_GREEN}exec-all${C_RESET}  ${C_DIM}<repo> <cmd>${C_RESET}              Run command on all"
   print -r -- ""
   print -r -- "${C_BOLD}LARAVEL COMMANDS${C_RESET} ${C_DIM}(auto-detect when run from worktree)${C_RESET}"
-  print -r -- "  ${C_GREEN}fresh${C_RESET}    ${C_DIM}[repo] [branch]${C_RESET}            migrate:fresh + npm ci + build"
+  print -r -- "  ${C_GREEN}fresh${C_RESET}    ${C_DIM}[repo] [branch]${C_RESET}            Refresh dependencies and assets"
   print -r -- "  ${C_GREEN}migrate${C_RESET}  ${C_DIM}[repo] [branch]${C_RESET}            Run artisan migrate"
   print -r -- "  ${C_GREEN}tinker${C_RESET}   ${C_DIM}[repo] [branch]${C_RESET}            Run artisan tinker"
   print -r -- ""
@@ -89,7 +89,11 @@ usage() {
   print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
   print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add, rm, clean)"
   print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
+  print -r -- "  ${C_YELLOW}--allow-protected${C_RESET}    Allow removing a protected branch's worktree, nothing else (with rm)"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
+  print -r -- "  prune-plan <repo>                 Preview exact merged branch targets"
+  print -r -- "  prune-execute <repo> <plan-file>   Execute only confirmed targets"
+  print -r -- "  removal-check <repo> <branch>     Read-only authoritative removal check"
   print -r -- "  ${C_YELLOW}--path=<path>${C_RESET}        Remove a detached worktree by its folder (with rm)"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
@@ -208,7 +212,7 @@ parse_flags() {
     if (( user_cmd_at > 0 && ${#REMAINING_ARGS[@]} >= user_cmd_at )) && [[ "$1" == -?* ]]; then
       case "$1" in
         --|--json|--pretty) ;;
-        -q|--quiet|-f|--force|-i|--interactive|--delete-branch|--drop-db|--no-backup|--path=*|\
+        -q|--quiet|-f|--force|--allow-protected|-i|--interactive|--delete-branch|--drop-db|--no-backup|--path=*|\
         --dry-run|--check|--all-repos|--recovery|--no-cache|--refresh|--template=*|-t|\
         --dir|--dir=*|--as|--as=*|-v|--version|-h|--help)
           setup_colors
@@ -224,6 +228,7 @@ parse_flags() {
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;
+      --allow-protected) ALLOW_PROTECTED=true ;;
       -i|--interactive) INTERACTIVE=true ;;
       --json) JSON_OUTPUT=true ;;
       --delete-branch) DELETE_BRANCH=true ;;
@@ -397,6 +402,9 @@ main() {
     dashboard)    cmd_dashboard "$@" ;;
     setup)        cmd_setup "$@" ;;
     config)       cmd_config "$@" ;;
+    prune-plan)   cmd_prune_plan "$@" ;;
+    prune-execute) cmd_prune_execute "$@" ;;
+    removal-check) cmd_removal_check "$@" ;;
     group)        cmd_group "$@" ;;
     share-deps)   cmd_share_deps "$@" ;;
     services)     cmd_services "$@" ;;

@@ -110,8 +110,9 @@ removal.
   `tests/integration/removal-gate.bats` covers gate behaviour.
 - The base ref lives in a per-worktree sidecar (`git rev-parse --git-path
   grove-base`), not `git config --local grove.base`, which resolves from the
-  COMMON config on a bare-repo layout. Legacy config is still read and written
-  for one release. Never enable `extensions.worktreeConfig`.
+  COMMON config on a bare-repo layout. Older releases read and wrote the legacy
+  config; it is now ignored because it leaks between worktrees.
+  Never enable `extensions.worktreeConfig`.
 
 ## Development Commands
 

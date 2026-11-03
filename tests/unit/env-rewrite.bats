@@ -93,3 +93,45 @@ EOF
   grep -q '^APP_KEY=base64:AAA=BBB=$' "$env"
   grep -q '^MAIL_FROM="Acme <no-reply@acme.test>"$' "$env"
 }
+
+@test "env rewrite: does not follow the old predictable temporary symlink" {
+  local env="$TEST_TEMP_DIR/.env" sentinel="$TEST_TEMP_DIR/sentinel"
+  printf 'APP_URL=old\nPRIVATE=dummy\n' > "$env"
+  printf 'keep me\n' > "$sentinel"
+  ln -s "$sentinel" "$env.grove.tmp"
+
+  _run_real_update_env "$env" 'https://new.test'
+
+  [ "$(cat "$sentinel")" = 'keep me' ]
+  grep -q '^APP_URL=https://new.test$' "$env"
+}
+
+@test "env rewrite: preserves a private symlink target and its permissions" {
+  local env="$TEST_TEMP_DIR/.env" target="$TEST_TEMP_DIR/real.env"
+  printf 'APP_URL=old\nPRIVATE=dummy\n' > "$target"
+  chmod 600 "$target"
+  ln -s real.env "$env"
+
+  (umask 022; _run_real_update_env "$env" 'https://new.test')
+
+  [ -L "$env" ]
+  grep -q '^APP_URL=https://new.test$' "$target"
+  run ls -l "$target"
+  [[ "$output" == -rw-------* ]]
+}
+
+@test "env rewrite: failed replacement leaves the original intact and returns an I/O error" {
+  local env="$TEST_TEMP_DIR/.env" fns="$TEST_TEMP_DIR/grove-fns.zsh"
+  printf 'APP_URL=old\nPRIVATE=dummy\n' > "$env"
+  cp "$env" "$TEST_TEMP_DIR/original"
+  sed '/^main "\$@"$/d' "$GROVE_ROOT/grove" > "$fns"
+
+  run zsh -c '
+    source "$1"
+    mv() { return 1; }
+    _update_env_app_url "$2" https://new.test
+  ' _ "$fns" "$env"
+
+  [ "$status" -eq 2 ]
+  cmp "$env" "$TEST_TEMP_DIR/original"
+}

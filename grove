@@ -1,9 +1,10 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="4.1.0"
+readonly VERSION="4.2.0"
 
 # Defaults (can be overridden by config file or env vars)
+readonly _GROVE_ENV_HERD_ROOT="${HERD_ROOT:-}"
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
 HERD_CONFIG="${HERD_CONFIG:-$HOME/Library/Application Support/Herd/config}"
 DEFAULT_BASE="${GROVE_BASE_DEFAULT:-origin/staging}"
@@ -43,6 +44,7 @@ GROVE_DIR=""
 # Global flags
 QUIET=false
 FORCE=false
+ALLOW_PROTECTED=false
 JSON_OUTPUT=false
 PRETTY_JSON=false
 DRY_RUN=false
@@ -239,7 +241,7 @@ load_config() {
   _apply_global_config() {
     local key="$1" value="$2"
     case "$key" in
-      HERD_ROOT) HERD_ROOT="$value" ;;
+      HERD_ROOT) [[ -n "${_GROVE_ENV_HERD_ROOT:-}" ]] || HERD_ROOT="$value" ;;
       HERD_CONFIG) HERD_CONFIG="$value" ;;
       DEFAULT_BASE) DEFAULT_BASE="$value" ;;
       DEFAULT_EDITOR) DEFAULT_EDITOR="$value" ;;
@@ -994,6 +996,18 @@ validate_max_parallel() {
 
 # 03-paths.sh - Path resolution, worktree detection, URL generation
 
+# Return the live-site link selecting this worktree, if any (including relative links).
+worktree_current_link_for() {
+  local wt_path="$1" site_link
+  for site_link in "$HERD_ROOT"/*-current(N@); do
+    if [[ "${site_link:A}" == "${wt_path:A}" ]]; then
+      print -r -- "$site_link"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # slugify_string — Shared slug transform (sets REPLY)
 #
 # Lowercase, replace every run of non-[a-z0-9] with a single dash, then trim
@@ -1705,8 +1719,8 @@ _worktree_status_record() {
       *) changes+=1 ;;
     esac
   done
-  [[ "$ahead" == "$GROVE_UNKNOWN" || "$ahead" =~ ^[0-9]+$ ]] || ahead=0
-  [[ "$behind" == "$GROVE_UNKNOWN" || "$behind" =~ ^[0-9]+$ ]] || behind=0
+  [[ "$ahead" == "$GROVE_UNKNOWN" || "$ahead" =~ ^[0-9]+$ ]] || ahead="$GROVE_UNKNOWN"
+  [[ "$behind" == "$GROVE_UNKNOWN" || "$behind" =~ ^[0-9]+$ ]] || behind="$GROVE_UNKNOWN"
 
   local dirty=clean
   (( changes > 0 )) && dirty=dirty
@@ -1717,8 +1731,8 @@ _worktree_status_record() {
 
   local base_behind="$GROVE_UNKNOWN"
   if [[ -n "$base" ]]; then
-    base_behind="$(git -C "$wt_path" rev-list --count "HEAD..$base" 2>/dev/null)" || base_behind=0
-    [[ "$base_behind" =~ ^[0-9]+$ ]] || base_behind=0
+    base_behind="$(git -C "$wt_path" rev-list --count "HEAD..$base" 2>/dev/null)" || base_behind="$GROVE_UNKNOWN"
+    [[ "$base_behind" =~ ^[0-9]+$ ]] || base_behind="$GROVE_UNKNOWN"
   fi
 
   REPLY="$sha|$dirty|$ahead|$behind|$timestamp|$changes|$untracked|$base_behind"
@@ -1967,13 +1981,13 @@ get_ahead_behind() {
     return 0
   fi
 
-  local counts; counts="$(git -C "$wt_path" rev-list --left-right --count HEAD..."$base" 2>/dev/null)" || counts="0	0"
+  local counts; counts="$(git -C "$wt_path" rev-list --left-right --count HEAD..."$base" 2>/dev/null)" || counts="$GROVE_UNKNOWN"
   ahead="${counts%%	*}"
   behind="${counts##*	}"
 
   # Coerce to integers; malformed rev-list output falls back to 0
-  [[ "$ahead" =~ ^[0-9]+$ ]] || ahead=0
-  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
+  [[ "$ahead" =~ ^[0-9]+$ ]] || ahead="$GROVE_UNKNOWN"
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind="$GROVE_UNKNOWN"
 
   print -r -- "$ahead $behind"
 }
@@ -2006,9 +2020,8 @@ worktree_base_sidecar_path() {
 #
 # Resolution order:
 #   1. the per-worktree grove-base sidecar (authoritative);
-#   2. the legacy grove.base config, so worktrees created before the sidecar
-#      existed keep working (retained for at least one release);
-#   3. the supplied fallback, else DEFAULT_BASE.
+#   2. the supplied fallback, else DEFAULT_BASE. Legacy grove.base is shared
+#      between linked worktrees and cannot identify any one worktree's base.
 worktree_base_for() {
   local wt_path="$1"
   local fallback="${2:-$DEFAULT_BASE}"
@@ -2021,7 +2034,6 @@ worktree_base_for() {
     base="$(tr -d '[:space:]' < "$sidecar" 2>/dev/null || true)"
   fi
 
-  [[ -n "$base" ]] || base="$(git -C "$wt_path" config --local --get grove.base 2>/dev/null || true)"
   [[ -n "$base" ]] || base="$fallback"
 
   print -r -- "$base"
@@ -2029,12 +2041,8 @@ worktree_base_for() {
 
 # set_worktree_base — Save a worktree's base ref in its own sidecar
 #
-# Writes the per-worktree sidecar (authoritative) and, for one release, the
-# legacy grove.base config as well. The legacy write is deliberate: an older
-# grove binary that only knows about grove.base would otherwise fall back to
-# DEFAULT_BASE, which is a quieter and more misleading failure than reading a
-# stale value. Readers always prefer the sidecar, so the two cannot disagree in
-# this version.
+# Writes only the per-worktree sidecar. The common repository config cannot
+# safely carry a worktree-specific value, even for older binaries.
 set_worktree_base() {
   local wt_path="$1"
   local base="$2"
@@ -2057,11 +2065,6 @@ set_worktree_base() {
     fi
   fi
 
-  # Legacy compatibility. Non-fatal: the sidecar above is what this version
-  # reads, so a failure here only affects an older grove.
-  if ! git -C "$wt_path" config --local grove.base "$base" 2>/dev/null; then
-    dim "  Could not update the legacy grove.base config for $wt_path"
-  fi
   return 0
 }
 
@@ -2169,8 +2172,11 @@ is_branch_merged() {
   # Check if the base branch contains this commit
   if git -C "$wt_path" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
     return 0
+  else
+    local result=$?
+    (( result == 1 )) && return 1
+    return 2
   fi
-  return 1
 }
 
 # get_last_accessed_iso — Return filesystem mtime as ISO 8601 timestamp
@@ -2220,10 +2226,10 @@ get_commits_behind() {
     return 0
   fi
 
-  behind="$(git -C "$wt_path" rev-list --count HEAD.."$base" 2>/dev/null)" || behind=0
+  behind="$(git -C "$wt_path" rev-list --count HEAD.."$base" 2>/dev/null)" || behind="$GROVE_UNKNOWN"
 
   # Coerce to integer before arithmetic/JSON use
-  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind="$GROVE_UNKNOWN"
 
   print -r -- "$behind"
 }
@@ -2235,10 +2241,9 @@ is_branch_stale() {
 
   behind="$(get_commits_behind "$wt_path" "$base")"
 
-  # Unresolvable base ("?") means staleness is unknown — report not-stale rather
-  # than feeding the sentinel into arithmetic.
+  # Failed comparisons remain unknown rather than becoming a healthy result.
   if [[ ! "$behind" =~ ^[0-9]+$ ]]; then
-    print -r -- "false"
+    print -r -- "null"
     return 0
   fi
 
@@ -2406,6 +2411,36 @@ set_worktree_database() {
   fi
   rm -f "$tmp"
   return 1
+}
+
+# Destructive operations require an explicit identity and must not affect a
+# database selected by another registered worktree. REPLY explains a refusal.
+worktree_database_is_private() {
+  local repo="$1" wt_path="$2" db_name="$3" require_env="${4:-false}"
+  local sidecar actual="" other_path other_db entry
+  REPLY="database ownership could not be verified for '$wt_path'"
+  sidecar="$(worktree_database_file "$wt_path")" || return 1
+  [[ -f "$sidecar" && -r "$sidecar" && "$(<"$sidecar")" == "$db_name" ]] || return 1
+  actual="$(_read_config_pairs "$wt_path/.env" _database_env_pair)" || return 1
+  if [[ "$require_env" == true && -z "$actual" ]] || [[ -n "$actual" && "$actual" != "$db_name" ]]; then
+    REPLY="the database selected by .env differs from the recorded worktree database '$db_name'"
+    return 1
+  fi
+
+  local -a siblings=()
+  collect_worktrees "$(git_dir_for "$repo")" siblings
+  for entry in "${siblings[@]}"; do
+    other_path="${entry%%|*}"
+    [[ "${other_path:A}" != "${wt_path:A}" ]] || continue
+    other_db="$(_read_config_pairs "$other_path/.env" _database_env_pair)" || return 1
+    sidecar="$(worktree_database_file "$other_path")" || return 1
+    if [[ "$other_db" == "$db_name" ]] || [[ -f "$sidecar" && "$(<"$sidecar")" == "$db_name" ]]; then
+      REPLY="database '$db_name' is also selected by worktree '$other_path'"
+      return 1
+    fi
+  done
+  REPLY=""
+  return 0
 }
 
 # _validate_database_name — Reject unsafe MySQL identifiers supplied by hooks
@@ -3013,38 +3048,23 @@ load_template() {
     die "$error_msg"
   fi
 
-  # Parse template file (only allow GROVE_SKIP_* and TEMPLATE_DESC)
-  while IFS='=' read -r key value || [[ -n "$key" ]]; do
-    # Skip comments and empty lines
-    [[ "$key" =~ ^[[:space:]]*# ]] && continue
-    [[ -z "$key" || "$key" =~ ^[[:space:]]*$ ]] && continue
-
-    # Trim whitespace from key
-    key="${key#"${key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-
-    # Remove quotes and trailing comments from value
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    value="${value%%#*}"
-    value="${value%"${value##*[![:space:]]}"}"
-
-    # Only allow GROVE_SKIP_* variables with true/false values (security)
+  # Parse with the shared literal parser (never sourced; quotes and trailing
+  # comments handled there). Only GROVE_SKIP_* true/false is applied (security).
+  _apply_template_pair() {
+    local key="$1" value="$2"
     case "$key" in
       GROVE_SKIP_*)
         # Security: Only allow true/false values to prevent command injection
         if [[ "$value" != "true" && "$value" != "false" ]]; then
           warn "Invalid value for $key: '$value' (must be true or false) - skipping"
-          continue
+          return 0
         fi
         export "$key"="$value"
         ;;
-      TEMPLATE_DESC) ;; # Ignore, used for display only
-      *) ;; # Ignore other variables (security)
+      *) ;; # Ignore other variables, including TEMPLATE_DESC (security)
     esac
-  done < "$template_file"
+  }
+  _read_config_pairs "$template_file" _apply_template_pair
 
   dim "  Applied template: $template_name"
 }
@@ -3729,6 +3749,7 @@ interactive_add() {
     warn "No remote branches found - using $DEFAULT_BASE as the base"
   else
     base="$(print -rl -- "${branch_list[@]}" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="$DEFAULT_BASE")" || return $?
+    [[ -n "$base" ]] || die "No base branch selected"
   fi
   [[ -n "$base" ]] || base="$DEFAULT_BASE"
 
@@ -3743,15 +3764,16 @@ interactive_add() {
   local branch=""
   while [[ -z "$branch" ]]; do
     print -n "  Branch name: "
-    read -r branch
+    read -r branch || die "Branch name input cancelled"
 
     if [[ -z "$branch" ]]; then
       warn "Branch name required"
       continue
     fi
 
-    # Validate
-    if ! validate_name "$branch" "branch" 2>/dev/null; then
+    # Validate in a subshell: validate_name exits on failure, which would
+    # otherwise end the whole wizard instead of reprompting.
+    if ! ( validate_name "$branch" "branch" ) 2>/dev/null; then
       warn "Invalid branch name"
       branch=""
       continue
@@ -3789,6 +3811,7 @@ interactive_add() {
 $templates"
 
     template="$(echo "$templates" | _fzf_select --prompt="Template: " --height=40% --reverse)" || return $?
+    [[ -n "$template" ]] || die "No template selected (choose (none) to skip)"
 
     if [[ "$template" != "(none)" && -n "$template" ]]; then
       GROVE_TEMPLATE="$template"
@@ -3907,7 +3930,6 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
     --ansi
     --expect='p,s,o,c,r,i,enter'
     --preview-window=hidden
-    --bind='ctrl-r:reload(echo "REFRESH")'
   )
 
   # Only use --height if we have a proper terminal
@@ -4485,19 +4507,33 @@ _disable_shared_deps() {
     return 0
   fi
 
-  local target; target="$(readlink "$dep_path" 2>/dev/null)"
+  # :A resolves a relative link against the worktree, not the caller's cwd
+  local target="${dep_path:A}" link; link="$(readlink "$dep_path")"
 
-  # Remove symlink
-  rm "$dep_path"
-
-  # Copy from shared back to local if it exists
-  if [[ -d "$target" ]]; then
-    info "  Copying $dep_type back to local..."
-    cp -R "$target" "$dep_path"
-    ok "  Restored local $dep_type"
-  else
+  if [[ ! -d "$target" ]]; then
+    rm "$dep_path" || return 1
     dim "  Shared cache was empty"
+    return 0
   fi
+
+  # Copy beside the link first; the link is only replaced once the copy is whole
+  local staging_dir
+  staging_dir="$(mktemp -d "$wt_path/.$dep_type.grove-unshare.XXXXXX")" || return 1
+  local staging="$staging_dir/$dep_type"
+  info "  Copying $dep_type back to local..."
+  if ! cp -R "$target" "$staging"; then
+    rm -rf "$staging_dir"
+    warn "  Failed to copy $dep_type; kept the shared link"
+    return 1
+  fi
+  if ! rm "$dep_path" || ! mv "$staging" "$dep_path"; then
+    rm -rf "$staging_dir"
+    [[ -e "$dep_path" || -L "$dep_path" ]] || ln -s "$link" "$dep_path"
+    warn "  Failed to replace the $dep_type link; kept the shared link"
+    return 1
+  fi
+  rmdir "$staging_dir"
+  ok "  Restored local $dep_type"
 }
 
 # Display the shared dependency status for a worktree (vendor and node_modules)
@@ -4570,10 +4606,12 @@ _share_deps_dispatch() {
       print -r -- "${C_BOLD}Disabling shared dependencies${C_RESET}"
       print -r -- ""
 
+      local failed=false
       for dep_type in vendor node_modules; do
-        _disable_shared_deps "$wt_path" "$dep_type"
+        _disable_shared_deps "$wt_path" "$dep_type" || failed=true
       done
 
+      [[ "$failed" == false ]] || die "Could not disable every shared dependency"
       print -r -- ""
       ok "Shared dependencies disabled"
       print -r -- ""
@@ -4743,6 +4781,11 @@ removal_check_binary() {
     return 0
   fi
 
+  if (( $+functions[bundled_removal_check] )); then
+    print -r -- bundled_removal_check
+    return 0
+  fi
+
   local candidate
   for candidate in wt-removal-check \
     "$HOME/.local/bin/wt-removal-check" "$HOME/.claude/bin/wt-removal-check"; do
@@ -4800,40 +4843,36 @@ removal_can_prompt() {
 
 # _update_env_app_url — Rewrite ONLY the APP_URL= line in a .env file, preserving every
 # other line. Uses a line-anchored loop (NOT a whole-file glob, which would greedily match
-# across newlines and delete everything after APP_URL=). Writes via a temp file, then copies
-# the new contents back into the ORIGINAL file in place — so the .env's original permissions,
-# ownership and any symlink target are preserved (a plain `mv` would replace the file and drop
-# all of that).
-# Args: $1 = path to .env file, $2 = new URL. Returns 0 if APP_URL was found and updated.
+# across newlines and delete everything after APP_URL=). Replace the resolved target
+# atomically, keeping its metadata and leaving a symlinked .env in place.
+# Args: $1 = path to .env file, $2 = new URL. Returns 0 if updated, 1 if absent,
+# or 2 on an I/O failure (callers must not report a successful move).
 _update_env_app_url() {
   local env_file="$1" new_url="$2"
   [[ -f "$env_file" ]] || return 1
 
-  local line found=false
-  local tmp="${env_file}.grove.tmp"
-  : > "$tmp" || return 1
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == APP_URL=* ]]; then
-      print -r -- "APP_URL=$new_url" >> "$tmp"
-      found=true
-    else
-      print -r -- "$line" >> "$tmp"
-    fi
-  done < "$env_file"
-
-  if [[ "$found" == true ]]; then
-    # Copy contents back into the original file (preserves mode, owner, symlink),
-    # rather than mv'ing the temp over it (which would inherit the temp's perms
-    # and break a symlinked .env).
-    if cat "$tmp" > "$env_file"; then
-      rm -f "$tmp"
-      return 0
-    fi
+  local env_target="${env_file:A}" line found=false tmp_dir
+  # A private directory prevents temporary credentials being exposed even when
+  # cp -p restores a less restrictive original mode before replacement.
+  tmp_dir="$(mktemp -d "${env_target}.grove.XXXXXX")" || return 2
+  local tmp="$tmp_dir/.env"
+  {
+    cp -p "$env_target" "$tmp" || return 2
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ "$line" == APP_URL=* ]]; then
+        print -r -- "APP_URL=$new_url" || return 2
+        found=true
+      else
+        print -r -- "$line" || return 2
+      fi
+    done < "$env_target" > "$tmp" || return 2
+    [[ "$found" == true ]] || return 1
+    mv -f "$tmp" "$env_target" || return 2
+  } always {
     rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
-  return 1
+    rmdir "$tmp_dir"
+  }
+  return 0
 }
 
 # ── Transaction undo helpers ──────────────────────────────────────────────
@@ -5199,9 +5238,19 @@ cmd_rm() {
   ensure_bare_repo "$git_dir"
   [[ -d "$wt_path" ]] || error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
 
+  local current_link=""
+  if current_link="$(worktree_current_link_for "$wt_path")"; then
+    [[ "$FORCE" == true ]] || error_exit "WORKTREE_IN_USE" "worktree is selected by '$current_link'; switch the live site first or use -f" 6
+    warn "Removing the worktree will break the live-site link '$current_link'"
+  fi
+  if [[ "$DROP_DB" == true ]] && ! worktree_database_is_private "$repo" "$wt_path" "$db_name"; then
+    error_exit "DATABASE_UNSAFE" "$REPLY; no database will be dropped" 5
+  fi
+
   # Branch protection check
-  if [[ -n "$branch" ]] && is_protected_branch "$branch" && [[ "$FORCE" == false ]]; then
-    error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use -f to force removal" 4
+  # --allow-protected lifts only this check; every other safeguard still applies.
+  if [[ -n "$branch" ]] && is_protected_branch "$branch" && [[ "$FORCE" == false && "$ALLOW_PROTECTED" != true ]]; then
+    error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use --allow-protected or -f to remove it" 4
   fi
 
   # Dry-run mode - say what would happen, then stop before any hook, git or
@@ -5250,6 +5299,7 @@ cmd_rm() {
   # would go — uncommitted changes, commits no remote has, a live agent session
   # — and the only way past it is to read that and confirm in person. --json
   # has no bypass: a script cannot accept a loss on anyone's behalf.
+  local accepted_removal_verdict=""
   if ! removal_gate "$wt_path"; then
     if [[ "$JSON_OUTPUT" == true ]]; then
       error_exit "REMOVAL_BLOCKED" "$REPLY" 6
@@ -5263,11 +5313,19 @@ cmd_rm() {
     local response
     read -r response
     [[ "$response" =~ ^[Yy]$ ]] || error_exit "INVALID_INPUT" "aborted by user" 2
+    accepted_removal_verdict="$REPLY"
   fi
 
   # Run pre-rm hooks
   if ! run_hooks "pre-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"; then
     error_exit "HOOK_FAILED" "pre-rm hook failed, aborting" 5
+  fi
+
+  # Hooks may create work or allow a new agent session to start. A previous
+  # verdict (including an interactive override) cannot approve a new loss.
+  if ! removal_gate "$wt_path"; then
+    [[ -n "$accepted_removal_verdict" && "$REPLY" == "$accepted_removal_verdict" ]] ||
+      error_exit "REMOVAL_BLOCKED" "$REPLY" 6
   fi
 
   info "Removing worktree ${C_CYAN}$wt_path${C_RESET}"
@@ -5400,6 +5458,12 @@ cmd_move() {
   [[ -d "$wt_path" ]] || error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
   [[ ! -d "$new_wt_path" ]] || error_exit "WORKTREE_EXISTS" "destination already exists: '$new_wt_path'" 4
 
+  local current_link=""
+  if current_link="$(worktree_current_link_for "$wt_path")"; then
+    [[ "$FORCE" == true ]] || error_exit "WORKTREE_IN_USE" "worktree is selected by '$current_link'; switch the live site first or use -f" 6
+    warn "Moving the worktree will break the live-site link '$current_link'"
+  fi
+
   # Check if old site is secured
   local was_secured=false
   if command -v herd >/dev/null 2>&1; then
@@ -5477,6 +5541,8 @@ cmd_move() {
   # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
   if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
     dim "  Updated APP_URL in .env"
+  elif (( $? != 1 )); then
+    error_exit "IO_ERROR" "could not update APP_URL in '$new_wt_path/.env'" 5
   fi
 
   # Everything reversible has succeeded — commit so the registered undo steps do
@@ -5607,7 +5673,7 @@ cmd_clone() {
   notify "grove clone" "Repository $repo cloned successfully"
 }
 
-# cmd_fresh — Refresh a worktree by running migrate:fresh, npm ci, and build
+# cmd_fresh — Refresh a worktree's dependencies and assets, preserving databases
 cmd_fresh() {
   local repo="${1:-}"; local branch="${2:-}"
 
@@ -5644,29 +5710,10 @@ cmd_fresh() {
   print -r -- "${C_BOLD}Refreshing ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
   print -r -- ""
 
-  # Run migrate:fresh --seed (with confirmation unless forced). Declining
-  # skips only the database step; npm ci and the build below still run.
+  # Laravel may select a different database through cached configuration,
+  # connection URLs or environment overrides. A sidecar cannot authorise a reset.
   if [[ -f "artisan" ]]; then
-    local run_migrate=true
-    if [[ "$FORCE" == false ]]; then
-      warn "This will DROP ALL TABLES in the database!"
-      print -n "${C_YELLOW}Continue with migrate:fresh? [y/N]${C_RESET} "
-      local response
-      read -r response
-      if [[ ! "$response" =~ ^[Yy]$ ]]; then
-        warn "Skipping migrate:fresh"
-        run_migrate=false
-      fi
-    fi
-
-    if [[ "$run_migrate" == true ]]; then
-      info "Running migrate:fresh --seed..."
-      if php artisan migrate:fresh --seed; then
-        ok "Database refreshed"
-      else
-        warn "migrate:fresh --seed failed"
-      fi
-    fi
+    dim "  Database preserved; fresh refreshes dependencies and assets only"
   fi
 
   # Run npm ci
@@ -5675,14 +5722,14 @@ cmd_fresh() {
     if npm ci; then
       ok "npm dependencies installed"
     else
-      warn "npm ci failed"
+      error_exit "COMMAND_FAILED" "npm ci failed" 5
     fi
 
     info "Running npm run build..."
     if npm run build; then
       ok "Assets built"
     else
-      warn "npm run build failed"
+      error_exit "COMMAND_FAILED" "npm run build failed" 5
     fi
   fi
 
@@ -5702,7 +5749,7 @@ cmd_fresh() {
 #
 # Args: $1 = git_dir, $2 = repo, $3 = new_container, $4 = wt_path, $5 = branch
 # Returns: 0 = migrated, 2 = skipped (already migrated / not old layout),
-#          1 = attempted but failed or destination exists (count as neither).
+#          1 = attempted but failed or destination exists.
 _restructure_migrate_one() {
   local git_dir="$1" repo="$2" new_container="$3" wt_path="$4" branch="$5"
   local folder="${wt_path:t}"
@@ -5752,6 +5799,9 @@ _restructure_migrate_one() {
     local new_url="https://${new_site_name}.test"
     if _update_env_app_url "$new_path/.env" "$new_url"; then
       dim "  Updated APP_URL in .env"
+    elif (( $? != 1 )); then
+      warn "  Could not update APP_URL in '$new_path/.env'"
+      return 1
     fi
   fi
 
@@ -5786,7 +5836,7 @@ cmd_restructure() {
   local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || error_exit "GIT_ERROR" "failed to list worktrees" 4
 
   local wt_path="" branch=""
-  local -i migrated=0 skipped=0
+  local -i migrated=0 skipped=0 failed=0
   local line="" migrate_rc=0
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
@@ -5797,6 +5847,7 @@ cmd_restructure() {
         case "$migrate_rc" in
           0) migrated+=1 ;;
           2) skipped+=1 ;;
+          *) failed+=1 ;;
         esac
       fi
       wt_path=""
@@ -5815,10 +5866,15 @@ cmd_restructure() {
     case "$migrate_rc" in
       0) migrated+=1 ;;
       2) skipped+=1 ;;
+      *) failed+=1 ;;
     esac
   fi
 
   print -r -- ""
+  if (( failed > 0 )); then
+    warn "Migration finished: $migrated migrated, $skipped skipped, $failed failed"
+    return 1
+  fi
   ok "Migration complete: ${C_GREEN}$migrated${C_RESET} migrated, ${C_DIM}$skipped${C_RESET} skipped"
   print -r -- ""
 }
@@ -6340,7 +6396,7 @@ cmd_prune() {
     parallel_run _prune_all_results "${operations[@]}" || true
 
     notify "grove prune" "Completed: $_prune_success success, $_prune_failed failed"
-    (( _prune_failed == 0 ))
+    return $(( _prune_failed == 0 ? 0 : 1 ))
   fi
 
   # Single repo mode
@@ -7212,12 +7268,16 @@ cmd_switch() {
   # Resolve the URL (shared with open): .env APP_URL when valid, else url_for
   local url; url="$(worktree_url "$repo" "$branch" "$wt_path")"
 
+  local db_name; db_name="$(worktree_database_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot resolve database identity for '$wt_path'" 3
+  [[ -n "$db_name" ]] || error_exit "DATABASE_UNKNOWN" "empty database identity for '$wt_path'" 3
+
   # Print path for cd (user can use: cd "$(grove switch ...)")
   print -r -- "$wt_path"
 
   # Run post-switch hooks (updates -current symlink, restarts services, etc.)
   # Hook output goes to stderr so it doesn't interfere with path output for cd
-  run_hooks "post-switch" "$repo" "$branch" "$wt_path" "$url" "" >&2
+  run_hooks "post-switch" "$repo" "$branch" "$wt_path" "$url" "$db_name" >&2
 
   # Open in editor (fully detached from subshell)
   local editor="$DEFAULT_EDITOR"
@@ -7272,6 +7332,12 @@ cmd_exec() {
 #   $5 - repository name
 _display_worktree() {
   local idx="$1" wt_path="$2" branch="$3" head="$4" repo="$5"
+  local base; base="$(worktree_base_for "$wt_path")"
+  local observed_head='' observed_base=''
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    observed_head="$(git -C "$wt_path" rev-parse --verify HEAD 2>/dev/null)" || observed_head=''
+    observed_base="$(git -C "$wt_path" rev-parse --verify "$base^{commit}" 2>/dev/null)" || observed_base=''
+  fi
   local folder="${wt_path:t}"
   # Detached worktrees arrive with the "(detached)" sentinel as their branch.
   # Normalise to an empty branch + a HEAD ref so downstream branch logic skips
@@ -7362,15 +7428,26 @@ _display_worktree() {
     last_accessed="$(get_last_accessed_iso "$wt_path")"
 
     # Derive merge status from health issues (avoids duplicate is_branch_merged
-    # call). Unknown (base ref unresolved) stays false: the contract is boolean.
+    # call). Unknown comparisons remain JSON null.
     if [[ ",$health_issues," != *",unmerged,"* && ",$health_issues," != *",merge-unknown,"* ]]; then
       merged=true
     fi
 
-    # Check if branch is stale (configurable commits behind base)
-    if [[ "$(is_branch_stale "$wt_path" "$DEFAULT_BASE" "${GROVE_STALE_THRESHOLD:-50}")" == "true" ]]; then
-      stale=true
+    [[ ",$health_issues," == *",merge-unknown,"* ]] && merged=null
+    stale="$(is_branch_stale "$wt_path" "$base" "${GROVE_STALE_THRESHOLD:-50}")"
+    local behind_base; behind_base="$(get_commits_behind "$wt_path" "$base")"
+    [[ "$behind_base" == "$GROVE_UNKNOWN" ]] && behind_base=null
+    local base_sha head_sha checked_at
+    base_sha="$(git -C "$wt_path" rev-parse --verify "$base^{commit}" 2>/dev/null)" || base_sha=''
+    head_sha="$(git -C "$wt_path" rev-parse --verify HEAD 2>/dev/null)" || head_sha=''
+    if [[ -z "$head_sha" || -z "$base_sha" || "$head_sha" != "$observed_head" || "$base_sha" != "$observed_base" ]]; then
+      merged=null stale=null behind_base=null
+      health_grade='?' health_score=0
     fi
+    checked_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    json_escape "$base"; local je_base="$REPLY"
+    local comparison="\"base_ref\":\"$je_base\",\"base_sha\":\"$base_sha\",\"head_sha\":\"$head_sha\",\"behind_base\":$behind_base,\"behind_threshold\":${GROVE_STALE_THRESHOLD:-50},\"checked_at\":\"$checked_at\""
+
 
     # Build JSON with new fields
     json_escape "$wt_path"; local _je_path="$REPLY"
@@ -7400,7 +7477,7 @@ _display_worktree() {
       json_item+="\"lastAccessed\": null, "
     fi
     json_item+="\"merged\": $merged, "
-    json_item+="\"stale\": $stale"
+    json_item+="\"stale\": $stale, $comparison"
     json_item+="}"
 
     REPLY="$json_item"
@@ -7500,6 +7577,7 @@ cmd_ls() {
 #   $5 - inactive days threshold
 _display_status_row() {
   local p="$1" b="$2" repo="$3" stale_threshold="$4" inactive_days="$5"
+  local base; base="$(worktree_base_for "$p")"
 
   local sha st state_icon state_color changes counts ahead behind
   local age age_days merged_icon sync_display is_stale is_inactive
@@ -7553,7 +7631,8 @@ _display_status_row() {
   # measure it), not behind the upstream shown in the sync column — a pushed
   # branch is usually level with its upstream however far behind base it is.
   # Never feed the unknown sentinel ("?") into arithmetic.
-  local base_behind; base_behind="$(get_commits_behind "$p" "$DEFAULT_BASE")"
+  local base_behind; base_behind="$(get_commits_behind "$p" "$base")"
+  [[ "$base_behind" == "$GROVE_UNKNOWN" ]] && is_stale=null
   if [[ "$base_behind" != "$GROVE_UNKNOWN" ]] && (( base_behind > stale_threshold )); then
     is_stale=true
     sync_display="${C_RED}↑$ahead ↓$behind${C_RESET}"
@@ -7570,12 +7649,13 @@ _display_status_row() {
 
   # Check if merged (cache result for reuse in JSON output)
   local merged=false merged_rc=0
-  is_branch_merged "$p" "$DEFAULT_BASE" || merged_rc=$?
+  is_branch_merged "$p" "$base" || merged_rc=$?
   if (( merged_rc == 0 )); then
     merged=true
     merged_icon="${C_DIM}✓${C_RESET}"
   elif (( merged_rc == 2 )); then
-    # Unknown (base ref unresolved): JSON stays boolean false, text shows "?".
+    # A failed comparison stays unknown in JSON as well as in text.
+    merged=null
     merged_icon="${C_DIM}?${C_RESET}"
   else
     merged_icon="${C_DIM}-${C_RESET}"
@@ -8086,13 +8166,14 @@ cmd_report() {
 #   e.g. "B|82|behind:12,changes:3"
 calculate_health_score() {
   local wt_path="$1"
-  local score=100
+  local base; base="$(worktree_base_for "$wt_path")"
+  local score=100 known=true
   local issues=()
 
   # Check commits behind the base (max -30 points). "?" (base unresolved)
   # scores nothing rather than reaching arithmetic.
-  local behind; behind="$(get_commits_behind "$wt_path" "$DEFAULT_BASE")"
-  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
+  local behind; behind="$(get_commits_behind "$wt_path" "$base")"
+  if [[ ! "$behind" =~ ^[0-9]+$ ]]; then known=false; issues+=(behind-unknown); behind=0; fi
   if (( behind > 50 )); then
     score=$((score - 30))
     issues+=("behind:$behind")
@@ -8111,7 +8192,7 @@ calculate_health_score() {
     changes="$REPLY"
     get_cached_status "$wt_path" untracked >/dev/null; untracked="$REPLY"
   else
-    st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+    st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || { st=""; known=false; issues+=(status-unknown); }
     if [[ -n "$st" ]]; then
       changes="$(count_lines "$st")"
       untracked="$(count_matching "$st" '\?\?*')"
@@ -8146,12 +8227,13 @@ calculate_health_score() {
   # Check merge status (max -10 points). Return 2 means the base ref does not
   # resolve, so merge status is unknown: flag it without the unmerged penalty.
   local merged_rc=0
-  is_branch_merged "$wt_path" "$DEFAULT_BASE" || merged_rc=$?
+  is_branch_merged "$wt_path" "$base" || merged_rc=$?
   if (( merged_rc == 1 )); then
     score=$((score - 10))
     issues+=("unmerged")
   elif (( merged_rc == 2 )); then
     issues+=("merge-unknown")
+    known=false
   fi
 
   # Check untracked files (max -5 points)
@@ -8167,6 +8249,7 @@ calculate_health_score() {
   # Calculate grade
   score_to_grade "$score"
   local grade="$REPLY"
+  if [[ "$known" != true ]]; then grade="?"; score=0; fi
 
   print -r -- "$grade|$score|${(j:,:)issues}"
 }
@@ -8242,7 +8325,7 @@ cmd_health() {
 
   local wt_path="" branch=""
   local total_score=0 wt_count=0
-  local healthy_count=0 warning_count=0 critical_count=0
+  local healthy_count=0 warning_count=0 critical_count=0 unknown_count=0
 
   # Collect worktree health data
   local worktree_health=()
@@ -8265,7 +8348,10 @@ cmd_health() {
     wt_count=$((wt_count + 1))
 
     # Categorise health
-    if (( score >= 80 )); then
+    if [[ "$grade" == "?" ]]; then
+      unknown_count=$((unknown_count + 1))
+      warning_count=$((warning_count + 1))
+    elif (( score >= 80 )); then
       healthy_count=$((healthy_count + 1))
     elif (( score >= 60 )); then
       warning_count=$((warning_count + 1))
@@ -8292,6 +8378,7 @@ cmd_health() {
     avg_score=$((total_score / wt_count))
     score_to_grade "$avg_score"
     avg_grade="$REPLY"
+    (( unknown_count == 0 )) || avg_grade="?"
   fi
 
   # JSON output
@@ -8914,8 +9001,10 @@ cmd_cleanup_herd() {
     # `grove move`); only Method 2 below may judge a linked site.
     [[ -e "$sites_dir/$folder_name" || -L "$sites_dir/$folder_name" ]] && continue
 
-    # Check if the worktree directory exists
-    if [[ ! -d "$wt_path" ]]; then
+    # The worktree may live at the old flat path or under a parked
+    # <repo>-worktrees directory that Herd serves without a Sites link.
+    local parked=("$HERD_ROOT"/*-worktrees/"$folder_name"(N/))
+    if [[ ! -d "$wt_path" ]] && (( ${#parked} == 0 )); then
       orphaned+=("$site_name")
     fi
   done
@@ -9164,7 +9253,7 @@ _repair_repo() {
     print -r -- ""
   fi
 
-  local found=0 fixed=0 damaged=0 recovered=0
+  local found=0 fixed=0 damaged=0 recovered=0 prune_failed=false
 
   # 1. Clean stale index locks
   [[ "$json_mode" == true ]] || info "Checking for stale index locks..."
@@ -9209,6 +9298,8 @@ _repair_repo() {
           gitdir_content="$(cat "$wt_path/.git" 2>/dev/null)"
           if [[ "$gitdir_content" == gitdir:\ * ]]; then
             local ref_path="${gitdir_content#gitdir: }"
+            # git resolves a relative gitdir against the worktree, not our cwd.
+            [[ "$ref_path" == /* ]] || ref_path="$wt_path/$ref_path"
             if [[ ! -d "$ref_path" ]]; then
               issue="broken gitdir reference"
             fi
@@ -9276,8 +9367,15 @@ _repair_repo() {
   if (( damaged > recovered )); then
     [[ "$json_mode" == true ]] || dim "  Skipped: damaged worktrees remain and pruning would discard their metadata"
   else
-    local pruned; pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
-    if [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
+    # prune -v reports removals on stderr, so a non-empty capture is only a fix
+    # when git also exits 0.
+    local pruned prune_status=0
+    pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || prune_status=$?
+    if (( prune_status != 0 )); then
+      found=$((found + 1))
+      prune_failed=true
+      [[ "$json_mode" == true ]] || warn "  Prune failed: ${pruned:-git exited $prune_status}"
+    elif [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
       if [[ "$json_mode" != true ]]; then
         print -r -- "$pruned" | while read -r line; do
           ok "  Pruned: $line"
@@ -9302,6 +9400,7 @@ _repair_repo() {
       success=false
       message="Found $found issue(s) in $repo, fixed $fixed - run repair with --recovery to attempt automatic recovery"
     fi
+    [[ "$prune_failed" == true ]] && message="$message (git worktree prune failed)"
     json_escape "$repo"; local _je_repo="$REPLY"
     json_escape "$message"; local _je_msg="$REPLY"
     format_json "{\"success\": $success, \"repo\": \"$_je_repo\", \"issues_found\": $found, \"issues_fixed\": $fixed, \"message\": \"$_je_msg\"}"
@@ -9502,11 +9601,14 @@ cmd_upgrade() {
     error_exit "IO_ERROR" "failed to pull updates, you may need to resolve conflicts manually" 5
   fi
 
-  # Rebuild if build.sh exists
+  # Rebuild if build.sh exists. The grove executable is generated, so a failed
+  # build leaves the updated source behind a stale binary: that is a failure.
   if [[ -x "$repo_dir/build.sh" ]]; then
     info "Rebuilding..."
-    if ! "$repo_dir/build.sh" >/dev/null 2>&1; then
-      warn "Build failed, try running ./build.sh manually"
+    local build_out
+    if ! build_out="$("$repo_dir/build.sh" 2>&1)"; then
+      [[ -n "$build_out" ]] && print -r -- "$build_out" >&2
+      error_exit "IO_ERROR" "grove source updated, but the rebuild failed so the installed grove executable is stale; run $repo_dir/build.sh manually" 5
     fi
   fi
 
@@ -9721,8 +9823,10 @@ cmd_exec_all() {
     local cmd=("$@")
     (( ${#cmd[@]} > 0 )) || error_exit "INVALID_INPUT" "Usage: grove exec-all --all-repos <command...>" 2
 
-    local cmd_str="${cmd[*]}"
-    _check_dangerous_command "$cmd_str"
+    _check_dangerous_command "${cmd[*]}"
+    local cmd_str="${(j: :)${(@qq)cmd}}"
+    # Keep the documented single shell-string form; separate argv stay literal.
+    (( ${#cmd[@]} == 1 )) && cmd_str="$cmd[1]"
 
     info "Executing '$cmd_str' across all repositories..."
     print -r -- ""
@@ -9758,8 +9862,9 @@ cmd_exec_all() {
       error_exit "INVALID_INPUT" "group not found: '@$group_name' (see: grove group list)" 2
     fi
 
-    local cmd_str="${cmd[*]}"
-    _check_dangerous_command "$cmd_str"
+    _check_dangerous_command "${cmd[*]}"
+    local cmd_str="${(j: :)${(@qq)cmd}}"
+    (( ${#cmd[@]} == 1 )) && cmd_str="$cmd[1]"
 
     info "Executing '$cmd_str' across group @$group_name..."
     print -r -- ""
@@ -9787,8 +9892,9 @@ cmd_exec_all() {
 
   validate_name "$repo" "repository"
 
-  local cmd_str="${cmd[*]}"
-  _check_dangerous_command "$cmd_str"
+  _check_dangerous_command "${cmd[*]}"
+  local cmd_str="${(j: :)${(@qq)cmd}}"
+  (( ${#cmd[@]} == 1 )) && cmd_str="$cmd[1]"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
@@ -10302,13 +10408,22 @@ _clean_process_repo() {
   (( ${#clean_worktrees[@]} > 0 )) || { REPLY="0|0"; return; }
 
   local wt_path="" entry=""
-  local age_days nm_size vendor_size wt_saved folder nm_human v_human du_out
+  local age_days nm_size vendor_size wt_saved folder nm_human v_human du_out changes index_path activity_time now
 
   for entry in "${clean_worktrees[@]}"; do
     wt_path="${entry%%|*}"
     [[ -d "$wt_path" ]] || continue
 
+    changes="$(git -C "$wt_path" status --porcelain -- . ':(exclude)node_modules' ':(exclude)vendor' 2>/dev/null)" || continue
+    [[ -z "$changes" ]] || continue
+    worktree_current_link_for "$wt_path" >/dev/null && continue
+
     age_days="$(get_commit_age_days "$wt_path")"
+    now="$(_get_now)"
+    for index_path in "$wt_path" "$(git -C "$wt_path" rev-parse --git-path index 2>/dev/null)"; do
+      activity_time="$(file_mtime "$index_path")" || { age_days=0; break; }
+      (( (now - activity_time) / 86400 < age_days )) && age_days=$(( (now - activity_time) / 86400 ))
+    done
 
     if (( age_days > inactive_days )); then
       nm_size=0
@@ -10410,6 +10525,17 @@ cmd_clean() {
 
   if [[ -n "$repo" ]]; then
     validate_name "$repo" "repository"
+    if [[ "$dry_run" != true ]]; then
+      _clean_process_repo "$repo" "$inactive_days" true
+      if (( ${REPLY##*|} == 0 )); then
+        ok "No inactive worktrees with cleanable dependencies found"
+        return 0
+      fi
+      if ! confirm "Delete node_modules/vendor for ${REPLY##*|} inactive worktree(s) in '$repo'?"; then
+        dim "  Aborted — nothing deleted"
+        return 0
+      fi
+    fi
     _clean_process_repo "$repo" "$inactive_days" "$dry_run"
     total_saved="${REPLY%%|*}"
     cleaned="${REPLY##*|}"
@@ -10471,12 +10597,40 @@ readonly GROVE_ALIASES_FILE="$HOME/.grove/aliases"
 
 # cmd_config — Show current grove configuration
 cmd_config() {
+  local repo="${1:-}" git_dir=""
+  if [[ -n "$repo" ]]; then
+    validate_name "$repo" "repository"
+    git_dir="$(git_dir_for "$repo")"
+    ensure_bare_repo "$git_dir"
+    load_repo_config "$git_dir"
+  fi
+  # Record sources separately from values: resolution remains in load_config.
+  local -A sources
+  local key config_source
+  for key in HERD_ROOT DEFAULT_BASE PROTECTED_BRANCHES GROVE_HOOKS_DIR DB_CREATE DB_HOST DB_USER GROVE_URL_SUBDOMAIN; do sources[$key]=default; done
+  _record_config_source() {
+    local entry="$1"
+    [[ -n "${sources[$entry]-}" ]] || return 0
+    [[ "$entry" == HERD_ROOT && -n "${_GROVE_ENV_HERD_ROOT:-}" ]] && return 0
+    sources[$entry]="$config_source"
+  }
+  config_source="${GROVE_CONFIG:-$HOME/.groverc}"
+  _read_config_pairs "$config_source" _record_config_source
+  config_source="$HERD_ROOT/.groveconfig"
+  _read_config_pairs "$config_source" _record_config_source
+  if [[ -n "$git_dir" ]]; then
+    _record_repo_config_source() {
+      case "$1" in DEFAULT_BASE|PROTECTED_BRANCHES|GROVE_URL_SUBDOMAIN) sources[$1]="$git_dir/.groveconfig" ;; esac
+    }
+    _read_config_pairs "$git_dir/.groveconfig" _record_repo_config_source
+  fi
+  [[ -n "${_GROVE_ENV_HERD_ROOT:-}" ]] && sources[HERD_ROOT]=environment
   # Gather configuration values from environment/defaults
   local default_base="${DEFAULT_BASE:-main}"
   local protected="${PROTECTED_BRANCHES:-staging main master}"
   local config_dir="${GROVE_CONFIG_DIR:-$HOME/.grove}"
   local hooks_dir="${GROVE_HOOKS_DIR:-$config_dir/hooks}"
-  local repos_dir="${GROVE_REPOS_DIR:-$HOME/Code}"
+  local repos_dir="$HERD_ROOT"
   local hooks_enabled="true"
   [[ -d "$hooks_dir" ]] || hooks_enabled="false"
 
@@ -10511,7 +10665,13 @@ cmd_config() {
     if [[ -n "$url_sub" ]]; then
       json_escape "$url_sub"; url_sub_json="\"$REPLY\""
     fi
-    print -r -- "{\"success\": true, \"data\": {\"default_base_branch\": \"$_je_base\", \"protected_branches\": $protected_json, \"config_dir\": \"$_je_cdir\", \"hooks_dir\": \"$_je_hdir\", \"repos_dir\": \"$_je_rdir\", \"hooks_enabled\": $hooks_enabled, \"database\": {\"enabled\": $db_enabled, \"host\": \"$_je_dbh\", \"user\": \"$_je_dbu\"}, \"herd_enabled\": $herd_enabled, \"url_subdomain\": $url_sub_json}}"
+    local -a source_parts=()
+    for key in ${(ok)sources}; do
+      json_escape "${sources[$key]}"
+      source_parts+=("\"$key\":\"$REPLY\"")
+    done
+    local sources_json="{${(j:,:)source_parts}}"
+    print -r -- "{\"success\": true, \"data\": {\"default_base_branch\": \"$_je_base\", \"protected_branches\": $protected_json, \"config_dir\": \"$_je_cdir\", \"hooks_dir\": \"$_je_hdir\", \"repos_dir\": \"$_je_rdir\", \"herd_root\": \"$_je_rdir\", \"config_sources\": $sources_json, \"hooks_enabled\": $hooks_enabled, \"database\": {\"enabled\": $db_enabled, \"host\": \"$_je_dbh\", \"user\": \"$_je_dbu\"}, \"herd_enabled\": $herd_enabled, \"url_subdomain\": $url_sub_json}}"
   else
     print -r -- "grove Configuration"
     print -r -- "================"
@@ -11664,6 +11824,7 @@ cmd_services_status() {
 
 svc_start_app() {
   local app="$1"
+  local result=0
   local process
   process="$(svc_get_supervisor_process "$app")"
 
@@ -11675,6 +11836,7 @@ svc_start_app() {
     if sup_out="$(supervisorctl start "$process" 2>&1)"; then
       ok "Started supervisor process"
     else
+      result=1
       warn "Could not start supervisor process '$process': ${sup_out:-unknown error}"
     fi
   fi
@@ -11682,15 +11844,21 @@ svc_start_app() {
   # Load scheduler LaunchAgent
   local plist="$GROVE_LAUNCH_AGENTS/com.${app}.scheduler.plist"
   if [[ -f "$plist" ]]; then
-    launchctl load "$plist" 2>/dev/null || true
-    ok "Loaded scheduler"
+    if launchctl load "$plist" 2>/dev/null; then
+      ok "Loaded scheduler"
+    else
+      warn "Could not load scheduler"
+      result=1
+    fi
   fi
 
   print -r -- ""
+  return "$result"
 }
 
 cmd_services_start() {
   local app="${1:-}"
+  local result=0
 
   if [[ -z "$app" ]]; then
     die "Usage: grove services start <app|all>"
@@ -11699,15 +11867,16 @@ cmd_services_start() {
   # Ensure supervisor is running
   if ! brew services list 2>/dev/null | grep -q "supervisor.*started"; then
     info "Starting supervisor daemon..."
-    brew services start supervisor
+    brew services start supervisor || return 1
     sleep 2
   fi
 
   if [[ "$app" == "all" ]]; then
     local app_name
     for app_name in $(svc_get_app_list); do
-      svc_start_app "$app_name"
+      svc_start_app "$app_name" || result=1
     done
+    return "$result"
   else
     svc_validate_app "$app"
     svc_start_app "$app"
@@ -11716,6 +11885,7 @@ cmd_services_start() {
 
 svc_stop_app() {
   local app="$1"
+  local result=0
   local process
   process="$(svc_get_supervisor_process "$app")"
 
@@ -11727,6 +11897,7 @@ svc_stop_app() {
     if sup_out="$(supervisorctl stop "$process" 2>&1)"; then
       ok "Stopped supervisor process"
     else
+      result=1
       warn "Could not stop supervisor process '$process': ${sup_out:-unknown error}"
     fi
   fi
@@ -11734,15 +11905,21 @@ svc_stop_app() {
   # Unload scheduler LaunchAgent
   local plist="$GROVE_LAUNCH_AGENTS/com.${app}.scheduler.plist"
   if [[ -f "$plist" ]]; then
-    launchctl unload "$plist" 2>/dev/null || true
-    ok "Unloaded scheduler"
+    if launchctl unload "$plist" 2>/dev/null; then
+      ok "Unloaded scheduler"
+    else
+      warn "Could not unload scheduler"
+      result=1
+    fi
   fi
 
   print -r -- ""
+  return "$result"
 }
 
 cmd_services_stop() {
   local app="${1:-}"
+  local result=0
 
   if [[ -z "$app" ]]; then
     die "Usage: grove services stop <app|all>"
@@ -11751,8 +11928,9 @@ cmd_services_stop() {
   if [[ "$app" == "all" ]]; then
     local app_name
     for app_name in $(svc_get_app_list); do
-      svc_stop_app "$app_name"
+      svc_stop_app "$app_name" || result=1
     done
+    return "$result"
   else
     svc_validate_app "$app"
     svc_stop_app "$app"
@@ -11761,6 +11939,7 @@ cmd_services_stop() {
 
 svc_restart_app() {
   local app="$1"
+  local result=0
   local process
   process="$(svc_get_supervisor_process "$app")"
 
@@ -11771,15 +11950,18 @@ svc_restart_app() {
     if sup_out="$(supervisorctl restart "$process" 2>&1)"; then
       ok "Restarted supervisor process"
     else
+      result=1
       warn "Could not restart supervisor process '$process': ${sup_out:-unknown error}"
     fi
   fi
 
   print -r -- ""
+  return "$result"
 }
 
 cmd_services_restart() {
   local app="${1:-}"
+  local result=0
 
   if [[ -z "$app" ]]; then
     # When called with no args (e.g. from hook with repo name that isn't registered),
@@ -11791,9 +11973,9 @@ cmd_services_restart() {
   if [[ "$app" == "all" ]]; then
     local app_name
     for app_name in $(svc_get_app_list); do
-      svc_restart_app "$app_name"
+      svc_restart_app "$app_name" || result=1
     done
-    return 0
+    return "$result"
   fi
 
   # If a specific app isn't registered, exit silently (idempotent for hooks)
@@ -11965,9 +12147,14 @@ cmd_services_remove() {
   # Remove the line from config (match on app name at start of line). Use awk with
   # a literal prefix comparison rather than grep — a regex would let a name like
   # 'my.app' also match 'myXapp', removing the wrong entry.
-  local tmp="${GROVE_SERVICES_CONF}.tmp"
-  awk -v prefix="${name}|" 'substr($0, 1, length(prefix)) != prefix' "$GROVE_SERVICES_CONF" > "$tmp"
-  mv "$tmp" "$GROVE_SERVICES_CONF"
+  local tmp
+  tmp="$(mktemp "${GROVE_SERVICES_CONF}.tmp.XXXXXX")" || return 1
+  if ! awk -v prefix="${name}|" 'substr($0, 1, length(prefix)) != prefix' "$GROVE_SERVICES_CONF" > "$tmp" ||
+     ! mv "$tmp" "$GROVE_SERVICES_CONF"; then
+    rm -f "$tmp"
+    warn "Could not update service registry"
+    return 1
+  fi
 
   ok "Removed app: $name"
   dim "Note: This only removes from registry. Worktrees and configs are not deleted."
@@ -12007,19 +12194,22 @@ cmd_services_switch() {
 
   info "Switching ${(C)app} to $worktree..."
 
-  svc_stop_app "$app"
+  svc_stop_app "$app" || return 1
 
-  ln -sfn "$worktree_path" "$symlink"
+  ln -sfn "$worktree_path" "$symlink" || return 1
   ok "Updated ${system_name}-current -> $worktree"
 
   # Clear the config cache so the app doesn't serve paths cached from the
   # previous worktree (Laravel apps only; skip silently otherwise).
   if [[ -f "$worktree_path/artisan" ]] && command -v php &> /dev/null; then
-    (cd "$worktree_path" && php artisan config:clear) > /dev/null 2>&1 || true
+    (cd "$worktree_path" && php artisan config:clear) > /dev/null 2>&1 || {
+      warn "Could not clear config cache"
+      return 1
+    }
     ok "Config cache cleared"
   fi
 
-  svc_start_app "$app"
+  svc_start_app "$app" || return 1
 
   ok "Switched ${(C)app} to $worktree"
 }
@@ -12175,9 +12365,11 @@ cmd_services_doctor() {
           ok "$app: RUNNING"
         else
           warn "$app: $REPLY"
+          issues=$((issues + 1))
         fi
       else
         warn "$app: Not configured"
+          issues=$((issues + 1))
       fi
     done
 
@@ -12191,6 +12383,7 @@ cmd_services_doctor() {
           ok "$app: Loaded"
         else
           warn "$app: Not loaded"
+          issues=$((issues + 1))
         fi
       else
         dim "$app: No plist (no scheduler configured)"
@@ -12206,6 +12399,7 @@ cmd_services_doctor() {
     ok "All checks passed!"
   else
     warn "Found $issues issue(s). Run suggested fixes above."
+    return 1
   fi
 }
 
@@ -12275,6 +12469,383 @@ cmd_services() {
   esac
 }
 
+# Read-only previews share the removal authority used immediately before rm.
+cmd_prune_plan() {
+  local repo="$1" git_dir
+  validate_name "$repo" repository
+  git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+  load_repo_config "$git_dir"
+  bundled_prune_plan plan "$repo" "$git_dir" "$DEFAULT_BASE" "$PROTECTED_BRANCHES"
+}
+
+cmd_prune_execute() {
+  local repo="$1" plan_file="$2" git_dir
+  validate_name "$repo" repository
+  [[ -f "$plan_file" ]] || error_exit INVALID_INPUT 'Confirmed plan is missing' 2
+  git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+  load_repo_config "$git_dir"
+  bundled_prune_plan execute "$repo" "$git_dir" "$DEFAULT_BASE" "$PROTECTED_BRANCHES" "$plan_file"
+}
+
+cmd_removal_check() {
+  local repo="${1:-}" branch="${2:-}" wt_path git_dir verdict=clear message='' current_link db_name=''
+  validate_name "$repo" repository
+  [[ -n "${RM_PATH:-}" ]] || validate_name "$branch" branch
+  git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+  load_repo_config "$git_dir"
+  if [[ -n "${RM_PATH:-}" ]]; then
+    wt_path="$(resolve_detached_worktree_path "$repo" "$RM_PATH")" || error_exit WORKTREE_NOT_FOUND "No detached worktree registered at '$RM_PATH'" 3
+  else
+    wt_path="$(resolve_worktree_path "$repo" "$branch")" || error_exit WORKTREE_NOT_FOUND "no matching worktree registered for '$repo' branch '$branch'" 3
+  fi
+  local -a check_rows=()
+  if ! removal_gate "$wt_path"; then
+    verdict=blocked; message="$REPLY"
+    [[ "$message" == *Unknown* || "$message" == *'cannot be ruled out'* ]] && verdict=unknown
+  fi
+  json_escape "$message"; local gate_message="$REPLY"
+  check_rows+=("{\"id\":\"removal_gate\",\"label\":\"Removal gate\",\"state\":\"$verdict\",\"message\":\"$gate_message\"}")
+  local selected_gate helper_json detail_rows
+  selected_gate="$(removal_check_binary)" || selected_gate=''
+  if [[ "$selected_gate" == bundled_removal_check ]]; then
+    helper_json="$(bundled_removal_check "$wt_path" --json)" || true
+    detail_rows="$(print -r -- "$helper_json" | python3 -c 'import json,sys;print(",".join(json.dumps(c) for c in json.load(sys.stdin)["checks"]))')" || detail_rows=''
+    if [[ -n "$detail_rows" ]]; then
+      check_rows+=("$detail_rows")
+      local detailed_verdict
+      detailed_verdict="$(print -r -- "$helper_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["verdict"])')" || detailed_verdict=unknown
+      [[ "$detailed_verdict" != clear ]] && verdict="$detailed_verdict"
+    else
+      verdict=unknown
+    fi
+  fi
+  local site_state=clear protection_state=clear database_state=clear
+  local site_message="No current-site link selects this worktree"
+  local protection_message="Branch protection permits this request"
+  local database_message="Database will be kept"
+  if current_link="$(worktree_current_link_for "$wt_path")"; then verdict=blocked; site_state=blocked; site_message="Current site selects this worktree; switch it first"; message+=$'\n'"Worktree is selected by '$current_link'; switch the live site first"; fi
+  if is_protected_branch "$branch" && [[ "${ALLOW_PROTECTED:-false}" != true ]]; then verdict=blocked; protection_state=blocked; protection_message="Protected branch requires typed confirmation"; message+=$'\n'"Protected branch requires individual typed confirmation"; fi
+  if ! db_name="$(db_name_for "$repo" "$branch" "$wt_path")"; then verdict=unknown; database_state=unknown; database_message="Database identity is unknown"; message+=$'\n'"Database identity is unknown; removal cannot be approved"; fi
+  if [[ "${DROP_DB:-false}" == true ]] && ! worktree_database_is_private "$repo" "$wt_path" "$db_name"; then verdict=blocked; database_state=blocked; database_message="$REPLY"; message+=$'\n'"$REPLY"; fi
+  [[ -n "$message" ]] || message='Removal gate completed; local remote-tracking refs were checked, no live fetch was performed. Execution rechecks before removal.'
+  json_escape "$repo"; local jr="$REPLY"
+  json_escape "$branch"; local jb="$REPLY"
+  json_escape "$wt_path"; local jp="$REPLY"
+  json_escape "$message"; local jm="$REPLY"
+  json_escape "$db_name"; local jd="$REPLY"
+  if [[ "${DROP_DB:-false}" == true && "$database_state" == clear ]]; then database_message="Database '$db_name' has verified ownership; post-removal hooks will be asked to drop it"; fi
+  json_escape "$site_message"; local js="$REPLY"
+  json_escape "$protection_message"; local jprotection="$REPLY"
+  json_escape "$database_message"; local jdatabase="$REPLY"
+  check_rows+=("{\"id\":\"current_site\",\"label\":\"Current site selection\",\"state\":\"$site_state\",\"message\":\"$js\"}")
+  check_rows+=("{\"id\":\"protected_branch\",\"label\":\"Branch protection\",\"state\":\"$protection_state\",\"message\":\"$jprotection\"}")
+  check_rows+=("{\"id\":\"database\",\"label\":\"Database identity and consequences\",\"state\":\"$database_state\",\"message\":\"$jdatabase\"}")
+  local checks_json="[${(j:,:)check_rows}]"
+  local checked_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  print -r -- "{\"success\":true,\"data\":{\"repo\":\"$jr\",\"branch\":\"$jb\",\"path\":\"$jp\",\"verdict\":\"$verdict\",\"checked_at\":\"$checked_at\",\"checks\":$checks_json,\"database\":{\"name\":\"$jd\",\"will_drop\":${DROP_DB:-false}}}}"
+}
+
+bundled_removal_check() { python3 - "$@" <<'GROVE_PYTHON_HELPER'
+#!/usr/bin/env python3
+"""wt-removal-check — would removing this worktree lose anything?
+
+    wt-removal-check [dir]        exit 0 clear · exit 1 blocked, reasons on stdout
+
+Three questions, answered from git and the lease file alone; nothing is
+recorded anywhere:
+
+  1. uncommitted changes — staged, modified or untracked files
+  2. commits no remote has — or, in a repository with no remote, commits
+     that only this branch has
+  3. a live agent session — see `wt-lease`
+
+An unanswered check blocks automated removal. A clear result covers local
+observations and remote-tracking refs, not a fresh network fetch.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+LIMIT = 10
+
+
+def git(directory: str, *args: str):
+    try:
+        out = subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, timeout=20)
+    except (subprocess.SubprocessError, OSError):
+        raise RuntimeError("Git query failed: " + " ".join(args))
+    if out.returncode != 0:
+        raise RuntimeError("Git query failed: " + " ".join(args))
+    return out.stdout
+
+
+def listing(lines, indent="      "):
+    shown = [indent + line for line in lines[:LIMIT]]
+    if len(lines) > LIMIT:
+        shown.append(f"{indent}… and {len(lines) - LIMIT} more")
+    return shown
+
+
+def uncommitted(directory: str):
+    status = git(directory, "status", "--porcelain")
+    if status is None:
+        return None
+    return [line for line in status.splitlines() if line.strip()]
+
+
+def unsaved_commits(directory: str):
+    remotes = git(directory, "remote")
+    if remotes is None:
+        return None
+    if remotes.strip():
+        exclude = ["--remotes"]
+    else:
+        head = git(directory, "rev-parse", "--symbolic-full-name", "HEAD").strip()
+        branches = (git(directory, "for-each-ref", "--format=%(refname)", "refs/heads") or "").split()
+        exclude = [ref for ref in branches if ref != head]
+    log = git(directory, "log", "--oneline", "HEAD", "--not", *exclude, "--")
+    if log is None:
+        return None
+    return [line for line in log.splitlines() if line.strip()]
+
+
+def live_lease(directory: str):
+    admin = git(directory, "rev-parse", "--absolute-git-dir")
+    if not admin:
+        return None
+    try:
+        lease = json.loads((Path(admin.strip()) / "worktree-lease.json").read_text(encoding="utf-8"))
+        expires = datetime.fromisoformat(lease["expires_at"])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("Lease unreadable or malformed") from exc
+    if not isinstance(lease.get("session"), str) or not isinstance(lease.get("tool"), str):
+        raise RuntimeError("Lease identity is malformed")
+    try:
+        renewed = datetime.fromisoformat(lease["renewed_at"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise RuntimeError("Lease renewal time is malformed") from exc
+    if expires.tzinfo is None or renewed.tzinfo is None or expires <= renewed:
+        raise RuntimeError("Lease expiry or renewal is invalid")
+    if expires <= datetime.now(timezone.utc):
+        return None
+    session = str(lease.get("session") or "?")
+    short = session[:8] + "…" if len(session) > 8 else session
+    try:
+        seen = datetime.fromisoformat(lease["renewed_at"]).astimezone().strftime("%H:%M")
+    except (ValueError, KeyError, TypeError):
+        seen = "?"
+    return f"{lease.get('tool', '?')} session {short}, last seen {seen}"
+
+
+def assess(directory):
+    checks = []
+    def check(name, label, query):
+        try:
+            findings = query()
+            checks.append({"id": name, "label": label, "state": "blocked" if findings else "clear", "message": str(findings) if findings else "Check completed"})
+        except Exception as exc:
+            checks.append({"id": name, "label": label, "state": "unknown", "message": str(exc)})
+    def locks():
+        admin = Path(git(directory, "rev-parse", "--absolute-git-dir").strip())
+        common = Path(git(directory, "rev-parse", "--git-common-dir").strip())
+        if not common.is_absolute():
+            common = Path(directory) / common
+        paths = [admin / "index.lock", admin / "HEAD.lock", common / "packed-refs.lock", common / "shallow.lock"]
+        ref = git(directory, "rev-parse", "--symbolic-full-name", "HEAD").strip()
+        if ref.startswith("refs/heads/"):
+            paths.append(common / (ref + ".lock"))
+        found = []
+        for path in paths:
+            try:
+                path.stat()
+                found.append(str(path))
+            except FileNotFoundError:
+                pass
+        return "Git locks exist: " + ", ".join(found) if found else None
+    check("git_lock", "Git locks", locks)
+    check("uncommitted", "Uncommitted work", lambda: "\n".join(uncommitted(directory)))
+    check("unsaved_commits", "Commit coverage in local remote-tracking refs", lambda: "\n".join(unsaved_commits(directory)))
+    check("lease", "Live agent lease", lambda: live_lease(directory))
+    verdict = "unknown" if any(c["state"] == "unknown" for c in checks) else "blocked" if any(c["state"] == "blocked" for c in checks) else "clear"
+    return {"path": directory, "verdict": verdict, "checks": checks}
+
+
+def main() -> int:
+    args = [arg for arg in sys.argv[1:] if arg != "--json"]
+    directory = os.path.abspath(args[0] if args else os.getcwd())
+    result = assess(directory)
+    if "--json" in sys.argv:
+        print(json.dumps(result))
+    else:
+        print(f"Removal checks {result['verdict']}: {directory}")
+        for check in result["checks"]:
+            if check["state"] != "clear":
+                print(f"  {check['label']}: {check['message']}")
+        if result["verdict"] == "unknown":
+            print("Unknown removal safety: check failed; removal is blocked")
+        elif result["verdict"] == "clear":
+            print("No unsaved work or live lease was found using local Git observations; no live fetch was performed.")
+    return {"clear": 0, "blocked": 1, "unknown": 2}[result["verdict"]]
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+GROVE_PYTHON_HELPER
+}
+bundled_prune_plan() { python3 - "$@" <<'GROVE_PYTHON_HELPER'
+#!/usr/bin/env python3
+"""Non-mutating branch plans and exact, revalidated execution for Grove."""
+import datetime
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def git(root, *args):
+    result = subprocess.run(["git", "--git-dir=" + root, *args], capture_output=True, text=True, timeout=20)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "Git check failed: " + args[0])
+    return result.stdout.strip()
+
+
+def checked_out(root):
+    return {line[7:] for line in git(root, "worktree", "list", "--porcelain").splitlines() if line.startswith("branch ")}
+
+
+def plan(repo, root, base, protected):
+    base_sha = git(root, "rev-parse", "--verify", base + "^{commit}")
+    comparison_ref = git(root, "rev-parse", "--symbolic-full-name", base)
+    occupied = checked_out(root)
+    merged = set(git(root, "for-each-ref", "--merged=" + base_sha, "--format=%(refname)", "refs/heads/").splitlines())
+    targets, skipped = [], []
+    for line in git(root, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/").splitlines():
+        ref, sha = line.split(" ", 1)
+        name = ref.removeprefix("refs/heads/")
+        reason = "Comparison base" if ref == comparison_ref else "Protected branch" if name in protected else "Checked out in a worktree" if ref in occupied else "Not merged into the comparison base" if ref not in merged else None
+        if reason:
+            skipped.append({"name": name, "reason": reason})
+        else:
+            targets.append({"kind": "branch", "ref": ref, "name": name, "sha": sha})
+    # Registration cleanup is intentionally excluded from this branch-only operation.
+    # A global git worktree prune could expand beyond the displayed target list.
+    return {"schema_version": 1, "repo": repo, "git_dir": os.path.realpath(root), "base_ref": base, "base_sha": base_sha,
+            "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "evidence_state": "clear",
+            "targets": targets, "skipped": skipped, "stale_registrations": []}
+
+
+def delete_confirmed(root, ref, sha, base, base_sha):
+    # Git's native worktree guard remains in charge. A transaction hook adds
+    # expected-SHA validation at the locked ref update, so branch tracking
+    # configuration cannot approve a concurrently changed, unconfirmed tip.
+    original_dir = git(root, "rev-parse", "--git-path", "hooks")
+    original = os.path.join(original_dir, "reference-transaction")
+    if not os.path.isabs(original):
+        original = os.path.join(root, original)
+    payload = {"root": root, "ref": ref, "sha": sha, "base": base, "base_sha": base_sha, "original": original}
+    hook_source = r'''#!/usr/bin/env python3
+import json,os,subprocess,sys
+p=json.loads(os.environ["GROVE_PRUNE_TRANSACTION"])
+text=sys.stdin.read()
+original=p["original"]
+if os.path.isfile(original) and os.access(original,os.X_OK):
+    result=subprocess.run([original,*sys.argv[1:]],input=text,text=True)
+    if result.returncode: sys.exit(result.returncode)
+if sys.argv[1] != "prepared": sys.exit(0)
+def git(*args):
+    result=subprocess.run(["git","--git-dir="+p["root"],*args],capture_output=True,text=True,timeout=10)
+    if result.returncode: raise RuntimeError(result.stderr.strip() or "Git safety check failed")
+    return result.stdout.strip()
+try:
+    changes=[line.split() for line in text.splitlines()]
+    if len(changes)!=1 or len(changes[0])!=3: raise RuntimeError("Unexpected branch transaction")
+    old,new,ref=changes[0]
+    if ref!=p["ref"] or old not in (p["sha"], "0"*len(p["sha"])) or len(new)!=len(p["sha"]) or any(c!='0' for c in new): raise RuntimeError("Confirmed branch changed; preview again")
+    if git("rev-parse","--verify",ref)!=p["sha"]: raise RuntimeError("Confirmed branch changed; preview again")
+    if git("rev-parse","--verify",p["base"]+"^{commit}")!=p["base_sha"]: raise RuntimeError("Comparison base changed; preview again")
+    if "branch "+ref in git("worktree","list","--porcelain").splitlines(): raise RuntimeError("Branch is now checked out")
+except Exception as error:
+    print(str(error),file=sys.stderr);sys.exit(1)
+'''
+    with tempfile.TemporaryDirectory(prefix="grove-prune-hook-") as hooks:
+        hook = Path(hooks) / "reference-transaction"
+        hook.write_text(hook_source)
+        hook.chmod(0o700)
+        env = os.environ.copy()
+        env["GROVE_PRUNE_TRANSACTION"] = json.dumps(payload)
+        result = subprocess.run(["git", "--git-dir="+root, "-c", "core.hooksPath="+hooks,
+                                 "branch", "--delete", "--force", "--", ref.removeprefix("refs/heads/")],
+                                capture_output=True, text=True, timeout=20, env=env)
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or "Git refused branch deletion")
+
+
+def execute(repo, root, base, protected, filename):
+    with open(filename) as source:
+        confirmed = json.load(source)
+    if confirmed.get("schema_version") != 1 or confirmed.get("evidence_state") != "clear" or confirmed.get("repo") != repo or confirmed.get("git_dir") != os.path.realpath(root):
+        raise RuntimeError("Plan identity is invalid; preview again")
+    current = plan(repo, root, base, protected)
+    if confirmed.get("base_ref") != current["base_ref"] or confirmed.get("base_sha") != current["base_sha"]:
+        raise RuntimeError("Comparison base changed; preview again")
+    available = {(item["ref"], item["sha"]) for item in current["targets"]}
+    targets = confirmed.get("targets")
+    if not isinstance(targets, list) or len(targets) > 10000:
+        raise RuntimeError("Invalid target list")
+    seen = set()
+    for item in targets:
+        pair = (item.get("ref"), item.get("sha"))
+        if pair not in available or pair[0] in seen:
+            raise RuntimeError("A confirmed branch changed, became protected or is checked out; preview again")
+        seen.add(pair[0])
+    results = []
+    for item in targets:
+        ref, sha = item["ref"], item["sha"]
+        name = ref.removeprefix("refs/heads/")
+        # Recheck at the write boundary, then let Git enforce its checked-out-branch guard.
+        if ref in checked_out(root):
+            results.append({"name": name, "status": "refused", "reason": "Branch is now checked out"})
+            continue
+        try:
+            if git(root, "rev-parse", "--verify", ref) != sha:
+                raise RuntimeError("Confirmed branch changed; preview again")
+            delete_confirmed(root, ref, sha, base, confirmed["base_sha"])
+            results.append({"name": name, "status": "deleted"})
+        except subprocess.TimeoutExpired:
+            results.append({"name": name, "status": "unknown", "reason": "Command deadline exceeded; the branch may already have changed. Refresh before retrying"})
+        except (RuntimeError, OSError) as error:
+            results.append({"name": name, "status": "refused", "reason": str(error)})
+    return {"repo": repo, "base": base, "branches": results, "stale_refs_pruned": 0}
+
+
+def main():
+    mode, repo, root, base, protected, *rest = sys.argv[1:]
+    try:
+        data = plan(repo, root, base, protected.split()) if mode == "plan" else execute(repo, root, base, protected.split(), rest[0])
+        print(json.dumps({"success": True, "data": data}))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(json.dumps({"success": False, "error": {"code": "PLAN_UNAVAILABLE", "message": str(error)}}))
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+GROVE_PYTHON_HELPER
+}
 # 99-main.sh - Main entry point, usage, and flag parsing
 
 usage() {
@@ -12315,7 +12886,7 @@ usage() {
   print -r -- "  ${C_GREEN}exec-all${C_RESET}  ${C_DIM}<repo> <cmd>${C_RESET}              Run command on all"
   print -r -- ""
   print -r -- "${C_BOLD}LARAVEL COMMANDS${C_RESET} ${C_DIM}(auto-detect when run from worktree)${C_RESET}"
-  print -r -- "  ${C_GREEN}fresh${C_RESET}    ${C_DIM}[repo] [branch]${C_RESET}            migrate:fresh + npm ci + build"
+  print -r -- "  ${C_GREEN}fresh${C_RESET}    ${C_DIM}[repo] [branch]${C_RESET}            Refresh dependencies and assets"
   print -r -- "  ${C_GREEN}migrate${C_RESET}  ${C_DIM}[repo] [branch]${C_RESET}            Run artisan migrate"
   print -r -- "  ${C_GREEN}tinker${C_RESET}   ${C_DIM}[repo] [branch]${C_RESET}            Run artisan tinker"
   print -r -- ""
@@ -12365,7 +12936,11 @@ usage() {
   print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
   print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (grove add, rm, clean)"
   print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
+  print -r -- "  ${C_YELLOW}--allow-protected${C_RESET}    Allow removing a protected branch's worktree, nothing else (with rm)"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
+  print -r -- "  prune-plan <repo>                 Preview exact merged branch targets"
+  print -r -- "  prune-execute <repo> <plan-file>   Execute only confirmed targets"
+  print -r -- "  removal-check <repo> <branch>     Read-only authoritative removal check"
   print -r -- "  ${C_YELLOW}--path=<path>${C_RESET}        Remove a detached worktree by its folder (with rm)"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
@@ -12484,7 +13059,7 @@ parse_flags() {
     if (( user_cmd_at > 0 && ${#REMAINING_ARGS[@]} >= user_cmd_at )) && [[ "$1" == -?* ]]; then
       case "$1" in
         --|--json|--pretty) ;;
-        -q|--quiet|-f|--force|-i|--interactive|--delete-branch|--drop-db|--no-backup|--path=*|\
+        -q|--quiet|-f|--force|--allow-protected|-i|--interactive|--delete-branch|--drop-db|--no-backup|--path=*|\
         --dry-run|--check|--all-repos|--recovery|--no-cache|--refresh|--template=*|-t|\
         --dir|--dir=*|--as|--as=*|-v|--version|-h|--help)
           setup_colors
@@ -12500,6 +13075,7 @@ parse_flags() {
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;
+      --allow-protected) ALLOW_PROTECTED=true ;;
       -i|--interactive) INTERACTIVE=true ;;
       --json) JSON_OUTPUT=true ;;
       --delete-branch) DELETE_BRANCH=true ;;
@@ -12673,6 +13249,9 @@ main() {
     dashboard)    cmd_dashboard "$@" ;;
     setup)        cmd_setup "$@" ;;
     config)       cmd_config "$@" ;;
+    prune-plan)   cmd_prune_plan "$@" ;;
+    prune-execute) cmd_prune_execute "$@" ;;
+    removal-check) cmd_removal_check "$@" ;;
     group)        cmd_group "$@" ;;
     share-deps)   cmd_share_deps "$@" ;;
     services)     cmd_services "$@" ;;

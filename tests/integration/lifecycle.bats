@@ -59,6 +59,7 @@ to_json_bool() {
 validate_name() { return 0; }
 ensure_bare_repo() { return 0; }
 load_repo_config() { return 0; }
+worktree_database_is_private() { return 0; }
 restart_herd_service() { return 0; }
 worktree_url() { url_for "$1" "$2"; }
 run_hooks() { return 0; }
@@ -66,6 +67,7 @@ cleanup_herd_site() { return 0; }
 count_lines() { print -r -- 1; }
 STUB
   cat "$GROVE_ROOT/lib/11-resilience.sh" >> "$LIFE_FNS"
+  cat "$GROVE_ROOT/lib/03-paths.sh" >> "$LIFE_FNS"
   # The REAL gate module rather than a stub, so these removals run the gate as
   # grove does; the test helper points it at a hermetic `wt-removal-check`.
   cat "$GROVE_ROOT/lib/13-removal-gate.sh" >> "$LIFE_FNS"
@@ -162,6 +164,46 @@ make_bare_with_worktree() {
 # ============================================================================
 # #32 — cmd_rm JSON: branch_deleted reflects the REAL outcome
 # ============================================================================
+
+@test "cmd_move: an env replacement failure rolls back instead of reporting success" {
+  local git_dir="$TEST_TEMP_DIR/app.git" wt_path="$TEST_TEMP_DIR/old"
+  make_bare_with_worktree "$git_dir" "$wt_path" "feature/env"
+  printf 'APP_URL=old\nPRIVATE=dummy\n' > "$wt_path/.env"
+
+  run_zsh "
+    git_dir_for() { print -r -- '$git_dir'; }
+    resolve_worktree_path() { print -r -- '$wt_path'; }
+    url_for() { print -r -- https://old.test; }
+    db_name_for() { print -r -- app__env; }
+    set_worktree_database() { return 0; }
+    herd() { return 1; }
+    mv() { return 1; }
+    FORCE=true
+    cmd_move app feature/env new
+  "
+
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"IO_ERROR"* ]]
+  [[ "$output" != *"moved successfully"* ]]
+  [ -d "$wt_path" ]
+  [ ! -d "$TEST_TEMP_DIR/new" ]
+  grep -q '^APP_URL=old$' "$wt_path/.env"
+}
+
+@test "cmd_restructure: a failed migration produces a failing command status" {
+  local git_dir="$TEST_TEMP_DIR/app.git" wt_path="$TEST_TEMP_DIR/app--feature-env"
+  make_bare_with_worktree "$git_dir" "$wt_path" feature/env
+
+  run_zsh "
+    git_dir_for() { print -r -- '$git_dir'; }
+    confirm() { return 0; }
+    _restructure_migrate_one() { return 1; }
+    cmd_restructure app
+  "
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"failed"* ]]
+}
 
 @test "cmd_rm --json: branch_deleted is true when the branch is actually deleted" {
   local git_dir="$TEST_TEMP_DIR/app.git"

@@ -302,7 +302,7 @@ grove add example-app feature/colleague-work
 # Open it up
 cd "$(grove switch example-app feature/colleague-work)"
 
-# Reset to clean state if needed
+# Refresh dependencies and assets, preserving the database
 grove fresh example-app feature/colleague-work
 
 # When done reviewing, clean up

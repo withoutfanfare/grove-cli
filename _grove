@@ -4,8 +4,36 @@
 # Place this file in your fpath (e.g., ~/.zsh/completions/_grove)
 # Or source it directly: source /path/to/_grove
 
+# HERD_ROOT as grove resolves it: environment first, then the config file,
+# read as a literal key=value pair (never sourced), then ~/Herd.
+# shortcut: backslash-escaped quotes in a quoted value are not unescaped.
+_grove_herd_root() {
+  emulate -L zsh
+  [[ -n "${HERD_ROOT:-}" ]] && { print -r -- "$HERD_ROOT"; return; }
+  local file="${GROVE_CONFIG:-$HOME/.groverc}" line key value root="$HOME/Herd"
+  if [[ -f "$file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" == *=* ]] || continue
+      key="${line%%=*}"
+      [[ "${key//[[:space:]]/}" == HERD_ROOT ]] || continue
+      value="${line#*=}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      case "$value" in
+        \"*) value="${value:1}"; value="${value%%\"*}" ;;
+        \'*) value="${value:1}"; value="${value%%\'*}" ;;
+        *) [[ "$value" == *[[:space:]]#* ]] && value="${value%%[[:space:]]#*}" ;;
+      esac
+      value="${value%"${value##*[![:space:]]}"}"
+      value="${value//\$HOME/$HOME}"
+      [[ "$value" == "~" || "$value" == "~/"* ]] && value="${HOME}${value#\~}"
+      [[ -n "$value" ]] && root="$value"
+    done < "$file"
+  fi
+  print -r -- "$root"
+}
+
 _grove_repos() {
-  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local herd_root; herd_root="$(_grove_herd_root)"
   local repos=()
   for dir in "$herd_root"/*.git(N); do
     [[ -d "$dir" ]] && repos+=("${${dir:t}%.git}")
@@ -15,7 +43,7 @@ _grove_repos() {
 
 _grove_branches() {
   local repo="$1"
-  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local herd_root; herd_root="$(_grove_herd_root)"
   local git_dir="$herd_root/${repo}.git"
 
   [[ -d "$git_dir" ]] || return 1
@@ -32,13 +60,10 @@ _grove_branches() {
 
 _grove_all_branches() {
   local repo="$1"
-  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local herd_root; herd_root="$(_grove_herd_root)"
   local git_dir="$herd_root/${repo}.git"
 
   [[ -d "$git_dir" ]] || return 1
-
-  # Background fetch for fresh branches (non-blocking)
-  git --git-dir="$git_dir" fetch --quiet 2>/dev/null &
 
   local branches=()
   local line
@@ -103,7 +128,7 @@ _grove() {
     'changes:List uncommitted file changes'
     'log:Show recent commits'
     'prune:Clean up stale worktrees'
-    'fresh:Run migrate:fresh + npm ci + build'
+    'fresh:Refresh dependencies and assets'
     'build-all:Build all worktrees in parallel'
     'exec-all:Execute command in all worktrees'
     'clean:Remove node_modules/vendor from inactive worktrees'
@@ -125,6 +150,9 @@ _grove() {
     'version:Show version information'
     'setup:First-time configuration wizard'
     'config:Show current configuration'
+    'prune-plan:Preview exact merged branch cleanup targets'
+    'prune-execute:Execute a confirmed branch cleanup plan'
+    'removal-check:Check removal safety without making changes'
     'group:Manage repository groups'
     'share-deps:Enable shared dependencies for a repository'
     'services:Manage app services (Supervisor, Horizon, scheduler)'
@@ -138,6 +166,7 @@ _grove() {
     '--json[Output in JSON format]'
     '--pretty[Pretty-print JSON output with colours]'
     '--dry-run[Preview actions without executing]'
+    '--allow-protected[Allow removing a protected branch worktree (rm only)]'
     '--delete-branch[Delete branch when removing worktree]'
     '--drop-db[Drop database when removing worktree]'
     '--no-backup[Skip database backup when removing worktree]'

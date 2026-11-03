@@ -126,13 +126,14 @@ run_grove() {
   git --git-dir="$HERD_ROOT/app.git" worktree add -q "$HERD_ROOT/app--main" main
   printf 'DEFAULT_BASE=origin/x:y\n' > "$HERD_ROOT/app.git/.groveconfig"
 
-  run --separate-stderr zsh -c "HERD_ROOT='$HERD_ROOT' NO_COLOR=1 zsh '$GROVE_SCRIPT' ls app --json"
+  run --separate-stderr zsh -c "HERD_ROOT='$HERD_ROOT' NO_COLOR=1 GROVE_BASE_DEFAULT=main zsh '$GROVE_SCRIPT' ls app --json"
   [ "$status" -eq 0 ]
   echo "$output" | python3 -c "
 import json, sys
 row = json.load(sys.stdin)[0]
 assert isinstance(row['health_score'], int), row
 assert row['health_grade'] in 'ABCDF', row
+assert row['base_ref'] == 'main' and row['merged'] is True, row
 "
   [[ "$stderr" == *"Invalid DEFAULT_BASE"* ]]
 }
@@ -337,6 +338,7 @@ assert row['health_grade'] in 'ABCDF', row
   git --git-dir="$HERD_ROOT/testrepo.git" worktree add -q -b "$branch" "$wt_path" HEAD
 
   # Each hook leaves a mark, so a hook that runs cannot go unnoticed.
+  printf 'testrepo__feature_preview\n' > "$(git -C "$wt_path" rev-parse --git-path grove-database)"
   mkdir -p "$GROVE_HOOKS_DIR/pre-rm.d" "$GROVE_HOOKS_DIR/post-rm.d"
   printf '#!/bin/sh\necho pre-rm >> "%s"\n' "$marker" > "$GROVE_HOOKS_DIR/pre-rm.d/01-mark.sh"
   printf '#!/bin/sh\necho post-rm >> "%s"\n' "$marker" > "$GROVE_HOOKS_DIR/post-rm.d/02-drop-database.sh"

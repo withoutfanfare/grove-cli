@@ -226,8 +226,10 @@ cmd_cleanup_herd() {
     # `grove move`); only Method 2 below may judge a linked site.
     [[ -e "$sites_dir/$folder_name" || -L "$sites_dir/$folder_name" ]] && continue
 
-    # Check if the worktree directory exists
-    if [[ ! -d "$wt_path" ]]; then
+    # The worktree may live at the old flat path or under a parked
+    # <repo>-worktrees directory that Herd serves without a Sites link.
+    local parked=("$HERD_ROOT"/*-worktrees/"$folder_name"(N/))
+    if [[ ! -d "$wt_path" ]] && (( ${#parked} == 0 )); then
       orphaned+=("$site_name")
     fi
   done
@@ -476,7 +478,7 @@ _repair_repo() {
     print -r -- ""
   fi
 
-  local found=0 fixed=0 damaged=0 recovered=0
+  local found=0 fixed=0 damaged=0 recovered=0 prune_failed=false
 
   # 1. Clean stale index locks
   [[ "$json_mode" == true ]] || info "Checking for stale index locks..."
@@ -521,6 +523,8 @@ _repair_repo() {
           gitdir_content="$(cat "$wt_path/.git" 2>/dev/null)"
           if [[ "$gitdir_content" == gitdir:\ * ]]; then
             local ref_path="${gitdir_content#gitdir: }"
+            # git resolves a relative gitdir against the worktree, not our cwd.
+            [[ "$ref_path" == /* ]] || ref_path="$wt_path/$ref_path"
             if [[ ! -d "$ref_path" ]]; then
               issue="broken gitdir reference"
             fi
@@ -588,8 +592,15 @@ _repair_repo() {
   if (( damaged > recovered )); then
     [[ "$json_mode" == true ]] || dim "  Skipped: damaged worktrees remain and pruning would discard their metadata"
   else
-    local pruned; pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
-    if [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
+    # prune -v reports removals on stderr, so a non-empty capture is only a fix
+    # when git also exits 0.
+    local pruned prune_status=0
+    pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || prune_status=$?
+    if (( prune_status != 0 )); then
+      found=$((found + 1))
+      prune_failed=true
+      [[ "$json_mode" == true ]] || warn "  Prune failed: ${pruned:-git exited $prune_status}"
+    elif [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
       if [[ "$json_mode" != true ]]; then
         print -r -- "$pruned" | while read -r line; do
           ok "  Pruned: $line"
@@ -614,6 +625,7 @@ _repair_repo() {
       success=false
       message="Found $found issue(s) in $repo, fixed $fixed - run repair with --recovery to attempt automatic recovery"
     fi
+    [[ "$prune_failed" == true ]] && message="$message (git worktree prune failed)"
     json_escape "$repo"; local _je_repo="$REPLY"
     json_escape "$message"; local _je_msg="$REPLY"
     format_json "{\"success\": $success, \"repo\": \"$_je_repo\", \"issues_found\": $found, \"issues_fixed\": $fixed, \"message\": \"$_je_msg\"}"
@@ -814,11 +826,14 @@ cmd_upgrade() {
     error_exit "IO_ERROR" "failed to pull updates, you may need to resolve conflicts manually" 5
   fi
 
-  # Rebuild if build.sh exists
+  # Rebuild if build.sh exists. The grove executable is generated, so a failed
+  # build leaves the updated source behind a stale binary: that is a failure.
   if [[ -x "$repo_dir/build.sh" ]]; then
     info "Rebuilding..."
-    if ! "$repo_dir/build.sh" >/dev/null 2>&1; then
-      warn "Build failed, try running ./build.sh manually"
+    local build_out
+    if ! build_out="$("$repo_dir/build.sh" 2>&1)"; then
+      [[ -n "$build_out" ]] && print -r -- "$build_out" >&2
+      error_exit "IO_ERROR" "grove source updated, but the rebuild failed so the installed grove executable is stale; run $repo_dir/build.sh manually" 5
     fi
   fi
 

@@ -27,6 +27,11 @@ removal_check_binary() {
     return 0
   fi
 
+  if (( $+functions[bundled_removal_check] )); then
+    print -r -- bundled_removal_check
+    return 0
+  fi
+
   local candidate
   for candidate in wt-removal-check \
     "$HOME/.local/bin/wt-removal-check" "$HOME/.claude/bin/wt-removal-check"; do

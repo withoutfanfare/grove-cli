@@ -1,9 +1,10 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="4.1.0"
+readonly VERSION="4.2.0"
 
 # Defaults (can be overridden by config file or env vars)
+readonly _GROVE_ENV_HERD_ROOT="${HERD_ROOT:-}"
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
 HERD_CONFIG="${HERD_CONFIG:-$HOME/Library/Application Support/Herd/config}"
 DEFAULT_BASE="${GROVE_BASE_DEFAULT:-origin/staging}"
@@ -43,6 +44,7 @@ GROVE_DIR=""
 # Global flags
 QUIET=false
 FORCE=false
+ALLOW_PROTECTED=false
 JSON_OUTPUT=false
 PRETTY_JSON=false
 DRY_RUN=false

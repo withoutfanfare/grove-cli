@@ -516,7 +516,7 @@ cmd_prune() {
     parallel_run _prune_all_results "${operations[@]}" || true
 
     notify "grove prune" "Completed: $_prune_success success, $_prune_failed failed"
-    (( _prune_failed == 0 ))
+    return $(( _prune_failed == 0 ? 0 : 1 ))
   fi
 
   # Single repo mode

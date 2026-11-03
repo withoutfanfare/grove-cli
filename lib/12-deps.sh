@@ -187,19 +187,33 @@ _disable_shared_deps() {
     return 0
   fi
 
-  local target; target="$(readlink "$dep_path" 2>/dev/null)"
+  # :A resolves a relative link against the worktree, not the caller's cwd
+  local target="${dep_path:A}" link; link="$(readlink "$dep_path")"
 
-  # Remove symlink
-  rm "$dep_path"
-
-  # Copy from shared back to local if it exists
-  if [[ -d "$target" ]]; then
-    info "  Copying $dep_type back to local..."
-    cp -R "$target" "$dep_path"
-    ok "  Restored local $dep_type"
-  else
+  if [[ ! -d "$target" ]]; then
+    rm "$dep_path" || return 1
     dim "  Shared cache was empty"
+    return 0
   fi
+
+  # Copy beside the link first; the link is only replaced once the copy is whole
+  local staging_dir
+  staging_dir="$(mktemp -d "$wt_path/.$dep_type.grove-unshare.XXXXXX")" || return 1
+  local staging="$staging_dir/$dep_type"
+  info "  Copying $dep_type back to local..."
+  if ! cp -R "$target" "$staging"; then
+    rm -rf "$staging_dir"
+    warn "  Failed to copy $dep_type; kept the shared link"
+    return 1
+  fi
+  if ! rm "$dep_path" || ! mv "$staging" "$dep_path"; then
+    rm -rf "$staging_dir"
+    [[ -e "$dep_path" || -L "$dep_path" ]] || ln -s "$link" "$dep_path"
+    warn "  Failed to replace the $dep_type link; kept the shared link"
+    return 1
+  fi
+  rmdir "$staging_dir"
+  ok "  Restored local $dep_type"
 }
 
 # Display the shared dependency status for a worktree (vendor and node_modules)
@@ -272,10 +286,12 @@ _share_deps_dispatch() {
       print -r -- "${C_BOLD}Disabling shared dependencies${C_RESET}"
       print -r -- ""
 
+      local failed=false
       for dep_type in vendor node_modules; do
-        _disable_shared_deps "$wt_path" "$dep_type"
+        _disable_shared_deps "$wt_path" "$dep_type" || failed=true
       done
 
+      [[ "$failed" == false ]] || die "Could not disable every shared dependency"
       print -r -- ""
       ok "Shared dependencies disabled"
       print -r -- ""

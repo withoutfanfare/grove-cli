@@ -148,6 +148,7 @@ is_protected_branch() { return 1; }
 slugify_branch() { REPLY="$1"; }
 STUB
   cat "$GROVE_ROOT/lib/11-resilience.sh" >> "$RM_FNS"
+  cat "$GROVE_ROOT/lib/03-paths.sh" >> "$RM_FNS"
   cat "$GROVE_ROOT/lib/13-removal-gate.sh" >> "$RM_FNS"
   cat "$GROVE_ROOT/lib/commands/lifecycle.sh" >> "$RM_FNS"
 
@@ -297,4 +298,22 @@ run_cmd_rm() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"HOOK:pre-rm"* ]]
   [ ! -d "$WT_FIXTURE" ]
+}
+
+@test "cmd_rm: work introduced by a pre-rm hook blocks forced removal" {
+  setup_cmd_rm_harness
+  cat > "$STUB_BIN/wt-removal-check" <<'GATE'
+#!/bin/sh
+if [ -f "$1/new-work" ]; then
+  printf 'Removing this worktree would lose new work\n'
+  exit 1
+fi
+GATE
+  chmod +x "$STUB_BIN/wt-removal-check"
+
+  run_cmd_rm 'FORCE=true; JSON_OUTPUT=true; run_hooks() { [[ "$1" != pre-rm ]] || touch "$WT_FIXTURE/new-work"; }'
+
+  [ "$status" -eq 6 ]
+  [[ "$output" == *"REMOVAL_BLOCKED"*"new work"* ]]
+  [ -f "$WT_FIXTURE/new-work" ]
 }

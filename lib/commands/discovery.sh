@@ -474,13 +474,22 @@ _clean_process_repo() {
   (( ${#clean_worktrees[@]} > 0 )) || { REPLY="0|0"; return; }
 
   local wt_path="" entry=""
-  local age_days nm_size vendor_size wt_saved folder nm_human v_human du_out
+  local age_days nm_size vendor_size wt_saved folder nm_human v_human du_out changes index_path activity_time now
 
   for entry in "${clean_worktrees[@]}"; do
     wt_path="${entry%%|*}"
     [[ -d "$wt_path" ]] || continue
 
+    changes="$(git -C "$wt_path" status --porcelain -- . ':(exclude)node_modules' ':(exclude)vendor' 2>/dev/null)" || continue
+    [[ -z "$changes" ]] || continue
+    worktree_current_link_for "$wt_path" >/dev/null && continue
+
     age_days="$(get_commit_age_days "$wt_path")"
+    now="$(_get_now)"
+    for index_path in "$wt_path" "$(git -C "$wt_path" rev-parse --git-path index 2>/dev/null)"; do
+      activity_time="$(file_mtime "$index_path")" || { age_days=0; break; }
+      (( (now - activity_time) / 86400 < age_days )) && age_days=$(( (now - activity_time) / 86400 ))
+    done
 
     if (( age_days > inactive_days )); then
       nm_size=0
@@ -582,6 +591,17 @@ cmd_clean() {
 
   if [[ -n "$repo" ]]; then
     validate_name "$repo" "repository"
+    if [[ "$dry_run" != true ]]; then
+      _clean_process_repo "$repo" "$inactive_days" true
+      if (( ${REPLY##*|} == 0 )); then
+        ok "No inactive worktrees with cleanable dependencies found"
+        return 0
+      fi
+      if ! confirm "Delete node_modules/vendor for ${REPLY##*|} inactive worktree(s) in '$repo'?"; then
+        dim "  Aborted — nothing deleted"
+        return 0
+      fi
+    fi
     _clean_process_repo "$repo" "$inactive_days" "$dry_run"
     total_saved="${REPLY%%|*}"
     cleaned="${REPLY##*|}"

@@ -395,6 +395,7 @@ cmd_services_status() {
 
 svc_start_app() {
   local app="$1"
+  local result=0
   local process
   process="$(svc_get_supervisor_process "$app")"
 
@@ -406,6 +407,7 @@ svc_start_app() {
     if sup_out="$(supervisorctl start "$process" 2>&1)"; then
       ok "Started supervisor process"
     else
+      result=1
       warn "Could not start supervisor process '$process': ${sup_out:-unknown error}"
     fi
   fi
@@ -413,15 +415,21 @@ svc_start_app() {
   # Load scheduler LaunchAgent
   local plist="$GROVE_LAUNCH_AGENTS/com.${app}.scheduler.plist"
   if [[ -f "$plist" ]]; then
-    launchctl load "$plist" 2>/dev/null || true
-    ok "Loaded scheduler"
+    if launchctl load "$plist" 2>/dev/null; then
+      ok "Loaded scheduler"
+    else
+      warn "Could not load scheduler"
+      result=1
+    fi
   fi
 
   print -r -- ""
+  return "$result"
 }
 
 cmd_services_start() {
   local app="${1:-}"
+  local result=0
 
   if [[ -z "$app" ]]; then
     die "Usage: grove services start <app|all>"
@@ -430,15 +438,16 @@ cmd_services_start() {
   # Ensure supervisor is running
   if ! brew services list 2>/dev/null | grep -q "supervisor.*started"; then
     info "Starting supervisor daemon..."
-    brew services start supervisor
+    brew services start supervisor || return 1
     sleep 2
   fi
 
   if [[ "$app" == "all" ]]; then
     local app_name
     for app_name in $(svc_get_app_list); do
-      svc_start_app "$app_name"
+      svc_start_app "$app_name" || result=1
     done
+    return "$result"
   else
     svc_validate_app "$app"
     svc_start_app "$app"
@@ -447,6 +456,7 @@ cmd_services_start() {
 
 svc_stop_app() {
   local app="$1"
+  local result=0
   local process
   process="$(svc_get_supervisor_process "$app")"
 
@@ -458,6 +468,7 @@ svc_stop_app() {
     if sup_out="$(supervisorctl stop "$process" 2>&1)"; then
       ok "Stopped supervisor process"
     else
+      result=1
       warn "Could not stop supervisor process '$process': ${sup_out:-unknown error}"
     fi
   fi
@@ -465,15 +476,21 @@ svc_stop_app() {
   # Unload scheduler LaunchAgent
   local plist="$GROVE_LAUNCH_AGENTS/com.${app}.scheduler.plist"
   if [[ -f "$plist" ]]; then
-    launchctl unload "$plist" 2>/dev/null || true
-    ok "Unloaded scheduler"
+    if launchctl unload "$plist" 2>/dev/null; then
+      ok "Unloaded scheduler"
+    else
+      warn "Could not unload scheduler"
+      result=1
+    fi
   fi
 
   print -r -- ""
+  return "$result"
 }
 
 cmd_services_stop() {
   local app="${1:-}"
+  local result=0
 
   if [[ -z "$app" ]]; then
     die "Usage: grove services stop <app|all>"
@@ -482,8 +499,9 @@ cmd_services_stop() {
   if [[ "$app" == "all" ]]; then
     local app_name
     for app_name in $(svc_get_app_list); do
-      svc_stop_app "$app_name"
+      svc_stop_app "$app_name" || result=1
     done
+    return "$result"
   else
     svc_validate_app "$app"
     svc_stop_app "$app"
@@ -492,6 +510,7 @@ cmd_services_stop() {
 
 svc_restart_app() {
   local app="$1"
+  local result=0
   local process
   process="$(svc_get_supervisor_process "$app")"
 
@@ -502,15 +521,18 @@ svc_restart_app() {
     if sup_out="$(supervisorctl restart "$process" 2>&1)"; then
       ok "Restarted supervisor process"
     else
+      result=1
       warn "Could not restart supervisor process '$process': ${sup_out:-unknown error}"
     fi
   fi
 
   print -r -- ""
+  return "$result"
 }
 
 cmd_services_restart() {
   local app="${1:-}"
+  local result=0
 
   if [[ -z "$app" ]]; then
     # When called with no args (e.g. from hook with repo name that isn't registered),
@@ -522,9 +544,9 @@ cmd_services_restart() {
   if [[ "$app" == "all" ]]; then
     local app_name
     for app_name in $(svc_get_app_list); do
-      svc_restart_app "$app_name"
+      svc_restart_app "$app_name" || result=1
     done
-    return 0
+    return "$result"
   fi
 
   # If a specific app isn't registered, exit silently (idempotent for hooks)
@@ -696,9 +718,14 @@ cmd_services_remove() {
   # Remove the line from config (match on app name at start of line). Use awk with
   # a literal prefix comparison rather than grep — a regex would let a name like
   # 'my.app' also match 'myXapp', removing the wrong entry.
-  local tmp="${GROVE_SERVICES_CONF}.tmp"
-  awk -v prefix="${name}|" 'substr($0, 1, length(prefix)) != prefix' "$GROVE_SERVICES_CONF" > "$tmp"
-  mv "$tmp" "$GROVE_SERVICES_CONF"
+  local tmp
+  tmp="$(mktemp "${GROVE_SERVICES_CONF}.tmp.XXXXXX")" || return 1
+  if ! awk -v prefix="${name}|" 'substr($0, 1, length(prefix)) != prefix' "$GROVE_SERVICES_CONF" > "$tmp" ||
+     ! mv "$tmp" "$GROVE_SERVICES_CONF"; then
+    rm -f "$tmp"
+    warn "Could not update service registry"
+    return 1
+  fi
 
   ok "Removed app: $name"
   dim "Note: This only removes from registry. Worktrees and configs are not deleted."
@@ -738,19 +765,22 @@ cmd_services_switch() {
 
   info "Switching ${(C)app} to $worktree..."
 
-  svc_stop_app "$app"
+  svc_stop_app "$app" || return 1
 
-  ln -sfn "$worktree_path" "$symlink"
+  ln -sfn "$worktree_path" "$symlink" || return 1
   ok "Updated ${system_name}-current -> $worktree"
 
   # Clear the config cache so the app doesn't serve paths cached from the
   # previous worktree (Laravel apps only; skip silently otherwise).
   if [[ -f "$worktree_path/artisan" ]] && command -v php &> /dev/null; then
-    (cd "$worktree_path" && php artisan config:clear) > /dev/null 2>&1 || true
+    (cd "$worktree_path" && php artisan config:clear) > /dev/null 2>&1 || {
+      warn "Could not clear config cache"
+      return 1
+    }
     ok "Config cache cleared"
   fi
 
-  svc_start_app "$app"
+  svc_start_app "$app" || return 1
 
   ok "Switched ${(C)app} to $worktree"
 }
@@ -906,9 +936,11 @@ cmd_services_doctor() {
           ok "$app: RUNNING"
         else
           warn "$app: $REPLY"
+          issues=$((issues + 1))
         fi
       else
         warn "$app: Not configured"
+          issues=$((issues + 1))
       fi
     done
 
@@ -922,6 +954,7 @@ cmd_services_doctor() {
           ok "$app: Loaded"
         else
           warn "$app: Not loaded"
+          issues=$((issues + 1))
         fi
       else
         dim "$app: No plist (no scheduler configured)"
@@ -937,6 +970,7 @@ cmd_services_doctor() {
     ok "All checks passed!"
   else
     warn "Found $issues issue(s). Run suggested fixes above."
+    return 1
   fi
 }
 

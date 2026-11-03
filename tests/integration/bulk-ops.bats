@@ -173,6 +173,28 @@ seed_group() {
   [ -f "$HERD_ROOT/apphome-worktrees/main/.grove-exec-ran" ]
 }
 
+@test "exec-all: separate arguments stay literal in repo, group and all-repo modes" {
+  seed_repo_with_worktree apphome main
+  seed_group frontend apphome
+  local recorder="$TEST_TEMP_DIR/record-args"
+  cat > "$recorder" <<'SCRIPT'
+#!/bin/sh
+printf '<%s>\n' "$@" > .args
+SCRIPT
+  chmod +x "$recorder"
+  local mode
+  for mode in apphome @frontend --all-repos; do
+    run_grove exec-all "$mode" -- "$recorder" 'hello world' '' '; touch INJECTED' '$(touch INJECTED)' "it's literal"
+    [ "$status" -eq 0 ]
+    [ ! -e "$HERD_ROOT/apphome-worktrees/main/INJECTED" ]
+    [ "$(cat "$HERD_ROOT/apphome-worktrees/main/.args")" = "<hello world>
+<>
+<; touch INJECTED>
+<\$(touch INJECTED)>
+<it's literal>" ]
+  done
+}
+
 # Regression coverage for --all-repos: parse_flags removes the flag before
 # cmd_exec_all is called, so the executable must remain the first argument.
 @test "exec-all --all-repos: runs a single-word command" {
@@ -218,7 +240,7 @@ seed_group() {
 
   # Fails in appa only; appb must still run, and the overall status is failure.
   touch "$HERD_ROOT/appa-worktrees/main/.fail"
-  run_grove exec-all --all-repos -- test ! -f .fail '&&' touch .ran
+  run_grove exec-all --all-repos -- 'test ! -f .fail && touch .ran'
   [ "$status" -ne 0 ]
   [ -f "$HERD_ROOT/appb-worktrees/main/.ran" ]
   [[ "$output" == *"with failures"* ]]

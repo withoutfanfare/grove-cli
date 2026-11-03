@@ -185,7 +185,7 @@ assert "\n" in w["message"], w["message"]
     git init -q -b main --bare "$HERD_ROOT/$repo.git"
   done
 
-  run zsh -c "source '$GIT_OPS_FNS'; HERD_ROOT='$HERD_ROOT'; ALL_REPOS=true; GROVE_MAX_PARALLEL=2; cmd_prune"
+  run zsh -c "set -e; source '$GIT_OPS_FNS'; error_exit() { print -r -- \"ERR:\$2\" >&2; exit \"\${3:-1}\"; }; HERD_ROOT='$HERD_ROOT'; ALL_REPOS=true; GROVE_MAX_PARALLEL=2; cmd_prune"
   [ "$status" -eq 0 ]
 
   # One success line per repo (parallel_run reports via the stubbed ok()).
@@ -197,6 +197,7 @@ assert "\n" in w["message"], w["message"]
 
   # The summary notification reports all five as succeeded, none failed.
   [[ "$output" == *"5 success, 0 failed"* ]]
+  [[ "$output" != *"Usage:"* ]]
 }
 
 # ============================================================================

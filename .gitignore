@@ -29,3 +29,7 @@ grove-app/
 
 # Local pre-PR review artifacts
 code-review/
+
+# Python helper import caches
+__pycache__/
+*.pyc

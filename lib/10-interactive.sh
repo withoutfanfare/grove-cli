@@ -64,6 +64,7 @@ interactive_add() {
     warn "No remote branches found - using $DEFAULT_BASE as the base"
   else
     base="$(print -rl -- "${branch_list[@]}" | _fzf_select --prompt="Base branch: " --height=40% --reverse --query="$DEFAULT_BASE")" || return $?
+    [[ -n "$base" ]] || die "No base branch selected"
   fi
   [[ -n "$base" ]] || base="$DEFAULT_BASE"
 
@@ -78,15 +79,16 @@ interactive_add() {
   local branch=""
   while [[ -z "$branch" ]]; do
     print -n "  Branch name: "
-    read -r branch
+    read -r branch || die "Branch name input cancelled"
 
     if [[ -z "$branch" ]]; then
       warn "Branch name required"
       continue
     fi
 
-    # Validate
-    if ! validate_name "$branch" "branch" 2>/dev/null; then
+    # Validate in a subshell: validate_name exits on failure, which would
+    # otherwise end the whole wizard instead of reprompting.
+    if ! ( validate_name "$branch" "branch" ) 2>/dev/null; then
       warn "Invalid branch name"
       branch=""
       continue
@@ -124,6 +126,7 @@ interactive_add() {
 $templates"
 
     template="$(echo "$templates" | _fzf_select --prompt="Template: " --height=40% --reverse)" || return $?
+    [[ -n "$template" ]] || die "No template selected (choose (none) to skip)"
 
     if [[ "$template" != "(none)" && -n "$template" ]]; then
       GROVE_TEMPLATE="$template"
@@ -242,7 +245,6 @@ Actions: [p]ull [s]ync [o]pen [c]ode [r]emove [i]nfo [Enter]=cd"
     --ansi
     --expect='p,s,o,c,r,i,enter'
     --preview-window=hidden
-    --bind='ctrl-r:reload(echo "REFRESH")'
   )
 
   # Only use --height if we have a proper terminal

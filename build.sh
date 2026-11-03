@@ -78,12 +78,16 @@ COMMAND_MODULES=(
   "config.sh"
   "laravel.sh"
   "services.sh"
+  "trust.sh"
 )
 
 # Validate every required input before creating the replacement artefact. A
 # partial binary is worse than no build, especially when install/upgrade trusts
 # this status.
-SOURCE_FILES=("$SCRIPT_DIR/build.sh")
+SOURCE_FILES=("$SCRIPT_DIR/build.sh" "$SCRIPT_DIR/tools/wt-removal-check" "$SCRIPT_DIR/tools/prune-plan.py")
+for helper in "${SOURCE_FILES[@]}"; do
+  [[ -f "$helper" ]] || { echo "Error: Missing build input: $helper" >&2; exit 1; }
+done
 for module in "${MODULES[@]}"; do
   module_path="$SCRIPT_DIR/lib/$module"
   [[ -f "$module_path" ]] || { echo "Error: Module not found: $module" >&2; exit 1; }
@@ -106,7 +110,8 @@ done
 
 BUILD_OUTPUT="$(mktemp "${OUTPUT}.tmp.XXXXXX")"
 cleanup_build() {
-  [[ -n "${BUILD_OUTPUT:-}" ]] && rm -f "$BUILD_OUTPUT"
+  if [[ -n "${BUILD_OUTPUT:-}" ]]; then rm -f "$BUILD_OUTPUT"; fi
+  return 0
 }
 trap cleanup_build EXIT
 
@@ -130,6 +135,15 @@ for module in "${COMMAND_MODULES[@]}"; do
   cmd_path="$SCRIPT_DIR/lib/commands/$module"
   append_module "$cmd_path"
   echo "" >> "$BUILD_OUTPUT"
+done
+
+# Embed maintained helpers so the single-file installation is self-contained.
+for helper in wt-removal-check prune-plan.py; do
+  local_function=bundled_removal_check
+  [[ "$helper" == prune-plan.py ]] && local_function=bundled_prune_plan
+  print -r -- "$local_function() { python3 - \"\$@\" <<'GROVE_PYTHON_HELPER'" >> "$BUILD_OUTPUT"
+  cat "$SCRIPT_DIR/tools/$helper" >> "$BUILD_OUTPUT"
+  print -r -- $'\nGROVE_PYTHON_HELPER\n}' >> "$BUILD_OUTPUT"
 done
 
 # Concatenate main entry point

@@ -113,7 +113,7 @@ Removes a worktree with cleanup of associated resources.
 **Usage**
 
 ```bash
-grove rm [-f] [--delete-branch] [--drop-db] [--no-backup] <repo> [branch]
+grove rm [-f] [--allow-protected] [--delete-branch] [--drop-db] [--no-backup] <repo> [branch]
 ```
 
 If `branch` is omitted and `fzf` is installed, an interactive picker is shown.
@@ -123,6 +123,7 @@ If `branch` is omitted and `fzf` is installed, an interactive picker is shown.
 | Flag | Description |
 |------|-------------|
 | `-f`, `--force` | Skip the protected branch check (never the removal gate) |
+| `--allow-protected` | Skip only the protected branch check. Unlike `-f`, a live-site link, an unknown database, a locked worktree and the removal gate still stop the removal |
 | `--delete-branch` | Also delete the local git branch |
 | `--path=<path>` | Remove a detached worktree (one with no branch) by its folder instead of a branch; only a registered, detached worktree of the repo qualifies |
 | `--drop-db` | Request that the database be dropped (delegated to hooks) |
@@ -163,7 +164,7 @@ grove rm -f --delete-branch --drop-db example-app feature/done
 
 **Safety**
 
-- Protected branches (`staging`, `main`, `master`) require `-f` to remove
+- Protected branches (`staging`, `main`, `master`) require `--allow-protected` or `-f` to remove
 - Requires the requested branch to match an exact registered Git worktree
 - Runs the removal gate (`wt-removal-check`) before the pre-rm hooks and before git touches anything. Uncommitted changes, commits no remote has, or a live agent session block the removal, and the gate prints exactly what would be lost. `-f` does not bypass it: interactively you are asked `Remove anyway? [y/N]`; with `--json` the removal fails with `REMOVAL_BLOCKED` and the loss in the message, and there is no override
 - A missing `wt-removal-check` also blocks (`REMOVAL_BLOCKED`): unsaved work cannot be ruled out without it. Set `GROVE_REMOVAL_CHECK_BIN` if it lives somewhere unusual
@@ -1497,7 +1498,8 @@ grove clean
 
 ### grove fresh
 
-Resets a Laravel application to a clean state. Drops all tables and rebuilds.
+Refreshes a worktree's Node dependencies and built assets. Databases are preserved,
+including for Laravel applications and when `--force` is supplied.
 
 **Usage**
 
@@ -1506,12 +1508,6 @@ grove fresh [repo] [branch]
 ```
 
 Auto-detects the repo/branch when run from inside a worktree.
-
-**Flags**
-
-| Flag | Description |
-|------|-------------|
-| `-f`, `--force` | Skip the destructive-action confirmation prompt before `migrate:fresh` |
 
 **Examples**
 
@@ -1528,12 +1524,13 @@ grove fresh example-app feature/login
 
 **What it does**
 
-1. If an `artisan` file is present: runs `php artisan migrate:fresh --seed`. Unless `-f` is given, it first prompts `Continue with migrate:fresh? [y/N]` (answering no skips this step).
-2. If a `package.json` file is present: runs `npm ci`, then `npm run build`.
+If a `package.json` file is present, runs `npm ci`, then `npm run build`.
+Either command failing stops the refresh and returns a non-zero exit status.
 
-Steps are skipped when their marker file is absent, so the command is safe to run on non-Laravel or non-Node worktrees.
+Worktrees without `package.json` have no asset refresh step.
 
-> **Caution:** `migrate:fresh` drops all tables. Use with care on worktrees with data you want to keep.
+Grove does not reset Laravel databases: cached configuration, connection URLs
+and exported settings can select a different database from the one in `.env`.
 
 ---
 
@@ -1656,6 +1653,10 @@ grove exec-all example-app -- ls -la
 > **Note:** Warns about potentially destructive commands (e.g., `migrate:fresh`, `db:drop`). Use `--` before the command to pass arguments that begin with a dash.
 
 In `--all-repos` mode, the first word after the global flags is the executable. The executable is retained when constructing the command for every discovered worktree.
+
+Separate command arguments retain their quoting, spaces and empty values. A single
+quoted command string is interpreted by the shell for compatibility, so use that
+form (or an explicit `sh -c '...'`) when you need pipes or `&&`.
 
 ---
 
@@ -2242,6 +2243,7 @@ grove prune example-app -f        # ✔
 | `--no-cache` | Bypass the fetch cache — always fetch fresh from remote (sets `GROVE_FETCH_CACHE_TTL=0`) |
 | `--refresh` | Clear the fetch cache before running the command |
 | `-t`, `--template=<name>` | Use a template when creating a worktree (`-t <name>` or `--template=<name>`) |
+| `--allow-protected` | Allow removing a protected branch's worktree and nothing else (with `rm`) |
 | `--delete-branch` | Delete branch when removing worktree (with `rm`) |
 | `--drop-db` | Request the database be dropped when removing a worktree (with `rm`) |
 | `--no-backup` | Request the database backup be skipped when removing a worktree (with `rm`) |
@@ -2261,7 +2263,7 @@ grove prune example-app -f        # ✔
 | Command | Supported flags |
 |---------|----------------|
 | `add` | `-i`, `--dry-run`, `--json`, `-t`/`--template`, `-f` |
-| `rm` | `-f`, `--delete-branch`, `--drop-db`, `--no-backup`, `--json`, `--pretty` |
+| `rm` | `-f`, `--allow-protected`, `--delete-branch`, `--drop-db`, `--no-backup`, `--json`, `--pretty` |
 | `move` | `-f` |
 | `clone` | `--json`, `--pretty` |
 | `ls` | `--json`, `--pretty` |
@@ -2284,7 +2286,6 @@ grove prune example-app -f        # ✔
 | `build-all` | `--all-repos` |
 | `exec-all` | `--all-repos` |
 | `clean` | `-f` |
-| `fresh` | `-f` |
 | `repair` | `--recovery` |
 | `report` | `--output <file>` (no `--json`) |
 | `--version` | `--check` |
@@ -2472,3 +2473,31 @@ Starts at 100 and deducts:
 | Old commits | Make regular commits as you work |
 | Merge conflicts | Resolve conflicts and complete the merge |
 | Untracked files | Add to `.gitignore` or delete if not needed |
+
+## Desktop trust APIs (4.2.0)
+
+`grove prune-plan <repo> --json` is read-only. Its `data` contains the repository,
+comparison ref and commit, check time, exact local branch refs and commits, and
+skipped branches with reasons. Protected, checked-out and comparison-base branches
+are excluded. This is branch cleanup; worktrees and stale registrations are not
+removed.
+
+Save the returned `data` object to a private JSON file and pass it to
+`grove prune-execute <repo> <plan-file> --json`. Execution validates the repository,
+base and confirmed branch commits, refuses changed evidence, and uses Git's native
+checked-out-branch protection. It never adds newly discovered branches to the plan.
+Each target reports `deleted` or `refused` with the actual reason. The preview is
+advisory: concurrent Git clients can change state, so execution rechecks it.
+
+`grove removal-check <repo> <branch> --json` runs the same removal gate as `rm`,
+plus current-site, protection and database-consequence checks. Detached worktrees
+use `--path=<registered-path>` instead of a branch. It returns `clear`, `blocked`
+or `unknown`; unknown blocks automated removal. `rm` checks again before and after
+pre-removal hooks. `--allow-protected` permits only the protection check after a
+separate typed confirmation; it does not bypass unsaved work, leases or locks.
+
+The maintained helper source is `tools/wt-removal-check`; `build.sh` embeds it in
+the single-file distribution. Explicit helper overrides remain authoritative and
+must be executable. A clear verdict describes local Git observations and cached
+remote-tracking refs, never a successful live fetch or proof that a database was
+dropped. Git ancestry does not establish pull-request or squash-merge status.

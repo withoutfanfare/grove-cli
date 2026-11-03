@@ -9,6 +9,7 @@ setup() {
   mkdir -p "$BUILD_FIXTURE"
   cp "$GROVE_ROOT/build.sh" "$BUILD_FIXTURE/build.sh"
   cp -R "$GROVE_ROOT/lib" "$BUILD_FIXTURE/lib"
+  cp -R "$GROVE_ROOT/tools" "$BUILD_FIXTURE/tools"
 }
 
 teardown() {

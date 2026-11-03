@@ -276,12 +276,16 @@ cmd_switch() {
   # Resolve the URL (shared with open): .env APP_URL when valid, else url_for
   local url; url="$(worktree_url "$repo" "$branch" "$wt_path")"
 
+  local db_name; db_name="$(worktree_database_for "$repo" "$branch" "$wt_path")" ||
+    error_exit "DATABASE_UNKNOWN" "cannot resolve database identity for '$wt_path'" 3
+  [[ -n "$db_name" ]] || error_exit "DATABASE_UNKNOWN" "empty database identity for '$wt_path'" 3
+
   # Print path for cd (user can use: cd "$(grove switch ...)")
   print -r -- "$wt_path"
 
   # Run post-switch hooks (updates -current symlink, restarts services, etc.)
   # Hook output goes to stderr so it doesn't interfere with path output for cd
-  run_hooks "post-switch" "$repo" "$branch" "$wt_path" "$url" "" >&2
+  run_hooks "post-switch" "$repo" "$branch" "$wt_path" "$url" "$db_name" >&2
 
   # Open in editor (fully detached from subshell)
   local editor="$DEFAULT_EDITOR"

@@ -166,3 +166,62 @@ PRELUDE='
   '
   [ "$status" -eq 0 ]
 }
+
+# --- _disable_shared_deps ---
+
+@test "_disable_shared_deps copies a relative link's target when run from another directory" {
+  mkdir -p "$HERD_ROOT/wt" "$GROVE_SHARED_DEPS_DIR/vendor/abc/pkg" "$TEST_TMPDIR/elsewhere"
+  printf 'shared\n' > "$GROVE_SHARED_DEPS_DIR/vendor/abc/pkg/file"
+  ( cd "$HERD_ROOT/wt" && ln -s "../../shared/vendor/abc" vendor )
+
+  run zsh -c "$PRELUDE"'
+    cd "$TEST_TMPDIR/elsewhere"
+    _disable_shared_deps "$HERD_ROOT/wt" vendor
+  '
+  [ "$status" -eq 0 ]
+  [ ! -L "$HERD_ROOT/wt/vendor" ]
+  [ "$(cat "$HERD_ROOT/wt/vendor/pkg/file")" = "shared" ]
+  [ -f "$GROVE_SHARED_DEPS_DIR/vendor/abc/pkg/file" ]
+  [ -z "$(ls -A "$TEST_TMPDIR/elsewhere")" ]
+}
+
+@test "_disable_shared_deps keeps the link and fails when the copy fails" {
+  mkdir -p "$HERD_ROOT/wt" "$GROVE_SHARED_DEPS_DIR/vendor/abc"
+  ( cd "$HERD_ROOT/wt" && ln -s "../../shared/vendor/abc" vendor )
+
+  run zsh -c "$PRELUDE"'
+    cp(){ return 1; }
+    _disable_shared_deps "$HERD_ROOT/wt" vendor
+  '
+  [ "$status" -ne 0 ]
+  [ -L "$HERD_ROOT/wt/vendor" ]
+  [ "$(readlink "$HERD_ROOT/wt/vendor")" = "../../shared/vendor/abc" ]
+  [ -z "$(find "$HERD_ROOT/wt" -name '*grove-unshare*')" ]
+}
+
+@test "_disable_shared_deps removes a link whose shared cache is missing" {
+  mkdir -p "$HERD_ROOT/wt"
+  ln -s "$GROVE_SHARED_DEPS_DIR/vendor/gone" "$HERD_ROOT/wt/vendor"
+
+  run zsh -c "$PRELUDE"'
+    _disable_shared_deps "$HERD_ROOT/wt" vendor
+  '
+  [ "$status" -eq 0 ]
+  [ ! -e "$HERD_ROOT/wt/vendor" ] && [ ! -L "$HERD_ROOT/wt/vendor" ]
+}
+
+@test "share-deps disable reports failure instead of success when a copy fails" {
+  mkdir -p "$HERD_ROOT/wt" "$GROVE_SHARED_DEPS_DIR/vendor/abc"
+  ln -s "$GROVE_SHARED_DEPS_DIR/vendor/abc" "$HERD_ROOT/wt/vendor"
+
+  run zsh -c "$PRELUDE"'
+    die(){ print -r -- "DIE:$1"; exit 1; }
+    ok(){ print -r -- "OK:$1"; }
+    cp(){ return 1; }
+    _share_deps_dispatch "$HERD_ROOT/wt" disable
+  '
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DIE:Could not disable"* ]]
+  [[ "$output" != *"OK:Shared dependencies disabled"* ]]
+  [ -L "$HERD_ROOT/wt/vendor" ]
+}

@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""wt-removal-check — would removing this worktree lose anything?
+
+    wt-removal-check [dir]        exit 0 clear · exit 1 blocked, reasons on stdout
+
+Three questions, answered from git and the lease file alone; nothing is
+recorded anywhere:
+
+  1. uncommitted changes — staged, modified or untracked files
+  2. commits no remote has — or, in a repository with no remote, commits
+     that only this branch has
+  3. a live agent session — see `wt-lease`
+
+An unanswered check blocks automated removal. A clear result covers local
+observations and remote-tracking refs, not a fresh network fetch.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+LIMIT = 10
+
+
+def git(directory: str, *args: str):
+    try:
+        out = subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, timeout=20)
+    except (subprocess.SubprocessError, OSError):
+        raise RuntimeError("Git query failed: " + " ".join(args))
+    if out.returncode != 0:
+        raise RuntimeError("Git query failed: " + " ".join(args))
+    return out.stdout
+
+
+def listing(lines, indent="      "):
+    shown = [indent + line for line in lines[:LIMIT]]
+    if len(lines) > LIMIT:
+        shown.append(f"{indent}… and {len(lines) - LIMIT} more")
+    return shown
+
+
+def uncommitted(directory: str):
+    status = git(directory, "status", "--porcelain")
+    if status is None:
+        return None
+    return [line for line in status.splitlines() if line.strip()]
+
+
+def unsaved_commits(directory: str):
+    remotes = git(directory, "remote")
+    if remotes is None:
+        return None
+    if remotes.strip():
+        exclude = ["--remotes"]
+    else:
+        head = git(directory, "rev-parse", "--symbolic-full-name", "HEAD").strip()
+        branches = (git(directory, "for-each-ref", "--format=%(refname)", "refs/heads") or "").split()
+        exclude = [ref for ref in branches if ref != head]
+    log = git(directory, "log", "--oneline", "HEAD", "--not", *exclude, "--")
+    if log is None:
+        return None
+    return [line for line in log.splitlines() if line.strip()]
+
+
+def live_lease(directory: str):
+    admin = git(directory, "rev-parse", "--absolute-git-dir")
+    if not admin:
+        return None
+    try:
+        lease = json.loads((Path(admin.strip()) / "worktree-lease.json").read_text(encoding="utf-8"))
+        expires = datetime.fromisoformat(lease["expires_at"])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("Lease unreadable or malformed") from exc
+    if not isinstance(lease.get("session"), str) or not isinstance(lease.get("tool"), str):
+        raise RuntimeError("Lease identity is malformed")
+    try:
+        renewed = datetime.fromisoformat(lease["renewed_at"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise RuntimeError("Lease renewal time is malformed") from exc
+    if expires.tzinfo is None or renewed.tzinfo is None or expires <= renewed:
+        raise RuntimeError("Lease expiry or renewal is invalid")
+    if expires <= datetime.now(timezone.utc):
+        return None
+    session = str(lease.get("session") or "?")
+    short = session[:8] + "…" if len(session) > 8 else session
+    try:
+        seen = datetime.fromisoformat(lease["renewed_at"]).astimezone().strftime("%H:%M")
+    except (ValueError, KeyError, TypeError):
+        seen = "?"
+    return f"{lease.get('tool', '?')} session {short}, last seen {seen}"
+
+
+def assess(directory):
+    checks = []
+    def check(name, label, query):
+        try:
+            findings = query()
+            checks.append({"id": name, "label": label, "state": "blocked" if findings else "clear", "message": str(findings) if findings else "Check completed"})
+        except Exception as exc:
+            checks.append({"id": name, "label": label, "state": "unknown", "message": str(exc)})
+    def locks():
+        admin = Path(git(directory, "rev-parse", "--absolute-git-dir").strip())
+        common = Path(git(directory, "rev-parse", "--git-common-dir").strip())
+        if not common.is_absolute():
+            common = Path(directory) / common
+        paths = [admin / "index.lock", admin / "HEAD.lock", common / "packed-refs.lock", common / "shallow.lock"]
+        ref = git(directory, "rev-parse", "--symbolic-full-name", "HEAD").strip()
+        if ref.startswith("refs/heads/"):
+            paths.append(common / (ref + ".lock"))
+        found = []
+        for path in paths:
+            try:
+                path.stat()
+                found.append(str(path))
+            except FileNotFoundError:
+                pass
+        return "Git locks exist: " + ", ".join(found) if found else None
+    check("git_lock", "Git locks", locks)
+    check("uncommitted", "Uncommitted work", lambda: "\n".join(uncommitted(directory)))
+    check("unsaved_commits", "Commit coverage in local remote-tracking refs", lambda: "\n".join(unsaved_commits(directory)))
+    check("lease", "Live agent lease", lambda: live_lease(directory))
+    verdict = "unknown" if any(c["state"] == "unknown" for c in checks) else "blocked" if any(c["state"] == "blocked" for c in checks) else "clear"
+    return {"path": directory, "verdict": verdict, "checks": checks}
+
+
+def main() -> int:
+    args = [arg for arg in sys.argv[1:] if arg != "--json"]
+    directory = os.path.abspath(args[0] if args else os.getcwd())
+    result = assess(directory)
+    if "--json" in sys.argv:
+        print(json.dumps(result))
+    else:
+        print(f"Removal checks {result['verdict']}: {directory}")
+        for check in result["checks"]:
+            if check["state"] != "clear":
+                print(f"  {check['label']}: {check['message']}")
+        if result["verdict"] == "unknown":
+            print("Unknown removal safety: check failed; removal is blocked")
+        elif result["verdict"] == "clear":
+            print("No unsaved work or live lease was found using local Git observations; no live fetch was performed.")
+    return {"clear": 0, "blocked": 1, "unknown": 2}[result["verdict"]]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

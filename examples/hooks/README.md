@@ -203,7 +203,7 @@ the Laravel workflow; you only need the hooks relevant to your projects.)
 │   │   └── link-repo.sh
 │   │
 │   └── example-app/               # Repo-specific hooks for 'example-app' (interleaved by number)
-│       ├── 02-symlink-env.sh      # Replace .env with a symlink
+│       ├── 01-symlink-env.sh      # Replace .env with a symlink
 │       ├── 04-import-database.sh
 │       ├── 05-symlink-storage.sh
 │       └── 08a-seed-data.sh
@@ -254,9 +254,9 @@ For the `example-app` repo, `grove add example-app feature/login` runs the
 post-add                          (single file, if it exists)
 post-add.d/00-register-project.sh         (global)
 post-add.d/01-copy-env.sh                 (global)
+post-add.d/example-app/01-symlink-env.sh      (repo-specific)
 post-add.d/01a-inherit-db-from-primary.sh (global)
 post-add.d/02-configure-env.sh            (global)
-post-add.d/example-app/02-symlink-env.sh      (repo-specific)
 post-add.d/03-create-database.sh          (global)
 post-add.d/04-herd-secure.sh              (global)
 post-add.d/example-app/04-import-database.sh  (repo-specific)
@@ -293,7 +293,7 @@ Each subsection below lists exactly the files shipped under `examples/hooks/`.
 | Hook | Purpose | Skip flag |
 |------|---------|-----------|
 | `00-register-project.sh` | Register the worktree in `~/.projects` for quick navigation | — |
-| `01-copy-env.sh` | Install a missing `.env` from `.env.example` with mode `0600` | — |
+| `01-copy-env.sh` | Install a missing `.env` from the repo's pre-built template, falling back to `.env.example`, with mode `0600` | — |
 | `01a-inherit-db-from-primary.sh` | When `DB_CREATE=false`, sync `DB_DATABASE` from the primary worktree's `.env` (prevents stale `.env.example` DB names cascading into new worktrees) | — |
 | `02-configure-env.sh` | Early `.env` pass: set `APP_URL`, `VITE_APP_URL`, and (for multi-tenant apps) `MULTITENANCY_LANDLORD_DOMAIN` / `MULTITENANCY_TENANT_PROTOCOL`. **Does not set `DB_DATABASE`** — that is deliberately deferred to a repo-specific hook that runs after any `.env` symlink. | — |
 | `03-create-database.sh` | Create the MySQL database | `GROVE_SKIP_DB` |
@@ -330,7 +330,7 @@ named after your own repo.
 
 | Hook | Purpose |
 |------|---------|
-| `02-symlink-env.sh` | Replace the global `.env.example` fallback with a symlink to a pre-built version; preserve any other existing `.env` |
+| `01-symlink-env.sh` | Replace the global `.env.example` fallback with a symlink to a pre-built version; preserve any other existing `.env` |
 | `04-import-database.sh` | Import a database from a gzipped SQL dump |
 | `05-symlink-storage.sh` | Symlink `storage/app` to a shared directory |
 | `08a-seed-data.sh` | Seed the database with development data (after migrations) |
@@ -547,7 +547,7 @@ install -m 600 /path/to/configured/.env ~/Code/Worktree/example-app/example-app-
 
 # Create a repo-specific hook to symlink it
 mkdir -p ~/.grove/hooks/post-add.d/example-app
-cat > ~/.grove/hooks/post-add.d/example-app/02-symlink-env.sh << 'EOF'
+cat > ~/.grove/hooks/post-add.d/example-app/01-symlink-env.sh << 'EOF'
 #!/bin/bash
 ENV_SOURCE="$HOME/Code/Worktree/${GROVE_REPO}/${GROVE_REPO}-env/.env"
 ENV_TARGET="${GROVE_PATH}/.env"
@@ -566,7 +566,7 @@ if [[ -f "$ENV_SOURCE" ]]; then
   fi
 fi
 EOF
-chmod +x ~/.grove/hooks/post-add.d/example-app/02-symlink-env.sh
+chmod +x ~/.grove/hooks/post-add.d/example-app/01-symlink-env.sh
 ```
 
 To repair older templates and backups created before private modes were

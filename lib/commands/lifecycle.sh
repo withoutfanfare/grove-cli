@@ -3,40 +3,36 @@
 
 # _update_env_app_url — Rewrite ONLY the APP_URL= line in a .env file, preserving every
 # other line. Uses a line-anchored loop (NOT a whole-file glob, which would greedily match
-# across newlines and delete everything after APP_URL=). Writes via a temp file, then copies
-# the new contents back into the ORIGINAL file in place — so the .env's original permissions,
-# ownership and any symlink target are preserved (a plain `mv` would replace the file and drop
-# all of that).
-# Args: $1 = path to .env file, $2 = new URL. Returns 0 if APP_URL was found and updated.
+# across newlines and delete everything after APP_URL=). Replace the resolved target
+# atomically, keeping its metadata and leaving a symlinked .env in place.
+# Args: $1 = path to .env file, $2 = new URL. Returns 0 if updated, 1 if absent,
+# or 2 on an I/O failure (callers must not report a successful move).
 _update_env_app_url() {
   local env_file="$1" new_url="$2"
   [[ -f "$env_file" ]] || return 1
 
-  local line found=false
-  local tmp="${env_file}.grove.tmp"
-  : > "$tmp" || return 1
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == APP_URL=* ]]; then
-      print -r -- "APP_URL=$new_url" >> "$tmp"
-      found=true
-    else
-      print -r -- "$line" >> "$tmp"
-    fi
-  done < "$env_file"
-
-  if [[ "$found" == true ]]; then
-    # Copy contents back into the original file (preserves mode, owner, symlink),
-    # rather than mv'ing the temp over it (which would inherit the temp's perms
-    # and break a symlinked .env).
-    if cat "$tmp" > "$env_file"; then
-      rm -f "$tmp"
-      return 0
-    fi
+  local env_target="${env_file:A}" line found=false tmp_dir
+  # A private directory prevents temporary credentials being exposed even when
+  # cp -p restores a less restrictive original mode before replacement.
+  tmp_dir="$(mktemp -d "${env_target}.grove.XXXXXX")" || return 2
+  local tmp="$tmp_dir/.env"
+  {
+    cp -p "$env_target" "$tmp" || return 2
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ "$line" == APP_URL=* ]]; then
+        print -r -- "APP_URL=$new_url" || return 2
+        found=true
+      else
+        print -r -- "$line" || return 2
+      fi
+    done < "$env_target" > "$tmp" || return 2
+    [[ "$found" == true ]] || return 1
+    mv -f "$tmp" "$env_target" || return 2
+  } always {
     rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
-  return 1
+    rmdir "$tmp_dir"
+  }
+  return 0
 }
 
 # ── Transaction undo helpers ──────────────────────────────────────────────
@@ -402,9 +398,19 @@ cmd_rm() {
   ensure_bare_repo "$git_dir"
   [[ -d "$wt_path" ]] || error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
 
+  local current_link=""
+  if current_link="$(worktree_current_link_for "$wt_path")"; then
+    [[ "$FORCE" == true ]] || error_exit "WORKTREE_IN_USE" "worktree is selected by '$current_link'; switch the live site first or use -f" 6
+    warn "Removing the worktree will break the live-site link '$current_link'"
+  fi
+  if [[ "$DROP_DB" == true ]] && ! worktree_database_is_private "$repo" "$wt_path" "$db_name"; then
+    error_exit "DATABASE_UNSAFE" "$REPLY; no database will be dropped" 5
+  fi
+
   # Branch protection check
-  if [[ -n "$branch" ]] && is_protected_branch "$branch" && [[ "$FORCE" == false ]]; then
-    error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use -f to force removal" 4
+  # --allow-protected lifts only this check; every other safeguard still applies.
+  if [[ -n "$branch" ]] && is_protected_branch "$branch" && [[ "$FORCE" == false && "$ALLOW_PROTECTED" != true ]]; then
+    error_exit "PROTECTED_BRANCH" "branch '$branch' is protected, use --allow-protected or -f to remove it" 4
   fi
 
   # Dry-run mode - say what would happen, then stop before any hook, git or
@@ -453,6 +459,7 @@ cmd_rm() {
   # would go — uncommitted changes, commits no remote has, a live agent session
   # — and the only way past it is to read that and confirm in person. --json
   # has no bypass: a script cannot accept a loss on anyone's behalf.
+  local accepted_removal_verdict=""
   if ! removal_gate "$wt_path"; then
     if [[ "$JSON_OUTPUT" == true ]]; then
       error_exit "REMOVAL_BLOCKED" "$REPLY" 6
@@ -466,11 +473,19 @@ cmd_rm() {
     local response
     read -r response
     [[ "$response" =~ ^[Yy]$ ]] || error_exit "INVALID_INPUT" "aborted by user" 2
+    accepted_removal_verdict="$REPLY"
   fi
 
   # Run pre-rm hooks
   if ! run_hooks "pre-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"; then
     error_exit "HOOK_FAILED" "pre-rm hook failed, aborting" 5
+  fi
+
+  # Hooks may create work or allow a new agent session to start. A previous
+  # verdict (including an interactive override) cannot approve a new loss.
+  if ! removal_gate "$wt_path"; then
+    [[ -n "$accepted_removal_verdict" && "$REPLY" == "$accepted_removal_verdict" ]] ||
+      error_exit "REMOVAL_BLOCKED" "$REPLY" 6
   fi
 
   info "Removing worktree ${C_CYAN}$wt_path${C_RESET}"
@@ -603,6 +618,12 @@ cmd_move() {
   [[ -d "$wt_path" ]] || error_exit "WORKTREE_NOT_FOUND" "worktree not found at '$wt_path'" 3
   [[ ! -d "$new_wt_path" ]] || error_exit "WORKTREE_EXISTS" "destination already exists: '$new_wt_path'" 4
 
+  local current_link=""
+  if current_link="$(worktree_current_link_for "$wt_path")"; then
+    [[ "$FORCE" == true ]] || error_exit "WORKTREE_IN_USE" "worktree is selected by '$current_link'; switch the live site first or use -f" 6
+    warn "Moving the worktree will break the live-site link '$current_link'"
+  fi
+
   # Check if old site is secured
   local was_secured=false
   if command -v herd >/dev/null 2>&1; then
@@ -680,6 +701,8 @@ cmd_move() {
   # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
   if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
     dim "  Updated APP_URL in .env"
+  elif (( $? != 1 )); then
+    error_exit "IO_ERROR" "could not update APP_URL in '$new_wt_path/.env'" 5
   fi
 
   # Everything reversible has succeeded — commit so the registered undo steps do
@@ -810,7 +833,7 @@ cmd_clone() {
   notify "grove clone" "Repository $repo cloned successfully"
 }
 
-# cmd_fresh — Refresh a worktree by running migrate:fresh, npm ci, and build
+# cmd_fresh — Refresh a worktree's dependencies and assets, preserving databases
 cmd_fresh() {
   local repo="${1:-}"; local branch="${2:-}"
 
@@ -847,29 +870,10 @@ cmd_fresh() {
   print -r -- "${C_BOLD}Refreshing ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
   print -r -- ""
 
-  # Run migrate:fresh --seed (with confirmation unless forced). Declining
-  # skips only the database step; npm ci and the build below still run.
+  # Laravel may select a different database through cached configuration,
+  # connection URLs or environment overrides. A sidecar cannot authorise a reset.
   if [[ -f "artisan" ]]; then
-    local run_migrate=true
-    if [[ "$FORCE" == false ]]; then
-      warn "This will DROP ALL TABLES in the database!"
-      print -n "${C_YELLOW}Continue with migrate:fresh? [y/N]${C_RESET} "
-      local response
-      read -r response
-      if [[ ! "$response" =~ ^[Yy]$ ]]; then
-        warn "Skipping migrate:fresh"
-        run_migrate=false
-      fi
-    fi
-
-    if [[ "$run_migrate" == true ]]; then
-      info "Running migrate:fresh --seed..."
-      if php artisan migrate:fresh --seed; then
-        ok "Database refreshed"
-      else
-        warn "migrate:fresh --seed failed"
-      fi
-    fi
+    dim "  Database preserved; fresh refreshes dependencies and assets only"
   fi
 
   # Run npm ci
@@ -878,14 +882,14 @@ cmd_fresh() {
     if npm ci; then
       ok "npm dependencies installed"
     else
-      warn "npm ci failed"
+      error_exit "COMMAND_FAILED" "npm ci failed" 5
     fi
 
     info "Running npm run build..."
     if npm run build; then
       ok "Assets built"
     else
-      warn "npm run build failed"
+      error_exit "COMMAND_FAILED" "npm run build failed" 5
     fi
   fi
 
@@ -905,7 +909,7 @@ cmd_fresh() {
 #
 # Args: $1 = git_dir, $2 = repo, $3 = new_container, $4 = wt_path, $5 = branch
 # Returns: 0 = migrated, 2 = skipped (already migrated / not old layout),
-#          1 = attempted but failed or destination exists (count as neither).
+#          1 = attempted but failed or destination exists.
 _restructure_migrate_one() {
   local git_dir="$1" repo="$2" new_container="$3" wt_path="$4" branch="$5"
   local folder="${wt_path:t}"
@@ -955,6 +959,9 @@ _restructure_migrate_one() {
     local new_url="https://${new_site_name}.test"
     if _update_env_app_url "$new_path/.env" "$new_url"; then
       dim "  Updated APP_URL in .env"
+    elif (( $? != 1 )); then
+      warn "  Could not update APP_URL in '$new_path/.env'"
+      return 1
     fi
   fi
 
@@ -989,7 +996,7 @@ cmd_restructure() {
   local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || error_exit "GIT_ERROR" "failed to list worktrees" 4
 
   local wt_path="" branch=""
-  local -i migrated=0 skipped=0
+  local -i migrated=0 skipped=0 failed=0
   local line="" migrate_rc=0
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
@@ -1000,6 +1007,7 @@ cmd_restructure() {
         case "$migrate_rc" in
           0) migrated+=1 ;;
           2) skipped+=1 ;;
+          *) failed+=1 ;;
         esac
       fi
       wt_path=""
@@ -1018,10 +1026,15 @@ cmd_restructure() {
     case "$migrate_rc" in
       0) migrated+=1 ;;
       2) skipped+=1 ;;
+      *) failed+=1 ;;
     esac
   fi
 
   print -r -- ""
+  if (( failed > 0 )); then
+    warn "Migration finished: $migrated migrated, $skipped skipped, $failed failed"
+    return 1
+  fi
   ok "Migration complete: ${C_GREEN}$migrated${C_RESET} migrated, ${C_DIM}$skipped${C_RESET} skipped"
   print -r -- ""
 }

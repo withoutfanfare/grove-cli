@@ -56,6 +56,56 @@ skip()    { echo "${C_DIM}--- ${C_RESET}$*"; SKIPPED=$((SKIPPED + 1)); }
 # Helpers
 # ============================================================================
 
+# Print the HERD_ROOT set in the first of the given config files that has one,
+# read as a literal key=value pair the way grove's parser does (never sourced).
+# shortcut: backslash-escaped quotes inside a quoted value are not unescaped;
+# switch to a full parser if such paths ever need supporting.
+config_herd_root() {
+  local f line key value root
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    root=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" == *=* ]] || continue
+      key="${line%%=*}"
+      key="${key//[[:space:]]/}"
+      [[ "$key" == HERD_ROOT ]] || continue
+      value="${line#*=}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      case "$value" in
+        \"*) value="${value:1}"; value="${value%%\"*}" ;;
+        \'*) value="${value:1}"; value="${value%%\'*}" ;;
+        *) [[ "$value" == *[[:space:]]#* ]] && value="${value%%[[:space:]]#*}" ;;
+      esac
+      value="${value%"${value##*[![:space:]]}"}"
+      value="${value//\$HOME/$HOME}"
+      [[ "$value" == \~ || "$value" == \~/* ]] && value="${HOME}${value#\~}"
+      root="$value"
+    done < "$f"
+    [[ -n "$root" ]] && { printf '%s\n' "$root"; return 0; }
+  done
+  return 1
+}
+
+# Environment HERD_ROOT wins, then ~/.groverc (or $GROVE_CONFIG), then ~/.wtrc.
+resolve_herd_root() {
+  if [[ -n "${HERD_ROOT:-}" ]]; then
+    printf '%s\n' "$HERD_ROOT"
+  else
+    config_herd_root "${GROVE_CONFIG:-$HOME/.groverc}" "$HOME/.wtrc" || printf '%s\n' "$HOME/Herd"
+  fi
+}
+
+# True when a bare repo still carries a legacy wt.base anywhere: the shared
+# config, or a worktree's own config.worktree.
+has_legacy_wt_base() {
+  local cfg
+  for cfg in "$1/config" "$1/config.worktree" "$1"/worktrees/*/config.worktree; do
+    [[ -f "$cfg" ]] && git config --file "$cfg" --get wt.base >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 timestamp() {
   date +%Y%m%d-%H%M%S
 }
@@ -252,7 +302,11 @@ migrate_wtrc() {
   rename_item "$HOME/.wtrc" "$HOME/.groverc" || return 1
 
   # Update variable names inside the new file (already backed up above)
-  replace_wt_vars_in_file "$HOME/.groverc" skip_backup
+  if [[ "$DRY_RUN" == true ]]; then
+    replace_wt_vars_in_file "$HOME/.wtrc" skip_backup
+  else
+    replace_wt_vars_in_file "$HOME/.groverc" skip_backup
+  fi
 }
 
 # Step 2: Migrate ~/.wt/ -> ~/.grove/
@@ -283,6 +337,10 @@ migrate_wt_dir() {
 # Step 3: Update template files in ~/.grove/templates/
 migrate_templates() {
   local templates_dir="$HOME/.grove/templates"
+  # A dry run never renames ~/.wt, so read the templates where they still are.
+  if [[ "$DRY_RUN" == true && -d "$HOME/.wt" && ! -d "$HOME/.grove" ]]; then
+    templates_dir="$HOME/.wt/templates"
+  fi
 
   info "Checking template files in ${templates_dir}..."
 
@@ -310,7 +368,8 @@ migrate_templates() {
 
 # Step 4: Scan for per-repo .wtconfig files
 migrate_repo_configs() {
-  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local herd_root
+  herd_root="$(resolve_herd_root)"
 
   info "Checking per-repo .wtconfig files in ${herd_root}..."
 
@@ -324,9 +383,15 @@ migrate_repo_configs() {
     if [[ -f "$herd_root/.groveconfig" ]]; then
       warn "Both .wtconfig and .groveconfig exist in $herd_root. Skipping to avoid data loss."
     else
-      backup_item "$herd_root/.wtconfig" || true
-      rename_item "$herd_root/.wtconfig" "$herd_root/.groveconfig" || true
-      replace_wt_vars_in_file "$herd_root/.groveconfig" skip_backup
+      # Never rename or rewrite an un-backed-up file.
+      if backup_item "$herd_root/.wtconfig" && \
+         rename_item "$herd_root/.wtconfig" "$herd_root/.groveconfig"; then
+        if [[ "$DRY_RUN" == true ]]; then
+          replace_wt_vars_in_file "$herd_root/.wtconfig" skip_backup
+        else
+          replace_wt_vars_in_file "$herd_root/.groveconfig" skip_backup
+        fi
+      fi
     fi
   fi
 
@@ -346,59 +411,70 @@ migrate_repo_configs() {
       info "Migrating .wtconfig for repository: ${C_BOLD}$repo_name${C_RESET}"
       backup_item "$git_dir/.wtconfig" || continue
       rename_item "$git_dir/.wtconfig" "$git_dir/.groveconfig" || continue
-      replace_wt_vars_in_file "$git_dir/.groveconfig" skip_backup
+      if [[ "$DRY_RUN" == true ]]; then
+        replace_wt_vars_in_file "$git_dir/.wtconfig" skip_backup
+      else
+        replace_wt_vars_in_file "$git_dir/.groveconfig" skip_backup
+      fi
     fi
   done
 }
 
-# Step 5: Update git config keys (wt.base -> grove.base)
+# Step 5: Move legacy wt.base into each worktree's grove-base sidecar
+#
+# grove keeps a worktree's base in its own administrative directory
+# (`git rev-parse --git-path grove-base`), never in shared config: on a bare
+# layout `git config --local` is the COMMON config, shared by every worktree.
+# So only a worktree's own config.worktree value is migrated; a wt.base in the
+# shared config cannot say which worktree it belongs to and is left in place.
 migrate_git_config() {
-  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local herd_root
+  herd_root="$(resolve_herd_root)"
 
-  info "Checking git config keys (wt.base -> grove.base)..."
+  info "Checking git config keys (wt.base -> per-worktree grove-base)..."
 
   if [[ ! -d "$herd_root" ]]; then
     skip "Herd root not found at $herd_root"
     return 0
   fi
 
+  local git_dir worktree_list line wt_path cfg old_base sidecar
   for git_dir in "$herd_root"/*.git; do
     [[ -d "$git_dir" ]] || continue
 
-    local repo_name="${git_dir##*/}"
-    repo_name="${repo_name%.git}"
-
-    # List all worktrees for this repo
-    local worktree_list
-    worktree_list="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null || true)"
-
-    if [[ -z "$worktree_list" ]]; then
-      continue
+    if old_base="$(git config --file "$git_dir/config" --get wt.base 2>/dev/null)"; then
+      warn "Shared wt.base ($old_base) in $git_dir is not tied to one worktree; left in place."
+      warn "Set each worktree's base with grove if it matters (it falls back to the default)."
     fi
 
-    # Extract worktree paths
-    local wt_path
+    worktree_list="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null || true)"
+
     while IFS= read -r line; do
-      if [[ "$line" == "worktree "* ]]; then
-        wt_path="${line#worktree }"
+      [[ "$line" == "worktree "* ]] || continue
+      wt_path="${line#worktree }"
+      [[ "$wt_path" -ef "$git_dir" ]] && continue
 
-        # Check if this worktree has wt.base configured
-        local old_base
-        old_base="$(git -C "$wt_path" config --local --get wt.base 2>/dev/null || true)"
+      cfg="$(git -C "$wt_path" rev-parse --path-format=absolute --git-path config.worktree 2>/dev/null)" || continue
+      old_base="$(git config --file "$cfg" --get wt.base 2>/dev/null)" || continue
+      [[ -n "$old_base" ]] || continue
 
-        if [[ -n "$old_base" ]]; then
-          if [[ "$DRY_RUN" == true ]]; then
-            dry "Would migrate git config wt.base -> grove.base in: $wt_path (value: $old_base)"
-            CHANGES_MADE=$((CHANGES_MADE + 1))
-          else
-            # Set the new key
-            git -C "$wt_path" config --local grove.base "$old_base" 2>/dev/null || true
-            # Remove the old key
-            git -C "$wt_path" config --local --unset wt.base 2>/dev/null || true
-            ok "Migrated git config wt.base -> grove.base in: ${C_DIM}$wt_path${C_RESET} (${old_base})"
-            CHANGES_MADE=$((CHANGES_MADE + 1))
-          fi
-        fi
+      if [[ "$DRY_RUN" == true ]]; then
+        dry "Would migrate wt.base -> grove-base in: $wt_path (value: $old_base)"
+        CHANGES_MADE=$((CHANGES_MADE + 1))
+        continue
+      fi
+
+      sidecar="$(git -C "$wt_path" rev-parse --path-format=absolute --git-path grove-base 2>/dev/null)" || sidecar=""
+      # Write-then-rename, then read back; wt.base goes only once it verifies.
+      if [[ -n "$sidecar" ]] && printf '%s\n' "$old_base" > "$sidecar.tmp.$$" 2>/dev/null \
+         && mv -f "$sidecar.tmp.$$" "$sidecar" 2>/dev/null \
+         && [[ -f "$sidecar" && "$(tr -d '[:space:]' < "$sidecar" 2>/dev/null)" == "$old_base" ]] \
+         && git config --file "$cfg" --unset wt.base 2>/dev/null; then
+        ok "Migrated wt.base -> grove-base in: ${C_DIM}$wt_path${C_RESET} (${old_base})"
+        CHANGES_MADE=$((CHANGES_MADE + 1))
+      else
+        rm -f "$sidecar.tmp.$$" 2>/dev/null || true
+        warn "Could not migrate wt.base for $wt_path; legacy value kept ($old_base)"
       fi
     done <<< "$worktree_list"
   done
@@ -637,7 +713,9 @@ main() {
   local has_wtrc=false
   local has_wt_dir=false
   local has_wtconfig=false
-  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local has_wt_base=false
+  local herd_root
+  herd_root="$(resolve_herd_root)"
 
   [[ -f "$HOME/.wtrc" ]] && has_wtrc=true
   [[ -d "$HOME/.wt" ]] && has_wt_dir=true
@@ -648,6 +726,7 @@ main() {
     for git_dir in "$herd_root"/*.git; do
       [[ -d "$git_dir" ]] || continue
       [[ -f "$git_dir/.wtconfig" ]] && has_wtconfig=true
+      has_legacy_wt_base "$git_dir" && has_wt_base=true
     done
   fi
 
@@ -660,7 +739,8 @@ main() {
 
   # If nothing to migrate, report and exit
   if [[ "$has_wtrc" == false ]] && [[ "$has_wt_dir" == false ]] && \
-     [[ "$has_wtconfig" == false ]] && [[ "${#shell_targets[@]}" -eq 0 ]]; then
+     [[ "$has_wtconfig" == false ]] && [[ "$has_wt_base" == false ]] && \
+     [[ "${#shell_targets[@]}" -eq 0 ]]; then
     # Check if already migrated
     if [[ -f "$HOME/.groverc" ]] || [[ -d "$HOME/.grove" ]]; then
       ok "Already using grove configuration. Nothing to migrate."
@@ -680,6 +760,7 @@ main() {
   [[ "$has_wtrc" == true ]]     && echo "  ${C_YELLOW}*${C_RESET} ~/.wtrc (global config)"
   [[ "$has_wt_dir" == true ]]   && echo "  ${C_YELLOW}*${C_RESET} ~/.wt/ (config directory with hooks, templates, etc.)"
   [[ "$has_wtconfig" == true ]] && echo "  ${C_YELLOW}*${C_RESET} Per-repo .wtconfig files"
+  [[ "$has_wt_base" == true ]]  && echo "  ${C_YELLOW}*${C_RESET} Legacy wt.base git config"
   [[ "${#shell_targets[@]}" -gt 0 ]] && echo "  ${C_YELLOW}*${C_RESET} Shell startup files with WT_ assignments (will be edited in place)"
   echo ""
 

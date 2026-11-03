@@ -187,8 +187,8 @@ _worktree_status_record() {
       *) changes+=1 ;;
     esac
   done
-  [[ "$ahead" == "$GROVE_UNKNOWN" || "$ahead" =~ ^[0-9]+$ ]] || ahead=0
-  [[ "$behind" == "$GROVE_UNKNOWN" || "$behind" =~ ^[0-9]+$ ]] || behind=0
+  [[ "$ahead" == "$GROVE_UNKNOWN" || "$ahead" =~ ^[0-9]+$ ]] || ahead="$GROVE_UNKNOWN"
+  [[ "$behind" == "$GROVE_UNKNOWN" || "$behind" =~ ^[0-9]+$ ]] || behind="$GROVE_UNKNOWN"
 
   local dirty=clean
   (( changes > 0 )) && dirty=dirty
@@ -199,8 +199,8 @@ _worktree_status_record() {
 
   local base_behind="$GROVE_UNKNOWN"
   if [[ -n "$base" ]]; then
-    base_behind="$(git -C "$wt_path" rev-list --count "HEAD..$base" 2>/dev/null)" || base_behind=0
-    [[ "$base_behind" =~ ^[0-9]+$ ]] || base_behind=0
+    base_behind="$(git -C "$wt_path" rev-list --count "HEAD..$base" 2>/dev/null)" || base_behind="$GROVE_UNKNOWN"
+    [[ "$base_behind" =~ ^[0-9]+$ ]] || base_behind="$GROVE_UNKNOWN"
   fi
 
   REPLY="$sha|$dirty|$ahead|$behind|$timestamp|$changes|$untracked|$base_behind"
@@ -449,13 +449,13 @@ get_ahead_behind() {
     return 0
   fi
 
-  local counts; counts="$(git -C "$wt_path" rev-list --left-right --count HEAD..."$base" 2>/dev/null)" || counts="0	0"
+  local counts; counts="$(git -C "$wt_path" rev-list --left-right --count HEAD..."$base" 2>/dev/null)" || counts="$GROVE_UNKNOWN"
   ahead="${counts%%	*}"
   behind="${counts##*	}"
 
   # Coerce to integers; malformed rev-list output falls back to 0
-  [[ "$ahead" =~ ^[0-9]+$ ]] || ahead=0
-  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
+  [[ "$ahead" =~ ^[0-9]+$ ]] || ahead="$GROVE_UNKNOWN"
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind="$GROVE_UNKNOWN"
 
   print -r -- "$ahead $behind"
 }
@@ -488,9 +488,8 @@ worktree_base_sidecar_path() {
 #
 # Resolution order:
 #   1. the per-worktree grove-base sidecar (authoritative);
-#   2. the legacy grove.base config, so worktrees created before the sidecar
-#      existed keep working (retained for at least one release);
-#   3. the supplied fallback, else DEFAULT_BASE.
+#   2. the supplied fallback, else DEFAULT_BASE. Legacy grove.base is shared
+#      between linked worktrees and cannot identify any one worktree's base.
 worktree_base_for() {
   local wt_path="$1"
   local fallback="${2:-$DEFAULT_BASE}"
@@ -503,7 +502,6 @@ worktree_base_for() {
     base="$(tr -d '[:space:]' < "$sidecar" 2>/dev/null || true)"
   fi
 
-  [[ -n "$base" ]] || base="$(git -C "$wt_path" config --local --get grove.base 2>/dev/null || true)"
   [[ -n "$base" ]] || base="$fallback"
 
   print -r -- "$base"
@@ -511,12 +509,8 @@ worktree_base_for() {
 
 # set_worktree_base — Save a worktree's base ref in its own sidecar
 #
-# Writes the per-worktree sidecar (authoritative) and, for one release, the
-# legacy grove.base config as well. The legacy write is deliberate: an older
-# grove binary that only knows about grove.base would otherwise fall back to
-# DEFAULT_BASE, which is a quieter and more misleading failure than reading a
-# stale value. Readers always prefer the sidecar, so the two cannot disagree in
-# this version.
+# Writes only the per-worktree sidecar. The common repository config cannot
+# safely carry a worktree-specific value, even for older binaries.
 set_worktree_base() {
   local wt_path="$1"
   local base="$2"
@@ -539,11 +533,6 @@ set_worktree_base() {
     fi
   fi
 
-  # Legacy compatibility. Non-fatal: the sidecar above is what this version
-  # reads, so a failure here only affects an older grove.
-  if ! git -C "$wt_path" config --local grove.base "$base" 2>/dev/null; then
-    dim "  Could not update the legacy grove.base config for $wt_path"
-  fi
   return 0
 }
 
@@ -651,8 +640,11 @@ is_branch_merged() {
   # Check if the base branch contains this commit
   if git -C "$wt_path" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
     return 0
+  else
+    local result=$?
+    (( result == 1 )) && return 1
+    return 2
   fi
-  return 1
 }
 
 # get_last_accessed_iso — Return filesystem mtime as ISO 8601 timestamp
@@ -702,10 +694,10 @@ get_commits_behind() {
     return 0
   fi
 
-  behind="$(git -C "$wt_path" rev-list --count HEAD.."$base" 2>/dev/null)" || behind=0
+  behind="$(git -C "$wt_path" rev-list --count HEAD.."$base" 2>/dev/null)" || behind="$GROVE_UNKNOWN"
 
   # Coerce to integer before arithmetic/JSON use
-  [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
+  [[ "$behind" =~ ^[0-9]+$ ]] || behind="$GROVE_UNKNOWN"
 
   print -r -- "$behind"
 }
@@ -717,10 +709,9 @@ is_branch_stale() {
 
   behind="$(get_commits_behind "$wt_path" "$base")"
 
-  # Unresolvable base ("?") means staleness is unknown — report not-stale rather
-  # than feeding the sentinel into arithmetic.
+  # Failed comparisons remain unknown rather than becoming a healthy result.
   if [[ ! "$behind" =~ ^[0-9]+$ ]]; then
-    print -r -- "false"
+    print -r -- "null"
     return 0
   fi
 

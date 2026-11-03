@@ -571,15 +571,13 @@ install_hooks_overwrite() {
   # Check if there are files to backup
   if [[ -n "$(find "$hooks_dir" -type f ! -name "README*" 2>/dev/null)" ]]; then
     has_existing=true
-    mkdir -p "$backup_dir"
 
-    # Copy existing structure to backup
-    find "$hooks_dir" -type f ! -name "README*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
-      local rel_path="${file#"$hooks_dir"/}"
-      local backup_file="$backup_dir/$rel_path"
-      mkdir -p "$(dirname "$backup_file")"
-      cp "$file" "$backup_file"
-    done
+    # Copy the whole tree in one checked step; deleting anything after a
+    # partial backup would lose hooks for good.
+    if [[ -e "$backup_dir" ]] || ! cp -Rp "$hooks_dir" "$backup_dir"; then
+      echo -e "  ${RED}✗${NC} Could not back up existing hooks to $backup_dir; left them unchanged" >&2
+      return 1
+    fi
 
     echo -e "  ${YELLOW}!${NC} Backed up existing hooks to:"
     echo -e "    ${DIM}$backup_dir${NC}"

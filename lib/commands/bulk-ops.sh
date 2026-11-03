@@ -143,8 +143,10 @@ cmd_exec_all() {
     local cmd=("$@")
     (( ${#cmd[@]} > 0 )) || error_exit "INVALID_INPUT" "Usage: grove exec-all --all-repos <command...>" 2
 
-    local cmd_str="${cmd[*]}"
-    _check_dangerous_command "$cmd_str"
+    _check_dangerous_command "${cmd[*]}"
+    local cmd_str="${(j: :)${(@qq)cmd}}"
+    # Keep the documented single shell-string form; separate argv stay literal.
+    (( ${#cmd[@]} == 1 )) && cmd_str="$cmd[1]"
 
     info "Executing '$cmd_str' across all repositories..."
     print -r -- ""
@@ -180,8 +182,9 @@ cmd_exec_all() {
       error_exit "INVALID_INPUT" "group not found: '@$group_name' (see: grove group list)" 2
     fi
 
-    local cmd_str="${cmd[*]}"
-    _check_dangerous_command "$cmd_str"
+    _check_dangerous_command "${cmd[*]}"
+    local cmd_str="${(j: :)${(@qq)cmd}}"
+    (( ${#cmd[@]} == 1 )) && cmd_str="$cmd[1]"
 
     info "Executing '$cmd_str' across group @$group_name..."
     print -r -- ""
@@ -209,8 +212,9 @@ cmd_exec_all() {
 
   validate_name "$repo" "repository"
 
-  local cmd_str="${cmd[*]}"
-  _check_dangerous_command "$cmd_str"
+  _check_dangerous_command "${cmd[*]}"
+  local cmd_str="${(j: :)${(@qq)cmd}}"
+  (( ${#cmd[@]} == 1 )) && cmd_str="$cmd[1]"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"

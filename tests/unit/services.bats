@@ -587,3 +587,106 @@ EOF
   [[ "$output" == *"solo=RUNNING"* ]]
   [[ "$output" == *"missing=[]"* ]]
 }
+
+@test "service operations propagate failures and all-app dispatch completes the rest" {
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh"
+    info() { :; }; ok() { :; }; warn() { :; }
+    brew() { print "supervisor started"; }
+    supervisorctl() { return 1; }
+    launchctl() { return 1; }
+    GROVE_LAUNCH_AGENTS="$TEST_TMPDIR"
+    touch "$TEST_TMPDIR/com.alpha.scheduler.plist"
+    SVC_APPS=(alpha horizon beta horizon)
+    SVC_SERVICES=(alpha horizon beta horizon)
+    for op in start stop restart; do
+      svc_${op}_app alpha && exit 10
+      eval "svc_${op}_app() { print \"\$1\" >> \"$TEST_TMPDIR/calls\"; [[ \"\$1\" == beta ]]; }"
+      cmd_services_${op} all && exit 11
+      [[ "$(tr "\n" " " < "$TEST_TMPDIR/calls")" == "alpha beta " ]] || exit 12
+      rm "$TEST_TMPDIR/calls"
+    done
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "switch preserves link when stopping fails" {
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh"
+    info() { :; }; ok() { :; }; warn() { :; }
+    svc_validate_app() { :; }; validate_name() { :; }
+    svc_stop_app() { return 1; }; svc_start_app() { touch "$TEST_TMPDIR/started"; }
+    mkdir -p "$HERD_ROOT/app-worktrees/new"
+    ln -s old "$HERD_ROOT/app-current"
+    cmd_services_switch app new && exit 10
+    [[ "$(readlink "$HERD_ROOT/app-current")" == old && ! -e "$TEST_TMPDIR/started" ]]
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "remove ignores predictable tempfile symlink and preserves registry on replacement failure" {
+  printf 'app|app|none||app.test\nother|other|none||other.test\n' > "$TEST_TMPDIR/apps.conf"
+  cp "$TEST_TMPDIR/apps.conf" "$TEST_TMPDIR/original"
+  echo sentinel > "$TEST_TMPDIR/sentinel"
+  ln -s "$TEST_TMPDIR/sentinel" "$TEST_TMPDIR/apps.conf.tmp"
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh"
+    svc_validate_app() { :; }; ok() { :; }; dim() { :; }; warn() { :; }
+    mv() { return 1; }
+    cmd_services_remove app
+  '
+  [ "$status" -ne 0 ]
+  cmp "$TEST_TMPDIR/apps.conf" "$TEST_TMPDIR/original"
+  [ "$(cat "$TEST_TMPDIR/sentinel")" = sentinel ]
+  [ "$(find "$TEST_TMPDIR" -name 'apps.conf.tmp.*' | wc -l | tr -d ' ')" = 0 ]
+}
+
+@test "doctor counts stopped missing processes and unloaded schedulers" {
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh"
+    info() { :; }; ok() { print "$*"; }; warn() { print "$*"; }; dim() { :; }
+    brew() { print "supervisor started"; }; php() { print PHP; }
+    redis-cli() { return 0; }
+    supervisorctl() { print "alpha-horizon STOPPED"; }; launchctl() { :; }
+    GROVE_SUPERVISOR_D="$TEST_TMPDIR"
+    GROVE_LAUNCH_AGENTS="$TEST_TMPDIR"
+    SVC_APPS=(alpha horizon beta horizon)
+    SVC_SERVICES=(alpha horizon beta horizon)
+    ln -s "$TEST_TMPDIR" "$HERD_ROOT/alpha-current"
+    ln -s "$TEST_TMPDIR" "$HERD_ROOT/beta-current"
+    touch "$TEST_TMPDIR/com.alpha.scheduler.plist"
+    cmd_services_doctor
+  '
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Found 3 issue(s)"* ]]
+  [[ "$output" != *"All checks passed"* ]]
+}
+
+@test "scheduler failure is returned even when supervisor succeeds" {
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh"
+    info() { :; }; ok() { :; }; warn() { :; }
+    supervisorctl() { return 0; }; launchctl() { return 1; }
+    GROVE_LAUNCH_AGENTS="$TEST_TMPDIR"
+    touch "$TEST_TMPDIR/com.app.scheduler.plist"
+    SVC_SERVICES=(app horizon)
+    svc_start_app app && exit 10
+    svc_stop_app app && exit 11
+    exit 0
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "remove preserves original and cleans private tempfile when rendering fails" {
+  echo "app|app|none||app.test" > "$TEST_TMPDIR/apps.conf"
+  cp "$TEST_TMPDIR/apps.conf" "$TEST_TMPDIR/original"
+  run zsh -c '
+    source "$PROJECT_ROOT/lib/commands/services.sh"
+    svc_validate_app() { :; }; warn() { :; }; ok() { :; }; dim() { :; }
+    awk() { print partial; return 1; }
+    cmd_services_remove app
+  '
+  [ "$status" -ne 0 ]
+  cmp "$TEST_TMPDIR/apps.conf" "$TEST_TMPDIR/original"
+  [ "$(find "$TEST_TMPDIR" -name 'apps.conf.tmp.*' | wc -l | tr -d ' ')" = 0 ]
+}

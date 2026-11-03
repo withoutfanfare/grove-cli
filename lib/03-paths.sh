@@ -1,6 +1,18 @@
 #!/usr/bin/env zsh
 # 03-paths.sh - Path resolution, worktree detection, URL generation
 
+# Return the live-site link selecting this worktree, if any (including relative links).
+worktree_current_link_for() {
+  local wt_path="$1" site_link
+  for site_link in "$HERD_ROOT"/*-current(N@); do
+    if [[ "${site_link:A}" == "${wt_path:A}" ]]; then
+      print -r -- "$site_link"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # slugify_string — Shared slug transform (sets REPLY)
 #
 # Lowercase, replace every run of non-[a-z0-9] with a single dash, then trim

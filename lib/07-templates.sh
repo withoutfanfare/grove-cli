@@ -145,38 +145,23 @@ load_template() {
     die "$error_msg"
   fi
 
-  # Parse template file (only allow GROVE_SKIP_* and TEMPLATE_DESC)
-  while IFS='=' read -r key value || [[ -n "$key" ]]; do
-    # Skip comments and empty lines
-    [[ "$key" =~ ^[[:space:]]*# ]] && continue
-    [[ -z "$key" || "$key" =~ ^[[:space:]]*$ ]] && continue
-
-    # Trim whitespace from key
-    key="${key#"${key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-
-    # Remove quotes and trailing comments from value
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    value="${value%%#*}"
-    value="${value%"${value##*[![:space:]]}"}"
-
-    # Only allow GROVE_SKIP_* variables with true/false values (security)
+  # Parse with the shared literal parser (never sourced; quotes and trailing
+  # comments handled there). Only GROVE_SKIP_* true/false is applied (security).
+  _apply_template_pair() {
+    local key="$1" value="$2"
     case "$key" in
       GROVE_SKIP_*)
         # Security: Only allow true/false values to prevent command injection
         if [[ "$value" != "true" && "$value" != "false" ]]; then
           warn "Invalid value for $key: '$value' (must be true or false) - skipping"
-          continue
+          return 0
         fi
         export "$key"="$value"
         ;;
-      TEMPLATE_DESC) ;; # Ignore, used for display only
-      *) ;; # Ignore other variables (security)
+      *) ;; # Ignore other variables, including TEMPLATE_DESC (security)
     esac
-  done < "$template_file"
+  }
+  _read_config_pairs "$template_file" _apply_template_pair
 
   dim "  Applied template: $template_name"
 }

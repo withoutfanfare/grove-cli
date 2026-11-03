@@ -47,6 +47,10 @@ Configuration is loaded in order, with later sources overriding earlier ones:
 3. **Project config** (`$HERD_ROOT/.groveconfig`) — settings for all repos in your Herd folder.
 4. **Repo-specific config** (`<bare-repo>/.groveconfig`) — overrides for a single repository.
 
+An exported `HERD_ROOT` takes precedence over config files, including when
+selecting the project config. Shell completion and the migration script use
+the same environment-first rule for this path.
+
 The repo-specific config is the `.groveconfig` file inside that repository's *bare* git directory (e.g. `~/Herd/example-app.git/.groveconfig`). It is consulted only when grove resolves a specific repository for a command, and **only four keys can be overridden there** (see [Repo-specific config](#repo-specific-config-bare-repogroveconfig)). Before applying each repo's overrides, grove resets those four keys to the global baseline, so a per-repo override never leaks into the next repo during multi-repo loops (e.g. `grove recent`, `grove dashboard`).
 
 ## Config-file keys vs environment variables

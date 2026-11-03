@@ -164,7 +164,7 @@ load_config() {
   _apply_global_config() {
     local key="$1" value="$2"
     case "$key" in
-      HERD_ROOT) HERD_ROOT="$value" ;;
+      HERD_ROOT) [[ -n "${_GROVE_ENV_HERD_ROOT:-}" ]] || HERD_ROOT="$value" ;;
       HERD_CONFIG) HERD_CONFIG="$value" ;;
       DEFAULT_BASE) DEFAULT_BASE="$value" ;;
       DEFAULT_EDITOR) DEFAULT_EDITOR="$value" ;;

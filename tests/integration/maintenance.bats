@@ -337,3 +337,90 @@ cmd_unlock myrepo 2>&1"
   [[ "$output" != *"Removed lock"* ]]
   [[ "$output" == *"No lock files removed"* ]]
 }
+
+# ============================================================================
+# Review regressions (fix/respect-herd-skip)
+# ============================================================================
+
+@test "cmd_cleanup_herd: an old-style -- config for a live parked worktree is kept" {
+  # A stub herd on PATH: cleanup must never reach the real Herd.
+  local stub_bin="$TEST_TEMP_DIR/stub-bin"
+  mkdir -p "$stub_bin"
+  printf '#!/bin/sh\nexit 0\n' > "$stub_bin/herd"; chmod +x "$stub_bin/herd"
+
+  local herd_cfg="$TEST_TEMP_DIR/herd-config"
+  mkdir -p "$herd_cfg/valet/Nginx" "$herd_cfg/valet/Certificates" "$herd_cfg/valet/Sites"
+  # Live worktree served by a parked *-worktrees directory, no Sites symlink.
+  mkdir -p "$HERD_ROOT/myapp-worktrees/myapp--feature-live"
+  : > "$herd_cfg/valet/Nginx/myapp--feature-live.test"
+  : > "$herd_cfg/valet/Certificates/myapp--feature-live.test.crt"
+  # A genuinely orphaned old-style config is still cleaned.
+  : > "$herd_cfg/valet/Nginx/myapp--gone.test"
+
+  run_zsh "export PATH=\"$stub_bin:\$PATH\" HERD_CONFIG='$herd_cfg' FORCE=true; cmd_cleanup_herd"
+  [ "$status" -eq 0 ]
+  [ -f "$herd_cfg/valet/Nginx/myapp--feature-live.test" ]
+  [ -f "$herd_cfg/valet/Certificates/myapp--feature-live.test.crt" ]
+  [ ! -f "$herd_cfg/valet/Nginx/myapp--gone.test" ]
+}
+
+@test "cmd_repair: a valid RELATIVE gitdir reference is not reported broken" {
+  setup_repair_repo
+  local gd="$HERD_ROOT/myrepo.git"
+  local admin; admin="$(cd "$gd/worktrees/wt-feature" && pwd -P)"
+  local wt; wt="$(cd "$TEST_TEMP_DIR/wt-feature" && pwd -P)"
+  # Relative to the worktree, as git writes with worktree.useRelativePaths.
+  local rel; rel="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$admin" "$wt")"
+  printf 'gitdir: %s\n' "$rel" > "$wt/.git"
+  git -C "$wt" rev-parse --git-dir >/dev/null   # git itself accepts it
+
+  # Run from / so a cwd-relative resolution cannot accidentally succeed.
+  run_repair_zsh "cd /; JSON_OUTPUT=true cmd_repair myrepo 2>/dev/null"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['success'] is True, d
+assert d['issues_found'] == 0, d
+"
+}
+
+@test "cmd_repair: a failing prune is an unresolved issue, not a fix" {
+  setup_repair_repo
+  local stub='git() { if [[ "$*" == *"worktree prune"* ]]; then print -r -- "fatal: prune exploded" >&2; return 128; fi; command git "$@"; }'
+
+  run_repair_zsh "$stub
+JSON_OUTPUT=true cmd_repair myrepo 2>/dev/null"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['success'] is False, d
+assert d['issues_found'] == 1, d
+assert d['issues_fixed'] == 0, d
+assert 'prune' in d['message'].lower(), d
+"
+
+  run_repair_zsh "$stub
+cmd_repair myrepo 2>&1"
+  [[ "$output" != *"Pruned:"* ]]
+  [[ "$output" == *"prune exploded"* ]]
+  [[ "$output" != *"Fixed"* ]]
+}
+
+@test "cmd_upgrade: a failed rebuild exits non-zero and does not claim the upgrade completed" {
+  setup_grove_repo
+  # A local commit adding a failing build script; origin is still ahead, so
+  # the rebase replays it on top and the rebuild then fails.
+  printf '#!/bin/sh\necho "build broke" >&2\nexit 1\n' > "$REPO_DIR/build.sh"
+  chmod +x "$REPO_DIR/build.sh"
+  git -C "$REPO_DIR" add build.sh
+  git -C "$REPO_DIR" commit -q -m 'add build'
+
+  run_zsh "export PATH=\"$BIN_DIR:$PATH\"; cmd_upgrade"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"Upgraded:"* ]]
+  [[ "$output" == *"source"*"updated"* ]]
+  [[ "$output" == *"stale"* ]]
+  [[ "$output" == *"build broke"* ]]
+}
