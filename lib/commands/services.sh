@@ -765,24 +765,45 @@ cmd_services_switch() {
 
   info "Switching ${(C)app} to $worktree..."
 
+  # Remember the current selection so a failed switch can put it back.
+  local previous=""
+  [[ -L "$symlink" ]] && previous="$(readlink "$symlink")"
+
   svc_stop_app "$app" || return 1
 
-  ln -sfn "$worktree_path" "$symlink" || return 1
-  ok "Updated ${system_name}-current -> $worktree"
+  local failed=false
+  if ln -sfn "$worktree_path" "$symlink"; then
+    ok "Updated ${system_name}-current -> $worktree"
+  else
+    failed=true
+  fi
 
   # Clear the config cache so the app doesn't serve paths cached from the
   # previous worktree (Laravel apps only; skip silently otherwise).
-  if [[ -f "$worktree_path/artisan" ]] && command -v php &> /dev/null; then
-    (cd "$worktree_path" && php artisan config:clear) > /dev/null 2>&1 || {
+  if [[ "$failed" == false && -f "$worktree_path/artisan" ]] && command -v php &> /dev/null; then
+    if (cd "$worktree_path" && php artisan config:clear) > /dev/null 2>&1; then
+      ok "Config cache cleared"
+    else
       warn "Could not clear config cache"
-      return 1
-    }
-    ok "Config cache cleared"
+      failed=true
+    fi
   fi
 
-  svc_start_app "$app" || return 1
+  if [[ "$failed" == false ]] && svc_start_app "$app"; then
+    ok "Switched ${(C)app} to $worktree"
+    return 0
+  fi
 
-  ok "Switched ${(C)app} to $worktree"
+  # Never leave the app half-switched with its services down.
+  warn "Switch failed; restoring the previous selection"
+  if [[ -n "$previous" ]]; then
+    ln -sfn "$previous" "$symlink" || warn "Could not restore ${system_name}-current -> $previous"
+  else
+    rm -f "$symlink"
+  fi
+  svc_stop_app "$app" > /dev/null 2>&1 || true   # undo a partial start
+  svc_start_app "$app" || true
+  return 1
 }
 
 cmd_services_horizon() {

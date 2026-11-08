@@ -121,6 +121,29 @@ _bare_repo() {
   [ "$(git config --file "$admin/config.worktree" --get wt.base)" = "origin/develop" ]
 }
 
+@test "migration: existing grove-base sidecar is never overwritten by wt.base" {
+  _bare_repo "$HERD_ROOT"
+  local admin="$HERD_ROOT/app.git/worktrees/app-wt"
+  git config --file "$admin/config.worktree" wt.base origin/develop
+  echo origin/release > "$admin/grove-base"
+  _migrate
+  [ "$status" -eq 0 ]
+  [ "$(cat "$admin/grove-base")" = "origin/release" ]
+  [ "$(git config --file "$admin/config.worktree" --get wt.base)" = "origin/develop" ]
+  [[ "$output" == *"differ"* ]]
+}
+
+@test "migration: matching grove-base sidecar just drops the duplicate wt.base" {
+  _bare_repo "$HERD_ROOT"
+  local admin="$HERD_ROOT/app.git/worktrees/app-wt"
+  git config --file "$admin/config.worktree" wt.base origin/develop
+  echo origin/develop > "$admin/grove-base"
+  _migrate
+  [ "$status" -eq 0 ]
+  [ "$(cat "$admin/grove-base")" = "origin/develop" ]
+  ! git config --file "$admin/config.worktree" --get wt.base
+}
+
 # --- dry-run template discovery (finding 7) ---------------------------------
 
 @test "migration: dry run reports unmigrated ~/.wt templates" {

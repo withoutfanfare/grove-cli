@@ -690,3 +690,28 @@ EOF
   cmp "$TEST_TMPDIR/apps.conf" "$TEST_TMPDIR/original"
   [ "$(find "$TEST_TMPDIR" -name 'apps.conf.tmp.*' | wc -l | tr -d ' ')" = 0 ]
 }
+
+@test "services switch restores the previous selection when the config clear fails" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF2'
+myapp|myapp|none||myapp.test
+EOF2
+  mkdir -p "$HERD_ROOT/myapp-worktrees/feature-login" "$HERD_ROOT/myapp-worktrees/main"
+  touch "$HERD_ROOT/myapp-worktrees/feature-login/artisan"
+  ln -s "$HERD_ROOT/myapp-worktrees/main" "$HERD_ROOT/myapp-current"
+  export GROVE_LAUNCH_AGENTS="$TEST_TMPDIR/agents"
+  mkdir -p "$GROVE_LAUNCH_AGENTS" "$TEST_TMPDIR/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_TMPDIR/bin/php"
+  chmod +x "$TEST_TMPDIR/bin/php"
+
+  run env PATH="$TEST_TMPDIR/bin:$PATH" zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    cmd_services_switch myapp feature-login
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"restoring the previous selection"* ]]
+  [ "$(readlink "$HERD_ROOT/myapp-current")" = "$HERD_ROOT/myapp-worktrees/main" ]
+}

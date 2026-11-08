@@ -438,7 +438,7 @@ migrate_git_config() {
     return 0
   fi
 
-  local git_dir worktree_list line wt_path cfg old_base sidecar
+  local git_dir worktree_list line wt_path cfg old_base sidecar existing
   for git_dir in "$herd_root"/*.git; do
     [[ -d "$git_dir" ]] || continue
 
@@ -465,6 +465,18 @@ migrate_git_config() {
       fi
 
       sidecar="$(git -C "$wt_path" rev-parse --path-format=absolute --git-path grove-base 2>/dev/null)" || sidecar=""
+      # A sidecar already set by grove is newer than wt.base: never overwrite it.
+      existing=""
+      [[ -n "$sidecar" && -f "$sidecar" ]] && existing="$(tr -d '[:space:]' < "$sidecar" 2>/dev/null)"
+      if [[ -n "$existing" ]]; then
+        if [[ "$existing" == "$old_base" ]] && git config --file "$cfg" --unset wt.base 2>/dev/null; then
+          ok "Removed duplicate wt.base in: ${C_DIM}$wt_path${C_RESET} (grove-base already ${existing})"
+          CHANGES_MADE=$((CHANGES_MADE + 1))
+        else
+          warn "wt.base ($old_base) and grove-base ($existing) differ for $wt_path; both left in place"
+        fi
+        continue
+      fi
       # Write-then-rename, then read back; wt.base goes only once it verifies.
       if [[ -n "$sidecar" ]] && printf '%s\n' "$old_base" > "$sidecar.tmp.$$" 2>/dev/null \
          && mv -f "$sidecar.tmp.$$" "$sidecar" 2>/dev/null \

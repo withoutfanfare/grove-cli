@@ -56,8 +56,14 @@ echo -e "${BLUE}  Uninstalling ${GREEN}grove${NC}"
 echo -e "${BLUE}=======================================${NC}"
 echo ""
 
-# Identify grove's 'wt' links while grove still resolves
+# Identify grove's 'wt' links in every directory while grove still resolves:
+# an alternative grove may be a symlink to the one removed first.
+ALT_DIRS=("$HOME/bin" "$HOME/.local/bin")
 WT_LINK_INSTALL="$(grove_wt_link "$INSTALL_DIR")"
+WT_LINK_ALT=()
+for alt_dir in "${ALT_DIRS[@]}"; do
+  WT_LINK_ALT+=("$(grove_wt_link "$alt_dir")")
+done
 
 # Remove main script (file or symlink)
 if [[ -e "$INSTALL_DIR/grove" || -L "$INSTALL_DIR/grove" ]]; then
@@ -87,13 +93,13 @@ else
 fi
 
 # Also check common alternative locations
-for alt_dir in "$HOME/bin" "$HOME/.local/bin"; do
-  alt_wt_link="$(grove_wt_link "$alt_dir")"
+for i in "${!ALT_DIRS[@]}"; do
+  alt_dir="${ALT_DIRS[$i]}"
   if [[ -e "$alt_dir/grove" || -L "$alt_dir/grove" ]]; then
     rm -f "$alt_dir/grove"
     echo -e "  ${GREEN}✓${NC} Removed $alt_dir/grove"
   fi
-  remove_wt_symlink "$alt_wt_link"
+  remove_wt_symlink "${WT_LINK_ALT[$i]}"
 done
 
 for alt_comp in "$HOME/.zsh/completions/_grove" "/opt/homebrew/share/zsh/site-functions/_grove" "/usr/local/share/zsh/site-functions/_grove"; do
