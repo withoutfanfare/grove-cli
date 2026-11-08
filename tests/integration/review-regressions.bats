@@ -295,6 +295,14 @@ NPM
   [ ! -e "$HERD_ROOT/hook-events" ]
 }
 
+@test "removal-check: an unknown database only blocks when a drop is requested" {
+  add_worktree feature/legacy old-alias
+  grove_run removal-check demo feature/legacy --json
+  [[ "$output" == *'"verdict":"clear"'* ]]
+  grove_run removal-check demo feature/legacy --drop-db --json
+  [[ "$output" != *'"verdict":"clear"'* ]]
+}
+
 # A forced removal must not depend on the database: it removes the worktree but
 # never backs up or drops a database it cannot identify.
 record_db_flags() {
