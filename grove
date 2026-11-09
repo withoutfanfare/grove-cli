@@ -5363,7 +5363,8 @@ cmd_rm() {
   # Hooks may create work or allow a new agent session to start. A previous
   # verdict (including an interactive override) cannot approve a new loss.
   if ! removal_gate "$wt_path"; then
-    [[ -n "$accepted_removal_verdict" && "$REPLY" == "$accepted_removal_verdict" ]] ||
+    # A live lease's "last seen HH:MM" ticks on by itself; that is not a new loss.
+    [[ -n "$accepted_removal_verdict" && "${REPLY//last seen [0-9][0-9]:[0-9][0-9]/}" == "${accepted_removal_verdict//last seen [0-9][0-9]:[0-9][0-9]/}" ]] ||
       error_exit "REMOVAL_BLOCKED" "$REPLY" 6
   fi
 
