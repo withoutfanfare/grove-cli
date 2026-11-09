@@ -378,10 +378,18 @@ add_protected_worktree() {
   [ ! -e "$HERD_ROOT/hook-events" ]
 }
 
-@test "rm --allow-protected still refuses an unknown database identity" {
+@test "rm: an unknown database does not block a removal that keeps the database" {
+  add_worktree feature/legacy old-alias
+  record_db_flags
+  grove_run rm demo feature/legacy --json
+  [ "$status" -eq 0 ]
+  [ ! -d "$HERD_ROOT/demo-worktrees/old-alias" ]
+}
+
+@test "rm --allow-protected still refuses to drop an unknown database" {
   add_worktree staging old-staging
   record_hooks
-  grove_run rm demo staging --allow-protected --json
+  grove_run rm demo staging --allow-protected --drop-db --json
   assert_json_error
   [[ "$output" == *DATABASE_UNKNOWN* ]]
   [ -d "$HERD_ROOT/demo-worktrees/old-staging" ]
