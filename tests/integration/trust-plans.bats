@@ -145,3 +145,53 @@ PY
   [ "$status" -eq 0 ]
   [[ "$output" == *'Completed result retained; timed-out outcome unknown'* ]]
 }
+
+@test "prune plan never targets the branch a bare repository's HEAD points at" {
+  git init -qb develop "$TEST_TEMP_DIR/source"
+  git -C "$TEST_TEMP_DIR/source" commit -qm initial --allow-empty
+  git -C "$TEST_TEMP_DIR/source" branch release
+  git -C "$TEST_TEMP_DIR/source" branch merged
+  git clone --bare -q "$TEST_TEMP_DIR/source" "$TEST_TEMP_DIR/bare.git"
+  run python3 "$GROVE_ROOT/tools/prune-plan.py" plan fixture "$TEST_TEMP_DIR/bare.git" release main
+  [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c '
+import json,os
+plan = json.loads(os.environ["OUTPUT"])["data"]
+assert [t["name"] for t in plan["targets"]] == ["merged"], plan'
+}
+
+@test "a failed occupancy recheck keeps earlier prune results" {
+  git init -qb main "$TEST_TEMP_DIR/repo"
+  git -C "$TEST_TEMP_DIR/repo" commit -qm initial --allow-empty
+  git -C "$TEST_TEMP_DIR/repo" branch a
+  git -C "$TEST_TEMP_DIR/repo" branch b
+  run python3 - "$GROVE_ROOT/tools/prune-plan.py" "$TEST_TEMP_DIR" <<'PY'
+import importlib.util,json,sys
+spec = importlib.util.spec_from_file_location("prune_plan", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root = sys.argv[2] + "/repo/.git"
+plan = m.plan("fixture", root, "main", ["main"])
+json.dump(plan, open(sys.argv[2] + "/plan.json", "w"))
+real, calls = m.checked_out, []
+def flaky(r):
+    calls.append(r)
+    if len(calls) == 3: raise RuntimeError("worktree listing failed")
+    return real(r)
+m.checked_out = flaky
+result = m.execute("fixture", root, "main", ["main"], sys.argv[2] + "/plan.json")
+assert [(b["name"], b["status"]) for b in result["branches"]] == [("a", "deleted"), ("b", "refused")], result
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "a malformed or missing prune plan returns the JSON error envelope" {
+  git init -qb main "$TEST_TEMP_DIR/repo"
+  git -C "$TEST_TEMP_DIR/repo" commit -qm initial --allow-empty
+  printf '[]' > "$TEST_TEMP_DIR/bad.json"
+  run python3 "$GROVE_ROOT/tools/prune-plan.py" execute fixture "$TEST_TEMP_DIR/repo/.git" main main "$TEST_TEMP_DIR/bad.json"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *PLAN_UNAVAILABLE* ]]
+  run python3 "$GROVE_ROOT/tools/prune-plan.py" execute fixture "$TEST_TEMP_DIR/repo/.git" main main
+  [ "$status" -eq 2 ]
+  [[ "$output" == *PLAN_UNAVAILABLE* ]]
+}

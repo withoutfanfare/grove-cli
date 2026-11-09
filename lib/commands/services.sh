@@ -769,7 +769,8 @@ cmd_services_switch() {
   local previous=""
   [[ -L "$symlink" ]] && previous="$(readlink "$symlink")"
 
-  svc_stop_app "$app" || return 1
+  # A partial stop may have taken down one service; bring back what it can.
+  svc_stop_app "$app" || { warn "Could not stop ${(C)app}; restarting its services"; svc_start_app "$app" || true; return 1; }
 
   local failed=false
   if ln -sfn "$worktree_path" "$symlink"; then

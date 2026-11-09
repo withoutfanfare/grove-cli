@@ -127,8 +127,10 @@ worktree_database_is_private() {
   for entry in "${siblings[@]}"; do
     other_path="${entry%%|*}"
     [[ "${other_path:A}" != "${wt_path:A}" ]] || continue
+    [[ -d "$other_path" ]] || continue   # a stale registration selects nothing
     other_db="$(_read_config_pairs "$other_path/.env" _database_env_pair)" || return 1
     sidecar="$(worktree_database_file "$other_path")" || return 1
+    [[ ! -e "$sidecar" || -r "$sidecar" ]] || return 1
     if [[ "$other_db" == "$db_name" ]] || [[ -f "$sidecar" && "$(<"$sidecar")" == "$db_name" ]]; then
       REPLY="database '$db_name' is also selected by worktree '$other_path'"
       return 1

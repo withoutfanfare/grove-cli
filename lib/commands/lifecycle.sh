@@ -671,6 +671,19 @@ cmd_move() {
   [[ -d "$new_wt_path" ]] || error_exit "IO_ERROR" "worktree move did not produce '$new_wt_path'" 5
   transaction_register _undo_worktree_move "$git_dir" "$new_wt_path" "$wt_path"
 
+  # Calculate new URL (based on new directory name, not repo--branch pattern)
+  local new_url="https://${new_site_name}.test"
+  if [[ -n "$GROVE_URL_SUBDOMAIN" ]]; then
+    new_url="https://${GROVE_URL_SUBDOMAIN}.${new_site_name}.test"
+  fi
+
+  # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
+  if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
+    dim "  Updated APP_URL in .env"
+  elif (( $? != 1 )); then
+    error_exit "IO_ERROR" "could not update APP_URL in '$new_wt_path/.env'" 5
+  fi
+
   # Move succeeded — now retire the old Herd site (unsecure + clean nginx/certificates)
   if [[ "$was_secured" == true ]]; then
     info "Unsecuring old site ${C_CYAN}${old_site_name}.test${C_RESET}"
@@ -690,19 +703,6 @@ cmd_move() {
       # Registered after the move undo so rollback unsecures the new site first.
       transaction_register _undo_herd_site "$new_site_name"
     fi
-  fi
-
-  # Calculate new URL (based on new directory name, not repo--branch pattern)
-  local new_url="https://${new_site_name}.test"
-  if [[ -n "$GROVE_URL_SUBDOMAIN" ]]; then
-    new_url="https://${GROVE_URL_SUBDOMAIN}.${new_site_name}.test"
-  fi
-
-  # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
-  if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
-    dim "  Updated APP_URL in .env"
-  elif (( $? != 1 )); then
-    error_exit "IO_ERROR" "could not update APP_URL in '$new_wt_path/.env'" 5
   fi
 
   # Everything reversible has succeeded — commit so the registered undo steps do

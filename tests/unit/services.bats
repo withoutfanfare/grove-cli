@@ -619,7 +619,7 @@ EOF
     mkdir -p "$HERD_ROOT/app-worktrees/new"
     ln -s old "$HERD_ROOT/app-current"
     cmd_services_switch app new && exit 10
-    [[ "$(readlink "$HERD_ROOT/app-current")" == old && ! -e "$TEST_TMPDIR/started" ]]
+    [[ "$(readlink "$HERD_ROOT/app-current")" == old && -e "$TEST_TMPDIR/started" ]]
   '
   [ "$status" -eq 0 ]
 }

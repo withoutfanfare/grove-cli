@@ -141,7 +141,7 @@ done
 for helper in wt-removal-check prune-plan.py; do
   local_function=bundled_removal_check
   [[ "$helper" == prune-plan.py ]] && local_function=bundled_prune_plan
-  print -r -- "$local_function() { python3 - \"\$@\" <<'GROVE_PYTHON_HELPER'" >> "$BUILD_OUTPUT"
+  print -r -- "$local_function() { python3 -I - \"\$@\" <<'GROVE_PYTHON_HELPER'" >> "$BUILD_OUTPUT"
   cat "$SCRIPT_DIR/tools/$helper" >> "$BUILD_OUTPUT"
   print -r -- $'\nGROVE_PYTHON_HELPER\n}' >> "$BUILD_OUTPUT"
 done

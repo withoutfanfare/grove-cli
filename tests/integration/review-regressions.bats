@@ -121,11 +121,12 @@ NPM
   add_worktree feature/assets feature-assets
   printf '{}\n' > "$HERD_ROOT/demo-worktrees/feature-assets/package.json"
   mkdir -p "$TEST_TEMP_DIR/bin"
-  printf '#!/bin/sh\nexit 1\n' > "$TEST_TEMP_DIR/bin/npm"
+  printf '#!/bin/sh\ntouch "%s/npm-ran"\nexit 1\n' "$TEST_TEMP_DIR" > "$TEST_TEMP_DIR/bin/npm"
   chmod +x "$TEST_TEMP_DIR/bin/npm"
-  run --separate-stderr env PATH="$TEST_TEMP_DIR/bin:/usr/bin:/bin" \
+  run --separate-stderr env HOME="$TEST_TEMP_DIR/home" PATH="$TEST_TEMP_DIR/bin:/usr/bin:/bin" \
     zsh "$GROVE_ROOT/grove" fresh demo feature/assets
   [ "$status" -ne 0 ]
+  [ -e "$TEST_TEMP_DIR/npm-ran" ]
   [[ "$output$stderr" != *"Fresh complete"* ]]
 }
 
@@ -298,9 +299,77 @@ NPM
 @test "removal-check: an unknown database only blocks when a drop is requested" {
   add_worktree feature/legacy old-alias
   grove_run removal-check demo feature/legacy --json
+  [ "$status" -eq 0 ]
   [[ "$output" == *'"verdict":"clear"'* ]]
   grove_run removal-check demo feature/legacy --drop-db --json
-  [[ "$output" != *'"verdict":"clear"'* ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"unknown"'* ]]
+}
+
+@test "removal-check: an unknown database never downgrades a blocked verdict" {
+  add_worktree feature/legacy old-alias
+  ln -s "$HERD_ROOT/demo-worktrees/old-alias" "$HERD_ROOT/demo-current"
+  grove_run removal-check demo feature/legacy --drop-db --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"blocked"'* ]]
+}
+
+@test "removal-check honours -f on a protected branch, as rm does" {
+  add_worktree staging staging
+  printf 'demo_staging\n' > "$(git -C "$HERD_ROOT/demo-worktrees/staging" rev-parse --git-path grove-database)"
+  grove_run removal-check demo staging --json
+  [[ "$output" == *'"verdict":"blocked"'* ]]
+  grove_run removal-check -f demo staging --json
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'Protected branch requires'* ]]
+}
+
+@test "rm --drop-db ignores a sibling registration whose folder is gone" {
+  add_worktree feature/owner feature-owner
+  add_worktree feature/gone feature-gone
+  printf 'owned\n' > "$(git -C "$HERD_ROOT/demo-worktrees/feature-owner" rev-parse --git-path grove-database)"
+  rm -rf "$HERD_ROOT/demo-worktrees/feature-gone"
+  grove_run rm demo feature/owner --force --drop-db --json
+  [ "$status" -eq 0 ]
+  [ ! -d "$HERD_ROOT/demo-worktrees/feature-owner" ]
+}
+
+@test "rm --drop-db refuses when a sibling's recorded database cannot be read" {
+  add_worktree feature/owner feature-owner
+  add_worktree feature/locked feature-locked
+  printf 'owned\n' > "$(git -C "$HERD_ROOT/demo-worktrees/feature-owner" rev-parse --git-path grove-database)"
+  local sidecar; sidecar="$(git -C "$HERD_ROOT/demo-worktrees/feature-locked" rev-parse --git-path grove-database)"
+  printf 'owned\n' > "$sidecar"
+  chmod 000 "$sidecar"
+  grove_run rm demo feature/owner --force --drop-db --json
+  assert_json_error
+  [[ "$output" == *DATABASE_UNSAFE* ]]
+  [ -d "$HERD_ROOT/demo-worktrees/feature-owner" ]
+}
+
+@test "python helpers never import modules from the current folder" {
+  mkdir "$TEST_TEMP_DIR/hostile"
+  printf 'open("%s/imported", "w")\n' "$TEST_TEMP_DIR" > "$TEST_TEMP_DIR/hostile/json.py"
+  cd "$TEST_TEMP_DIR/hostile"
+  grove_run prune-plan demo
+  [[ "$output" == *'"success"'* ]]
+  [ ! -e "$TEST_TEMP_DIR/imported" ]
+}
+
+@test "health: an unknown base is neither averaged as zero nor marked critical" {
+  add_worktree feature/known known
+  add_worktree feature/unknown unknown
+  printf 'main\n' > "$(git -C "$HERD_ROOT/demo-worktrees/known" rev-parse --git-path grove-base)"
+  grove_run health demo --json
+  [ "$status" -eq 0 ]
+  OUTPUT="$output" python3 -c '
+import json,os
+data = json.loads(os.environ["OUTPUT"])
+data = data.get("data", data)
+assert data["worktree_count"] == 2, data
+assert data["overall_grade"] == "?", data
+assert data["overall_score"] >= 60, data
+assert not [i for i in data["issues"] if i["severity"] == "critical"], data'
 }
 
 # A forced removal must not depend on the database: it removes the worktree but

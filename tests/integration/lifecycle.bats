@@ -177,12 +177,14 @@ make_bare_with_worktree() {
     db_name_for() { print -r -- app__env; }
     set_worktree_database() { return 0; }
     herd() { return 1; }
+    cleanup_herd_site() { touch '$TEST_TEMP_DIR/site-retired'; }
     mv() { return 1; }
     FORCE=true
     cmd_move app feature/env new
   "
 
   [ "$status" -eq 5 ]
+  [ ! -e "$TEST_TEMP_DIR/site-retired" ]
   [[ "$output" == *"IO_ERROR"* ]]
   [[ "$output" != *"moved successfully"* ]]
   [ -d "$wt_path" ]

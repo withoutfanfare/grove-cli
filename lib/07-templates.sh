@@ -256,7 +256,7 @@ format_json() {
       jq_coloured=false
     fi
   elif [[ "$_GROVE_JSON_FORMATTER" == "python3" ]]; then
-    if formatted="$(print -r -- "$json" | python3 -m json.tool 2>/dev/null)"; then
+    if formatted="$(print -r -- "$json" | python3 -I -m json.tool 2>/dev/null)"; then
       result="$formatted"
     fi
   fi

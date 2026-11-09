@@ -42,11 +42,11 @@ cmd_removal_check() {
   selected_gate="$(removal_check_binary)" || selected_gate=''
   if [[ "$selected_gate" == bundled_removal_check ]]; then
     helper_json="$(bundled_removal_check "$wt_path" --json)" || true
-    detail_rows="$(print -r -- "$helper_json" | python3 -c 'import json,sys;print(",".join(json.dumps(c) for c in json.load(sys.stdin)["checks"]))')" || detail_rows=''
+    detail_rows="$(print -r -- "$helper_json" | python3 -I -c 'import json,sys;print(",".join(json.dumps(c) for c in json.load(sys.stdin)["checks"]))')" || detail_rows=''
     if [[ -n "$detail_rows" ]]; then
       check_rows+=("$detail_rows")
       local detailed_verdict
-      detailed_verdict="$(print -r -- "$helper_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["verdict"])')" || detailed_verdict=unknown
+      detailed_verdict="$(print -r -- "$helper_json" | python3 -I -c 'import json,sys;print(json.load(sys.stdin)["verdict"])')" || detailed_verdict=unknown
       [[ "$detailed_verdict" != clear ]] && verdict="$detailed_verdict"
     else
       verdict=unknown
@@ -57,13 +57,13 @@ cmd_removal_check() {
   local protection_message="Branch protection permits this request"
   local database_message="Database will be kept"
   if current_link="$(worktree_current_link_for "$wt_path")"; then verdict=blocked; site_state=blocked; site_message="Current site selects this worktree; switch it first"; message+=$'\n'"Worktree is selected by '$current_link'; switch the live site first"; fi
-  if is_protected_branch "$branch" && [[ "${ALLOW_PROTECTED:-false}" != true ]]; then verdict=blocked; protection_state=blocked; protection_message="Protected branch requires typed confirmation"; message+=$'\n'"Protected branch requires individual typed confirmation"; fi
+  if is_protected_branch "$branch" && [[ "${FORCE:-false}" != true && "${ALLOW_PROTECTED:-false}" != true ]]; then verdict=blocked; protection_state=blocked; protection_message="Protected branch requires typed confirmation"; message+=$'\n'"Protected branch requires individual typed confirmation"; fi
   # An unidentified database only matters when a drop is asked for: a forced removal never touches it.
   if ! db_name="$(db_name_for "$repo" "$branch" "$wt_path")"; then
-    if [[ "${DROP_DB:-false}" == true ]]; then verdict=unknown; database_state=unknown; database_message="Database identity is unknown"; message+=$'\n'"Database identity is unknown; removal cannot be approved"
+    if [[ "${DROP_DB:-false}" == true ]]; then [[ "$verdict" == blocked ]] || verdict=unknown; database_state=unknown; database_message="Database identity is unknown"; message+=$'\n'"Database identity is unknown; removal cannot be approved"
     else database_message="Database could not be identified; none will be backed up or dropped"; fi
   fi
-  if [[ "${DROP_DB:-false}" == true ]] && ! worktree_database_is_private "$repo" "$wt_path" "$db_name"; then verdict=blocked; database_state=blocked; database_message="$REPLY"; message+=$'\n'"$REPLY"; fi
+  if [[ "${DROP_DB:-false}" == true && "$database_state" == clear ]] && ! worktree_database_is_private "$repo" "$wt_path" "$db_name"; then verdict=blocked; database_state=blocked; database_message="$REPLY"; message+=$'\n'"$REPLY"; fi
   [[ -n "$message" ]] || message='Removal gate completed; local remote-tracking refs were checked, no live fetch was performed. Execution rechecks before removal.'
   json_escape "$repo"; local jr="$REPLY"
   json_escape "$branch"; local jb="$REPLY"
