@@ -164,7 +164,9 @@ iterate_worktrees() {
 _worktree_status_record() {
   local wt_path="$1" base="$2"
   local out
-  out="$(git -C "$wt_path" status --porcelain=v2 --branch 2>/dev/null)" || return 1
+  # Time-boxed: files offloaded to iCloud can stall `git status` for minutes.
+  # perl's alarm survives exec, so git is killed when it fires (macOS has no `timeout`).
+  out="$(perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git -C "$wt_path" status --porcelain=v2 --branch 2>/dev/null)" || return 1
 
   # porcelain v2 headers carry the SHA and, only when an upstream is set and
   # resolves, "# branch.ab +A -B". No header means ahead/behind are unknown,

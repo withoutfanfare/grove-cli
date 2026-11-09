@@ -126,3 +126,16 @@ run_zsh() {
   run_zsh "remote_branch_exists '$gitdir' 'totallymissing'"
   [ "$status" -ne 0 ]
 }
+
+# A worktree whose files are offloaded to iCloud can stall `git status` for
+# minutes; the listing must give up on it rather than hang.
+@test "_worktree_status_record: gives up on a git status that hangs" {
+  mkdir -p "$TEST_TEMP_DIR/slowbin"
+  printf '#!/bin/sh\nexec sleep 15\n' > "$TEST_TEMP_DIR/slowbin/git"
+  chmod +x "$TEST_TEMP_DIR/slowbin/git"
+  local started=$SECONDS
+  run env PATH="$TEST_TEMP_DIR/slowbin:$PATH" GROVE_STATUS_TIMEOUT=1 \
+    zsh -c "source '$GIT_FNS'; _worktree_status_record '$REPO' ''"
+  [ "$status" -eq 1 ]
+  [ $((SECONDS - started)) -lt 10 ]
+}
