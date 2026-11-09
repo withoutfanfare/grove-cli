@@ -494,3 +494,23 @@ database_sidecar() {
   OUTPUT="$output" python3 -c 'import json,os; d=json.loads(os.environ["OUTPUT"]); assert d["success"] is False and d["dirty"] is True'
   [ ! -e "$HERD_ROOT/hook-events" ]
 }
+
+# A worktree whose files are offloaded to iCloud stalls `git status`; the
+# listing must report it and return, not wait on it once per fallback.
+@test "ls --json: a worktree whose git status hangs does not hang the listing" {
+  add_worktree feature/fine fine
+  add_worktree feature/stuck stuck
+  mkdir -p "$TEST_TEMP_DIR/slowbin"
+  cat > "$TEST_TEMP_DIR/slowbin/git" <<'GIT'
+#!/bin/sh
+case "$*" in *"/stuck status"*) exec sleep 60 ;; esac
+exec /usr/bin/git "$@"
+GIT
+  chmod +x "$TEST_TEMP_DIR/slowbin/git"
+  local started=$SECONDS
+  run --separate-stderr env HOME="$TEST_TEMP_DIR/home" PATH="$TEST_TEMP_DIR/slowbin:/usr/bin:/bin" \
+    GROVE_STATUS_TIMEOUT=2 zsh "$GROVE_ROOT/grove" ls demo --json
+  [ "$status" -eq 0 ]
+  [ $((SECONDS - started)) -lt 15 ]
+  [[ "$output" == *feature/fine* && "$output" == *feature/stuck* ]]
+}

@@ -106,6 +106,7 @@ clear_fetch_cache() {
 clear_git_cache() {
   _GROVE_GIT_CACHE=()
   _GROVE_STATUS_CACHE=()
+  _GROVE_STATUS_UNREADABLE=()
   _GROVE_STATUS_BASE=""
   _GROVE_STATUS_BASE_OK=false
 }
@@ -149,6 +150,23 @@ iterate_worktrees() {
   fi
 }
 
+# git_status_bounded — `git status` for a worktree, time-boxed
+#
+# Files offloaded to iCloud can stall `git status` for minutes. perl's alarm
+# survives exec, so git is killed when it fires (macOS has no `timeout`).
+# A worktree the status collection already failed on is refused at once, so
+# the per-worktree fallbacks do not each wait out the limit again.
+#
+# Arguments:
+#   $1  - worktree path
+#   $2+ - arguments for `git status`
+typeset -gA _GROVE_STATUS_UNREADABLE=()
+git_status_bounded() {
+  local wt_path="$1"; shift
+  [[ -z "${_GROVE_STATUS_UNREADABLE[$wt_path]:-}" ]] || return 1
+  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git -C "$wt_path" status "$@"
+}
+
 # _worktree_status_record — Gather one worktree's status in three git calls
 #
 # Arguments:
@@ -164,9 +182,7 @@ iterate_worktrees() {
 _worktree_status_record() {
   local wt_path="$1" base="$2"
   local out
-  # Time-boxed: files offloaded to iCloud can stall `git status` for minutes.
-  # perl's alarm survives exec, so git is killed when it fires (macOS has no `timeout`).
-  out="$(perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git -C "$wt_path" status --porcelain=v2 --branch 2>/dev/null)" || return 1
+  out="$(git_status_bounded "$wt_path" --porcelain=v2 --branch 2>/dev/null)" || return 1
 
   # porcelain v2 headers carry the SHA and, only when an upstream is set and
   # resolves, "# branch.ab +A -B". No header means ahead/behind are unknown,
@@ -261,7 +277,8 @@ collect_worktree_statuses() {
   local _cws_i=0 _cws_path=""
   for _cws_path in "${_cws_paths[@]}"; do
     _cws_i=$(( _cws_i + 1 ))
-    [[ -n "${_cws_values[$_cws_i]}" ]] && _GROVE_STATUS_CACHE[$_cws_path]="${_cws_values[$_cws_i]}"
+    if [[ -n "${_cws_values[$_cws_i]}" ]]; then _GROVE_STATUS_CACHE[$_cws_path]="${_cws_values[$_cws_i]}"
+    elif [[ -e "$_cws_path/.git" ]]; then _GROVE_STATUS_UNREADABLE[$_cws_path]=1; fi
   done
 
   return 0

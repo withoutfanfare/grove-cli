@@ -60,7 +60,7 @@ _display_worktree() {
   else
     # Fallback to direct git calls
     sha="$(git -C "$wt_path" rev-parse --short HEAD 2>/dev/null || true)"
-    local st="$(git -C "$wt_path" status --porcelain 2>/dev/null || true)"
+    local st="$(git_status_bounded "$wt_path" --porcelain 2>/dev/null || true)"
     state_icon="●"
     state_color="$C_GREEN"
     state_text="clean"
@@ -285,7 +285,7 @@ _display_status_row() {
   else
     # Fallback to direct git calls
     sha="$(git -C "$p" rev-parse --short HEAD 2>/dev/null)" || sha="?"
-    st="$(git -C "$p" status --porcelain 2>/dev/null)" || st=""
+    st="$(git_status_bounded "$p" --porcelain 2>/dev/null)" || st=""
 
     if [[ -n "$st" ]]; then
       changes="$(count_lines "$st")"
@@ -874,7 +874,7 @@ calculate_health_score() {
     changes="$REPLY"
     get_cached_status "$wt_path" untracked >/dev/null; untracked="$REPLY"
   else
-    st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || { st=""; known=false; issues+=(status-unknown); }
+    st="$(git_status_bounded "$wt_path" --porcelain 2>/dev/null)" || { st=""; known=false; issues+=(status-unknown); }
     if [[ -n "$st" ]]; then
       changes="$(count_lines "$st")"
       untracked="$(count_matching "$st" '\?\?*')"

@@ -139,3 +139,14 @@ run_zsh() {
   [ "$status" -eq 1 ]
   [ $((SECONDS - started)) -lt 10 ]
 }
+
+@test "git_status_bounded: refuses at once a worktree the collection already failed on" {
+  mkdir -p "$TEST_TEMP_DIR/slowbin"
+  printf '#!/bin/sh\nexec sleep 15\n' > "$TEST_TEMP_DIR/slowbin/git"
+  chmod +x "$TEST_TEMP_DIR/slowbin/git"
+  local started=$SECONDS
+  run env PATH="$TEST_TEMP_DIR/slowbin:$PATH" GROVE_STATUS_TIMEOUT=5 \
+    zsh -c "source '$GIT_FNS'; _GROVE_STATUS_UNREADABLE[$REPO]=1; git_status_bounded '$REPO' --porcelain"
+  [ "$status" -eq 1 ]
+  [ $((SECONDS - started)) -lt 3 ]
+}
