@@ -60,12 +60,19 @@ _display_worktree() {
   else
     # Fallback to direct git calls
     sha="$(git -C "$wt_path" rev-parse --short HEAD 2>/dev/null || true)"
-    local st="$(git_status_bounded "$wt_path" --porcelain 2>/dev/null || true)"
+    local st status_unknown=false
+    if ! st="$(git_status_bounded "$wt_path" --porcelain 2>/dev/null)" && [[ -e "$wt_path/.git" ]]; then status_unknown=true; fi
     state_icon="●"
     state_color="$C_GREEN"
     state_text="clean"
 
-    if [[ -n "$st" ]]; then
+    if [[ "$status_unknown" == true ]]; then
+      # An unread worktree must never pass as clean; JSON's dirty is a plain boolean.
+      state_icon="?"
+      state_color="$C_YELLOW"
+      state_text="status unknown"
+      dirty=true
+    elif [[ -n "$st" ]]; then
       local changes="$(count_lines "$st")"
       state_icon="◐"
       state_color="$C_YELLOW"
@@ -263,6 +270,7 @@ _display_status_row() {
 
   local sha st state_icon state_color changes counts ahead behind
   local age age_days merged_icon sync_display is_stale is_inactive
+  local status_unknown=false
 
   state_icon="●"
   state_color="$C_GREEN"
@@ -285,7 +293,11 @@ _display_status_row() {
   else
     # Fallback to direct git calls
     sha="$(git -C "$p" rev-parse --short HEAD 2>/dev/null)" || sha="?"
-    st="$(git_status_bounded "$p" --porcelain 2>/dev/null)" || st=""
+    if ! st="$(git_status_bounded "$p" --porcelain 2>/dev/null)" && [[ -e "$p/.git" ]]; then
+      status_unknown=true
+      state_icon="?"
+      state_color="$C_YELLOW"
+    fi
 
     if [[ -n "$st" ]]; then
       changes="$(count_lines "$st")"
@@ -356,6 +368,7 @@ _display_status_row() {
   if [[ "$JSON_OUTPUT" == true ]]; then
     local dirty=false
     (( ${changes:-0} > 0 )) && dirty=true
+    [[ "$status_unknown" == true ]] && dirty=true
     # Map the unknown sentinel ("?") to JSON null; a bare ? is invalid JSON.
     local ahead_json="$ahead" behind_json="$behind"
     [[ "$ahead_json" == "$GROVE_UNKNOWN" ]] && ahead_json="null"
@@ -1373,7 +1386,7 @@ cmd_dashboard() {
       if get_cached_status "$wt_path" dirty >/dev/null; then
         [[ "$REPLY" == dirty ]] && st=dirty || st=""
       else
-        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+        if ! st="$(git_status_bounded "$wt_path" --porcelain 2>/dev/null)" && [[ -e "$wt_path/.git" ]]; then st=unknown; fi
       fi
       if [[ -n "$st" ]]; then
         repo_dirty=$((repo_dirty + 1))

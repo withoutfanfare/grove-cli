@@ -150,3 +150,27 @@ run_zsh() {
   [ "$status" -eq 1 ]
   [ $((SECONDS - started)) -lt 3 ]
 }
+
+# iCloud-offloaded files keep their size and modified time but change ctime and
+# inode. Comparing those would make git read, and so download, every file.
+@test "git_status_bounded: compares only size and modified time" {
+  mkdir -p "$TEST_TEMP_DIR/argsbin"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/git-args"\n' "$TEST_TEMP_DIR" > "$TEST_TEMP_DIR/argsbin/git"
+  chmod +x "$TEST_TEMP_DIR/argsbin/git"
+  run env PATH="$TEST_TEMP_DIR/argsbin:$PATH" zsh -c "source '$GIT_FNS'; git_status_bounded '$REPO' --porcelain"
+  [ "$status" -eq 0 ]
+  grep -q 'core.checkStat=minimal' "$TEST_TEMP_DIR/git-args"
+  grep -q 'core.trustctime=false' "$TEST_TEMP_DIR/git-args"
+}
+
+@test "git_status_bounded: still sees an edit that keeps the file's size" {
+  echo one > "$REPO/tracked-same-size"
+  touch -t 202001010101 "$REPO/tracked-same-size"
+  git -C "$REPO" add tracked-same-size
+  git -C "$REPO" -c user.name=t -c user.email=t@example.test commit -qm tracked
+  echo two > "$REPO/tracked-same-size"
+  touch -t 202002020202 "$REPO/tracked-same-size"
+  run zsh -c "source '$GIT_FNS'; git_status_bounded '$REPO' --porcelain"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"M tracked-same-size"* ]]
+}

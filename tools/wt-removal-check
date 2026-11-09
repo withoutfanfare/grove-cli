@@ -27,7 +27,9 @@ LIMIT = 10
 
 def git(directory: str, *args: str):
     try:
-        out = subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, timeout=20)
+        # Size and modified time only: reading content would download every iCloud-offloaded file.
+        out = subprocess.run(["git", "--no-optional-locks", "-c", "core.checkStat=minimal", "-c", "core.trustctime=false",
+                              "-C", directory, *args], capture_output=True, text=True, timeout=20)
     except (subprocess.SubprocessError, OSError):
         raise RuntimeError("Git query failed: " + " ".join(args))
     if out.returncode != 0:

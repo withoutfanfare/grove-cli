@@ -514,3 +514,27 @@ GIT
   [ $((SECONDS - started)) -lt 15 ]
   [[ "$output" == *feature/fine* && "$output" == *feature/stuck* ]]
 }
+
+@test "ls and status --json: a worktree whose status cannot be read is not reported clean" {
+  add_worktree feature/fine fine
+  add_worktree feature/stuck stuck
+  echo uncommitted > "$HERD_ROOT/demo-worktrees/stuck/UNSAVED"
+  mkdir -p "$TEST_TEMP_DIR/slowbin"
+  cat > "$TEST_TEMP_DIR/slowbin/git" <<'GIT'
+#!/bin/sh
+case "$*" in *"/stuck status"*) exec sleep 60 ;; esac
+exec /usr/bin/git "$@"
+GIT
+  chmod +x "$TEST_TEMP_DIR/slowbin/git"
+  local command
+  for command in ls status; do
+    run --separate-stderr env HOME="$TEST_TEMP_DIR/home" PATH="$TEST_TEMP_DIR/slowbin:/usr/bin:/bin" \
+      GROVE_STATUS_TIMEOUT=2 zsh "$GROVE_ROOT/grove" "$command" demo --json
+    [ "$status" -eq 0 ]
+    OUTPUT="$output" python3 -c '
+import json,os
+rows = {row["branch"]: row for row in json.loads(os.environ["OUTPUT"])}
+assert rows["feature/stuck"]["dirty"] is True
+assert rows["feature/fine"]["dirty"] is False'
+  done
+}

@@ -164,7 +164,9 @@ typeset -gA _GROVE_STATUS_UNREADABLE=()
 git_status_bounded() {
   local wt_path="$1"; shift
   [[ -z "${_GROVE_STATUS_UNREADABLE[$wt_path]:-}" ]] || return 1
-  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git -C "$wt_path" status "$@"
+  # Size and modified time only: reading content would download every offloaded file.
+  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git --no-optional-locks \
+    -c core.checkStat=minimal -c core.trustctime=false -C "$wt_path" status "$@"
 }
 
 # _worktree_status_record — Gather one worktree's status in three git calls
