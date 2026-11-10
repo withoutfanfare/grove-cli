@@ -1696,8 +1696,13 @@ typeset -gA _GROVE_STATUS_UNREADABLE=()
 git_status_bounded() {
   local wt_path="$1"; shift
   [[ -z "${_GROVE_STATUS_UNREADABLE[$wt_path]:-}" ]] || return 1
+  local limit="${GROVE_STATUS_TIMEOUT:-10}"
+  [[ "$limit" == <1-> ]] || limit=10   # alarm treats anything else as "no limit"
+  local -a bound=(perl -e 'alarm shift; exec @ARGV or exit 127' "$limit")
+  # shortcut: no time limit without perl, use timeout/gtimeout if such hosts start hanging
+  command -v perl >/dev/null 2>&1 || bound=()
   # Size and modified time only: reading content would download every offloaded file.
-  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git --no-optional-locks \
+  "${bound[@]}" git --no-optional-locks \
     -c core.checkStat=minimal -c core.trustctime=false -C "$wt_path" status "$@"
 }
 
@@ -1812,7 +1817,10 @@ collect_worktree_statuses() {
   for _cws_path in "${_cws_paths[@]}"; do
     _cws_i=$(( _cws_i + 1 ))
     if [[ -n "${_cws_values[$_cws_i]}" ]]; then _GROVE_STATUS_CACHE[$_cws_path]="${_cws_values[$_cws_i]}"
-    elif [[ -e "$_cws_path/.git" ]]; then _GROVE_STATUS_UNREADABLE[$_cws_path]=1; fi
+    elif [[ -e "$_cws_path/.git" ]]; then
+      _GROVE_STATUS_UNREADABLE[$_cws_path]=1
+      [[ "$JSON_OUTPUT" == true ]] || warn "Could not read git status in $_cws_path within the limit; raise GROVE_STATUS_TIMEOUT or run 'git status' there once"
+    fi
   done
 
   return 0
@@ -2453,7 +2461,10 @@ worktree_database_is_private() {
   for entry in "${siblings[@]}"; do
     other_path="${entry%%|*}"
     [[ "${other_path:A}" != "${wt_path:A}" ]] || continue
-    [[ -d "$other_path" ]] || continue   # a stale registration selects nothing
+    if [[ ! -d "$other_path" ]]; then
+      REPLY="worktree '$other_path' is registered but its folder is missing, so its database cannot be checked; restore it, or run 'grove prune $repo' if it is gone for good"
+      return 1
+    fi
     other_db="$(_read_config_pairs "$other_path/.env" _database_env_pair)" || return 1
     sidecar="$(worktree_database_file "$other_path")" || return 1
     [[ ! -e "$sidecar" || -r "$sidecar" ]] || return 1
@@ -5261,12 +5272,12 @@ cmd_rm() {
       error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   fi
   local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
-  # A forced removal must not depend on the database. When it cannot be
-  # identified, remove the worktree but never back up or drop a guessed name.
+  # Only a requested drop depends on the database. When it cannot be identified,
+  # remove the worktree but never back up or drop a guessed name.
   local db_name
   if ! db_name="$(db_name_for "$repo" "$branch" "$wt_path")"; then
-    [[ "$FORCE" == true ]] ||
-      error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env, or use -f to remove without touching any database" 5
+    [[ "$FORCE" == true || "$DROP_DB" != true ]] ||
+      error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch', so it cannot be dropped; record its database in grove-database or DB_DATABASE in .env, or remove the worktree without dropping a database" 5
     warn "Cannot determine database for '$branch' - removing without backing up or dropping any database"
     db_name=""
     DROP_DB=false
@@ -5560,6 +5571,8 @@ cmd_move() {
   # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
   if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
     dim "  Updated APP_URL in .env"
+    # Runs before the move undo, so the file is still at the new path.
+    transaction_register _update_env_app_url "$new_wt_path/.env" "$old_url"
   elif (( $? != 1 )); then
     error_exit "IO_ERROR" "could not update APP_URL in '$new_wt_path/.env'" 5
   fi
@@ -8777,7 +8790,7 @@ cmd_dashboard() {
 
     # Calculate average grade for repo
     avg_grade="?"
-    if (( repo_scored > 0 )); then
+    if (( repo_scored > 0 && repo_scored == repo_wt_count )); then
       avg_score=$((repo_grade_sum / repo_scored))
       score_to_grade "$avg_score"
       avg_grade="$REPLY"
@@ -12261,12 +12274,13 @@ cmd_services_switch() {
 
   info "Switching ${(C)app} to $worktree..."
 
-  # Remember the current selection so a failed switch can put it back.
-  local previous=""
-  [[ -L "$symlink" ]] && previous="$(readlink "$symlink")"
-
   # A partial stop may have taken down one service; bring back what it can.
   svc_stop_app "$app" || { warn "Could not stop ${(C)app}; restarting its services"; svc_start_app "$app" || true; return 1; }
+
+  # Remember the selection so a failed switch can put it back. Read after the
+  # stop, as late as possible, so a switch that finished meanwhile is not undone.
+  local previous=""
+  [[ -L "$symlink" ]] && previous="$(readlink "$symlink")"
 
   local failed=false
   if ln -sfn "$worktree_path" "$symlink"; then
@@ -12299,7 +12313,11 @@ cmd_services_switch() {
     rm -f "$symlink"
   fi
   svc_stop_app "$app" > /dev/null 2>&1 || true   # undo a partial start
-  svc_start_app "$app" || true
+  if [[ -n "$previous" ]]; then
+    svc_start_app "$app" || true
+  else
+    warn "No previous selection to return to; ${(C)app} services left stopped"
+  fi
   return 1
 }
 
@@ -12615,9 +12633,10 @@ cmd_removal_check() {
   local site_message="No current-site link selects this worktree"
   local protection_message="Branch protection permits this request"
   local database_message="Database will be kept"
-  if current_link="$(worktree_current_link_for "$wt_path")"; then verdict=blocked; site_state=blocked; site_message="Current site selects this worktree; switch it first"; message+=$'\n'"Worktree is selected by '$current_link'; switch the live site first"; fi
+  if current_link="$(worktree_current_link_for "$wt_path")" && [[ "${FORCE:-false}" == true ]]; then site_message="Current site selects this worktree; forced removal will break the link '$current_link'"
+  elif [[ -n "$current_link" ]]; then verdict=blocked; site_state=blocked; site_message="Current site selects this worktree; switch it first"; message+=$'\n'"Worktree is selected by '$current_link'; switch the live site first"; fi
   if is_protected_branch "$branch" && [[ "${FORCE:-false}" != true && "${ALLOW_PROTECTED:-false}" != true ]]; then verdict=blocked; protection_state=blocked; protection_message="Protected branch requires typed confirmation"; message+=$'\n'"Protected branch requires individual typed confirmation"; fi
-  # An unidentified database only matters when a drop is asked for: a forced removal never touches it.
+  # An unidentified database only matters when a drop is asked for: otherwise rm never touches it.
   if ! db_name="$(db_name_for "$repo" "$branch" "$wt_path")"; then
     if [[ "${DROP_DB:-false}" == true ]]; then [[ "$verdict" == blocked ]] || verdict=unknown; database_state=unknown; database_message="Database identity is unknown"; message+=$'\n'"Database identity is unknown; removal cannot be approved"
     else database_message="Database could not be identified; none will be backed up or dropped"; fi
@@ -12689,7 +12708,8 @@ def listing(lines, indent="      "):
 
 
 def uncommitted(directory: str):
-    status = git(directory, "status", "--porcelain")
+    # Explicit flags: user config such as status.showUntrackedFiles=no must not hide work.
+    status = git(directory, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
     if status is None:
         return None
     return [line for line in status.splitlines() if line.strip()]

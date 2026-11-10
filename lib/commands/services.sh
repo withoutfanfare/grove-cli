@@ -765,12 +765,13 @@ cmd_services_switch() {
 
   info "Switching ${(C)app} to $worktree..."
 
-  # Remember the current selection so a failed switch can put it back.
-  local previous=""
-  [[ -L "$symlink" ]] && previous="$(readlink "$symlink")"
-
   # A partial stop may have taken down one service; bring back what it can.
   svc_stop_app "$app" || { warn "Could not stop ${(C)app}; restarting its services"; svc_start_app "$app" || true; return 1; }
+
+  # Remember the selection so a failed switch can put it back. Read after the
+  # stop, as late as possible, so a switch that finished meanwhile is not undone.
+  local previous=""
+  [[ -L "$symlink" ]] && previous="$(readlink "$symlink")"
 
   local failed=false
   if ln -sfn "$worktree_path" "$symlink"; then
@@ -803,7 +804,11 @@ cmd_services_switch() {
     rm -f "$symlink"
   fi
   svc_stop_app "$app" > /dev/null 2>&1 || true   # undo a partial start
-  svc_start_app "$app" || true
+  if [[ -n "$previous" ]]; then
+    svc_start_app "$app" || true
+  else
+    warn "No previous selection to return to; ${(C)app} services left stopped"
+  fi
   return 1
 }
 

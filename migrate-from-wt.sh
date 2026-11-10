@@ -458,22 +458,36 @@ migrate_git_config() {
       old_base="$(git config --file "$cfg" --get wt.base 2>/dev/null)" || continue
       [[ -n "$old_base" ]] || continue
 
+      sidecar="$(git -C "$wt_path" rev-parse --path-format=absolute --git-path grove-base 2>/dev/null)" || sidecar=""
+      # A sidecar already set by grove is newer than wt.base: never overwrite it.
+      existing=""
+      if [[ -n "$sidecar" && -e "$sidecar" ]]; then
+        existing="$(tr -d '[:space:]' 2>/dev/null < "$sidecar")" || {
+          warn "Cannot read grove-base for $wt_path; both left in place"
+          continue
+        }
+      fi
+      if [[ -n "$existing" && "$existing" != "$old_base" ]]; then
+        warn "wt.base ($old_base) and grove-base ($existing) differ for $wt_path; both left in place"
+        continue
+      fi
+
       if [[ "$DRY_RUN" == true ]]; then
-        dry "Would migrate wt.base -> grove-base in: $wt_path (value: $old_base)"
+        if [[ -n "$existing" ]]; then
+          dry "Would remove duplicate wt.base in: $wt_path (grove-base already $existing)"
+        else
+          dry "Would migrate wt.base -> grove-base in: $wt_path (value: $old_base)"
+        fi
         CHANGES_MADE=$((CHANGES_MADE + 1))
         continue
       fi
 
-      sidecar="$(git -C "$wt_path" rev-parse --path-format=absolute --git-path grove-base 2>/dev/null)" || sidecar=""
-      # A sidecar already set by grove is newer than wt.base: never overwrite it.
-      existing=""
-      [[ -n "$sidecar" && -f "$sidecar" ]] && existing="$(tr -d '[:space:]' < "$sidecar" 2>/dev/null)"
       if [[ -n "$existing" ]]; then
-        if [[ "$existing" == "$old_base" ]] && git config --file "$cfg" --unset wt.base 2>/dev/null; then
+        if git config --file "$cfg" --unset wt.base 2>/dev/null; then
           ok "Removed duplicate wt.base in: ${C_DIM}$wt_path${C_RESET} (grove-base already ${existing})"
           CHANGES_MADE=$((CHANGES_MADE + 1))
         else
-          warn "wt.base ($old_base) and grove-base ($existing) differ for $wt_path; both left in place"
+          warn "could not remove duplicate wt.base for $wt_path; grove-base already holds the same value"
         fi
         continue
       fi

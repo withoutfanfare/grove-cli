@@ -1413,7 +1413,7 @@ cmd_dashboard() {
 
     # Calculate average grade for repo
     avg_grade="?"
-    if (( repo_scored > 0 )); then
+    if (( repo_scored > 0 && repo_scored == repo_wt_count )); then
       avg_score=$((repo_grade_sum / repo_scored))
       score_to_grade "$avg_score"
       avg_grade="$REPLY"

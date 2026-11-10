@@ -169,3 +169,39 @@ _bare_repo() {
   [ ! -e "$HERD_ROOT/.groveconfig" ]
   [ ! -e "$HERD_ROOT/app.git/.groveconfig" ]
 }
+
+@test "migration: dry run reports the same outcome as the real run for an existing sidecar" {
+  _bare_repo "$HERD_ROOT"
+  local admin="$HERD_ROOT/app.git/worktrees/app-wt"
+  git config --file "$admin/config.worktree" wt.base origin/develop
+  printf 'origin/release\n' > "$admin/grove-base"
+  _migrate --dry-run
+  [[ "$output" == *"differ"* && "$output" != *"Would migrate wt.base"* ]]
+  printf 'origin/develop\n' > "$admin/grove-base"
+  _migrate --dry-run
+  [[ "$output" == *"Would remove duplicate wt.base"* ]]
+}
+
+@test "migration: a duplicate wt.base that cannot be removed is not called a difference" {
+  _bare_repo "$HERD_ROOT"
+  local admin="$HERD_ROOT/app.git/worktrees/app-wt"
+  git config --file "$admin/config.worktree" --add wt.base origin/develop
+  git config --file "$admin/config.worktree" --add wt.base origin/develop
+  printf 'origin/develop\n' > "$admin/grove-base"
+  _migrate
+  [[ "$output" == *"could not remove duplicate wt.base"* && "$output" != *"differ"* ]]
+}
+
+@test "migration: an unreadable grove-base is left alone" {
+  _bare_repo "$HERD_ROOT"
+  local admin="$HERD_ROOT/app.git/worktrees/app-wt"
+  git config --file "$admin/config.worktree" wt.base origin/develop
+  printf 'origin/release\n' > "$admin/grove-base"
+  chmod 000 "$admin/grove-base"
+  _migrate
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Cannot read grove-base"* ]]
+  chmod 600 "$admin/grove-base"
+  [ "$(cat "$admin/grove-base")" = "origin/release" ]
+  git config --file "$admin/config.worktree" --get wt.base
+}

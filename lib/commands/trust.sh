@@ -56,9 +56,10 @@ cmd_removal_check() {
   local site_message="No current-site link selects this worktree"
   local protection_message="Branch protection permits this request"
   local database_message="Database will be kept"
-  if current_link="$(worktree_current_link_for "$wt_path")"; then verdict=blocked; site_state=blocked; site_message="Current site selects this worktree; switch it first"; message+=$'\n'"Worktree is selected by '$current_link'; switch the live site first"; fi
+  if current_link="$(worktree_current_link_for "$wt_path")" && [[ "${FORCE:-false}" == true ]]; then site_message="Current site selects this worktree; forced removal will break the link '$current_link'"
+  elif [[ -n "$current_link" ]]; then verdict=blocked; site_state=blocked; site_message="Current site selects this worktree; switch it first"; message+=$'\n'"Worktree is selected by '$current_link'; switch the live site first"; fi
   if is_protected_branch "$branch" && [[ "${FORCE:-false}" != true && "${ALLOW_PROTECTED:-false}" != true ]]; then verdict=blocked; protection_state=blocked; protection_message="Protected branch requires typed confirmation"; message+=$'\n'"Protected branch requires individual typed confirmation"; fi
-  # An unidentified database only matters when a drop is asked for: a forced removal never touches it.
+  # An unidentified database only matters when a drop is asked for: otherwise rm never touches it.
   if ! db_name="$(db_name_for "$repo" "$branch" "$wt_path")"; then
     if [[ "${DROP_DB:-false}" == true ]]; then [[ "$verdict" == blocked ]] || verdict=unknown; database_state=unknown; database_message="Database identity is unknown"; message+=$'\n'"Database identity is unknown; removal cannot be approved"
     else database_message="Database could not be identified; none will be backed up or dropped"; fi

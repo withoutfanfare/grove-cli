@@ -195,3 +195,13 @@ PY
   [ "$status" -eq 2 ]
   [[ "$output" == *PLAN_UNAVAILABLE* ]]
 }
+
+@test "bundled removal checker sees untracked files whatever the user's git config says" {
+  git init -qb main "$TEST_TEMP_DIR/worktree"
+  git -C "$TEST_TEMP_DIR/worktree" commit -qm initial --allow-empty
+  git -C "$TEST_TEMP_DIR/worktree" config status.showUntrackedFiles no
+  echo new > "$TEST_TEMP_DIR/worktree/NEVER_ADDED"
+  run python3 "$GROVE_ROOT/tools/wt-removal-check" "$TEST_TEMP_DIR/worktree"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *NEVER_ADDED* ]]
+}

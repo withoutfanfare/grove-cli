@@ -382,12 +382,12 @@ cmd_rm() {
       error_exit "WORKTREE_NOT_FOUND" "no matching worktree registered for '$repo' branch '$branch'" 3
   fi
   local app_url; app_url="$(worktree_url "$repo" "$branch" "$wt_path")"
-  # A forced removal must not depend on the database. When it cannot be
-  # identified, remove the worktree but never back up or drop a guessed name.
+  # Only a requested drop depends on the database. When it cannot be identified,
+  # remove the worktree but never back up or drop a guessed name.
   local db_name
   if ! db_name="$(db_name_for "$repo" "$branch" "$wt_path")"; then
-    [[ "$FORCE" == true ]] ||
-      error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch'; record its database in grove-database or DB_DATABASE in .env, or use -f to remove without touching any database" 5
+    [[ "$FORCE" == true || "$DROP_DB" != true ]] ||
+      error_exit "DATABASE_UNKNOWN" "cannot determine database for '$branch', so it cannot be dropped; record its database in grove-database or DB_DATABASE in .env, or remove the worktree without dropping a database" 5
     warn "Cannot determine database for '$branch' - removing without backing up or dropping any database"
     db_name=""
     DROP_DB=false
@@ -681,6 +681,8 @@ cmd_move() {
   # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
   if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
     dim "  Updated APP_URL in .env"
+    # Runs before the move undo, so the file is still at the new path.
+    transaction_register _update_env_app_url "$new_wt_path/.env" "$old_url"
   elif (( $? != 1 )); then
     error_exit "IO_ERROR" "could not update APP_URL in '$new_wt_path/.env'" 5
   fi

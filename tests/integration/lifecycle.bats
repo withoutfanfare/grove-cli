@@ -192,6 +192,29 @@ make_bare_with_worktree() {
   grep -q '^APP_URL=old$' "$wt_path/.env"
 }
 
+@test "cmd_move: a failure after the APP_URL rewrite puts the old APP_URL back" {
+  local git_dir="$TEST_TEMP_DIR/app.git" wt_path="$TEST_TEMP_DIR/old"
+  make_bare_with_worktree "$git_dir" "$wt_path" "feature/env"
+  printf 'APP_URL=https://old.test\nPRIVATE=dummy\n' > "$wt_path/.env"
+
+  run_zsh "
+    git_dir_for() { print -r -- '$git_dir'; }
+    resolve_worktree_path() { print -r -- '$wt_path'; }
+    db_name_for() { print -r -- app__env; }
+    set_worktree_database() { return 0; }
+    herd() { return 1; }
+    url_for() { print -r -- https://old.test; }
+    cleanup_herd_site() { error_exit IO_ERROR 'herd step failed' 5; }
+    FORCE=true
+    cmd_move app feature/env new
+  "
+
+  [ "$status" -ne 0 ]
+  [ -d "$wt_path" ]
+  [ ! -d "$TEST_TEMP_DIR/new" ]
+  grep -q '^APP_URL=https://old.test$' "$wt_path/.env"
+}
+
 @test "cmd_restructure: a failed migration produces a failing command status" {
   local git_dir="$TEST_TEMP_DIR/app.git" wt_path="$TEST_TEMP_DIR/app--feature-env"
   make_bare_with_worktree "$git_dir" "$wt_path" feature/env
