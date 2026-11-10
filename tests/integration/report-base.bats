@@ -68,6 +68,23 @@ for i,merged in [(1,True),(2,True),(4,False),(5,False)]:
   [[ "$output" == *"database=retained_database"* ]]
 }
 
+@test "switch prints the path and skips hooks when the database is unknown" {
+  run zsh -c '
+    source "$FNS"
+    resolve_repo_arg() { print repo; }
+    resolve_branch_ref() { print feature; }
+    resolve_worktree_path() { print -r -- "$WT_A"; }
+    worktree_url() { print https://fixture.test; }
+    worktree_database_for() { return 1; }
+    run_hooks() { print -r -- hooks-ran; }
+    nohup() { :; }
+    DEFAULT_EDITOR=true
+    cmd_switch repo feature'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$WT_A"* ]]
+  [[ "$output" != *hooks-ran* ]]
+}
+
 @test "example switch hook refuses missing database before changing env" {
   printf 'APP_URL=old\nSESSION_DOMAIN=old\nDB_DATABASE=retained\n' > "$WT_A/.env"
   cp "$WT_A/.env" "$TEST_TEMP_DIR/expected"

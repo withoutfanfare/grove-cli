@@ -164,8 +164,13 @@ typeset -gA _GROVE_STATUS_UNREADABLE=()
 git_status_bounded() {
   local wt_path="$1"; shift
   [[ -z "${_GROVE_STATUS_UNREADABLE[$wt_path]:-}" ]] || return 1
+  local limit="${GROVE_STATUS_TIMEOUT:-10}"
+  [[ "$limit" == <1-> ]] || limit=10   # alarm treats anything else as "no limit"
+  local -a bound=(perl -e 'alarm shift; exec @ARGV or exit 127' "$limit")
+  # shortcut: no time limit without perl, use timeout/gtimeout if such hosts start hanging
+  command -v perl >/dev/null 2>&1 || bound=()
   # Size and modified time only: reading content would download every offloaded file.
-  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git --no-optional-locks \
+  "${bound[@]}" git --no-optional-locks \
     -c core.checkStat=minimal -c core.trustctime=false -C "$wt_path" status "$@"
 }
 
@@ -280,7 +285,10 @@ collect_worktree_statuses() {
   for _cws_path in "${_cws_paths[@]}"; do
     _cws_i=$(( _cws_i + 1 ))
     if [[ -n "${_cws_values[$_cws_i]}" ]]; then _GROVE_STATUS_CACHE[$_cws_path]="${_cws_values[$_cws_i]}"
-    elif [[ -e "$_cws_path/.git" ]]; then _GROVE_STATUS_UNREADABLE[$_cws_path]=1; fi
+    elif [[ -e "$_cws_path/.git" ]]; then
+      _GROVE_STATUS_UNREADABLE[$_cws_path]=1
+      [[ "$JSON_OUTPUT" == true ]] || warn "Could not read git status in $_cws_path within the limit; raise GROVE_STATUS_TIMEOUT or run 'git status' there once"
+    fi
   done
 
   return 0

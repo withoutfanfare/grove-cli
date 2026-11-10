@@ -174,3 +174,31 @@ run_zsh() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"M tracked-same-size"* ]]
 }
+
+@test "git_status_bounded: a git that cannot start is a failure, not a clean result" {
+  mkdir -p "$TEST_TEMP_DIR/nogit"
+  ln -s "$(command -v perl)" "$TEST_TEMP_DIR/nogit/perl"
+  run env PATH="$TEST_TEMP_DIR/nogit" "$(command -v zsh)" -c "source '$GIT_FNS'; git_status_bounded '$REPO' --porcelain"
+  [ "$status" -ne 0 ]
+}
+
+@test "git_status_bounded: a time limit that would disable the alarm falls back to 10s" {
+  mkdir -p "$TEST_TEMP_DIR/perlbin"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$3" >> "%s/limit"\n' "$TEST_TEMP_DIR" > "$TEST_TEMP_DIR/perlbin/perl"
+  chmod +x "$TEST_TEMP_DIR/perlbin/perl"
+  local bad
+  for bad in 0 0.5 abc; do
+    run env PATH="$TEST_TEMP_DIR/perlbin:$PATH" GROVE_STATUS_TIMEOUT="$bad" zsh -c "source '$GIT_FNS'; git_status_bounded '$REPO' --porcelain"
+    [ "$status" -eq 0 ]
+  done
+  [ "$(sort -u "$TEST_TEMP_DIR/limit")" = "10" ]
+}
+
+@test "git_status_bounded: still reads status where perl is not installed" {
+  mkdir -p "$TEST_TEMP_DIR/noperl"
+  printf '#!/bin/sh\necho read-without-perl\n' > "$TEST_TEMP_DIR/noperl/git"
+  chmod +x "$TEST_TEMP_DIR/noperl/git"
+  run env PATH="$TEST_TEMP_DIR/noperl" "$(command -v zsh)" -c "source '$GIT_FNS'; git_status_bounded '$REPO' --porcelain"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *read-without-perl* ]]
+}

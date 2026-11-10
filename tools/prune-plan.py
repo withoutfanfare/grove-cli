@@ -17,7 +17,10 @@ def git(root, *args):
 
 
 def checked_out(root):
-    return {line[7:] for line in git(root, "worktree", "list", "--porcelain").splitlines() if line.startswith("branch ")}
+    refs = {line[7:] for line in git(root, "worktree", "list", "--porcelain").splitlines() if line.startswith("branch ")}
+    # A bare repository's own HEAD branch has no "branch" line in that listing.
+    head = git(root, "branch", "--show-current")
+    return refs | {"refs/heads/" + head} if head else refs
 
 
 def plan(repo, root, base, protected):
@@ -109,11 +112,11 @@ def execute(repo, root, base, protected, filename):
     for item in targets:
         ref, sha = item["ref"], item["sha"]
         name = ref.removeprefix("refs/heads/")
-        # Recheck at the write boundary, then let Git enforce its checked-out-branch guard.
-        if ref in checked_out(root):
-            results.append({"name": name, "status": "refused", "reason": "Branch is now checked out"})
-            continue
         try:
+            # Recheck at the write boundary, then let Git enforce its checked-out-branch guard.
+            if ref in checked_out(root):
+                results.append({"name": name, "status": "refused", "reason": "Branch is now checked out"})
+                continue
             if git(root, "rev-parse", "--verify", ref) != sha:
                 raise RuntimeError("Confirmed branch changed; preview again")
             delete_confirmed(root, ref, sha, base, confirmed["base_sha"])
@@ -130,7 +133,7 @@ def main():
     try:
         data = plan(repo, root, base, protected.split()) if mode == "plan" else execute(repo, root, base, protected.split(), rest[0])
         print(json.dumps({"success": True, "data": data}))
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.TimeoutExpired) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(json.dumps({"success": False, "error": {"code": "PLAN_UNAVAILABLE", "message": str(error)}}))
         return 2
     return 0

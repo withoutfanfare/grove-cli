@@ -1019,7 +1019,7 @@ cmd_health() {
   collect_worktree_statuses "$git_dir"
 
   local wt_path="" branch=""
-  local total_score=0 wt_count=0
+  local total_score=0 wt_count=0 scored_count=0
   local healthy_count=0 warning_count=0 critical_count=0 unknown_count=0
 
   # Collect worktree health data
@@ -1039,8 +1039,12 @@ cmd_health() {
     score="${rest%%|*}"
     issues="${rest#*|}"
 
-    total_score=$((total_score + score))
     wt_count=$((wt_count + 1))
+    # An unknown comparison has no real score to average.
+    if [[ "$grade" != "?" ]]; then
+      total_score=$((total_score + score))
+      scored_count=$((scored_count + 1))
+    fi
 
     # Categorise health
     if [[ "$grade" == "?" ]]; then
@@ -1059,7 +1063,7 @@ cmd_health() {
     # Collect issues for JSON output
     if [[ -n "$issues" && "$issues" != "" ]]; then
       severity="warning"
-      (( score < 60 )) && severity="critical"
+      [[ "$grade" != "?" ]] && (( score < 60 )) && severity="critical"
       # zsh does not word-split unquoted parameters; split explicitly on commas
       for issue in ${(s:,:)issues}; do
         all_issues+=("$severity|$branch|$issue")
@@ -1069,8 +1073,8 @@ cmd_health() {
 
   # Calculate overall grade
   local avg_score=0 avg_grade="?"
-  if (( wt_count > 0 )); then
-    avg_score=$((total_score / wt_count))
+  if (( scored_count > 0 )); then
+    avg_score=$((total_score / scored_count))
     score_to_grade "$avg_score"
     avg_grade="$REPLY"
     (( unknown_count == 0 )) || avg_grade="?"
@@ -1338,7 +1342,7 @@ cmd_dashboard() {
 
   # Declare loop-scoped variables BEFORE the loop to avoid zsh local re-declaration bug
   local repo_name wt_path branch
-  local repo_wt_count repo_dirty repo_stale repo_grade_sum
+  local repo_wt_count repo_dirty repo_stale repo_grade_sum repo_scored
   local result grade rest score st age_days
   local avg_grade avg_score grade_colored
   local wt wt_branch wt_rest wt_grade wt_score wt_grade_colored
@@ -1360,6 +1364,7 @@ cmd_dashboard() {
     collect_worktree_statuses "$git_dir"
 
     repo_wt_count=0
+    repo_scored=0
     repo_dirty=0
     repo_stale=0
     repo_grade_sum=0
@@ -1380,7 +1385,10 @@ cmd_dashboard() {
       grade="${result%%|*}"
       rest="${result#*|}"
       score="${rest%%|*}"
-      repo_grade_sum=$((repo_grade_sum + score))
+      if [[ "$grade" != "?" ]]; then
+        repo_grade_sum=$((repo_grade_sum + score))
+        repo_scored=$((repo_scored + 1))
+      fi
 
       # Check dirty (cache first; git status only if the cache has no entry)
       if get_cached_status "$wt_path" dirty >/dev/null; then
@@ -1405,8 +1413,8 @@ cmd_dashboard() {
 
     # Calculate average grade for repo
     avg_grade="?"
-    if (( repo_wt_count > 0 )); then
-      avg_score=$((repo_grade_sum / repo_wt_count))
+    if (( repo_scored > 0 && repo_scored == repo_wt_count )); then
+      avg_score=$((repo_grade_sum / repo_scored))
       score_to_grade "$avg_score"
       avg_grade="$REPLY"
     fi

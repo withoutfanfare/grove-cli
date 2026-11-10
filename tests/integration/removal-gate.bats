@@ -317,3 +317,38 @@ GATE
   [[ "$output" == *"REMOVAL_BLOCKED"*"new work"* ]]
   [ -f "$WT_FIXTURE/new-work" ]
 }
+
+# Stub whose second answer is $2; the first is $1. Both block.
+stub_gate_answers() {
+  cat > "$STUB_BIN/wt-removal-check" <<GATE
+#!/bin/sh
+if [ -f "$TEST_TEMP_DIR/gate-asked" ]; then echo '$2'; else touch "$TEST_TEMP_DIR/gate-asked"; echo '$1'; fi
+exit 1
+GATE
+  chmod +x "$STUB_BIN/wt-removal-check"
+}
+
+@test "cmd_rm: a confirmed block survives the lease's last-seen time ticking on" {
+  setup_cmd_rm_harness
+  stub_gate_answers "Live agent lease: claude session abc, last seen 12:03" "Live agent lease: claude session abc, last seen 12:04"
+  STDIN_FILE="$TEST_TEMP_DIR/answer"
+  printf 'y\n' > "$STDIN_FILE"
+
+  run_cmd_rm "FORCE=false; removal_can_prompt() { return 0; }"
+
+  [ "$status" -eq 0 ]
+  [ ! -d "$WT_FIXTURE" ]
+}
+
+@test "cmd_rm: a confirmed block does not cover a different loss after the hooks" {
+  setup_cmd_rm_harness
+  stub_gate_answers "would lose: 1 uncommitted change(s), last seen 12:03" "would lose: 9 uncommitted change(s), last seen 12:03"
+  STDIN_FILE="$TEST_TEMP_DIR/answer"
+  printf 'y\n' > "$STDIN_FILE"
+
+  run_cmd_rm "FORCE=false; removal_can_prompt() { return 0; }"
+
+  [ "$status" -eq 6 ]
+  [[ "$output" == *"REMOVAL_BLOCKED"* ]]
+  [ -d "$WT_FIXTURE" ]
+}

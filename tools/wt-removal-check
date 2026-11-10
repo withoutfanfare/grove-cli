@@ -45,7 +45,8 @@ def listing(lines, indent="      "):
 
 
 def uncommitted(directory: str):
-    status = git(directory, "status", "--porcelain")
+    # Explicit flags: user config such as status.showUntrackedFiles=no must not hide work.
+    status = git(directory, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
     if status is None:
         return None
     return [line for line in status.splitlines() if line.strip()]

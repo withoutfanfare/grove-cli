@@ -619,7 +619,7 @@ EOF
     mkdir -p "$HERD_ROOT/app-worktrees/new"
     ln -s old "$HERD_ROOT/app-current"
     cmd_services_switch app new && exit 10
-    [[ "$(readlink "$HERD_ROOT/app-current")" == old && ! -e "$TEST_TMPDIR/started" ]]
+    [[ "$(readlink "$HERD_ROOT/app-current")" == old && -e "$TEST_TMPDIR/started" ]]
   '
   [ "$status" -eq 0 ]
 }
@@ -714,4 +714,31 @@ EOF2
   [ "$status" -ne 0 ]
   [[ "$output" == *"restoring the previous selection"* ]]
   [ "$(readlink "$HERD_ROOT/myapp-current")" = "$HERD_ROOT/myapp-worktrees/main" ]
+}
+
+@test "services switch leaves services stopped when there is no selection to go back to" {
+  cat > "$GROVE_SERVICES_DIR/apps.conf" << 'EOF2'
+myapp|myapp|none||myapp.test
+EOF2
+  mkdir -p "$HERD_ROOT/myapp-worktrees/feature-login"
+  touch "$HERD_ROOT/myapp-worktrees/feature-login/artisan"
+  export GROVE_LAUNCH_AGENTS="$TEST_TMPDIR/agents"
+  mkdir -p "$GROVE_LAUNCH_AGENTS" "$TEST_TMPDIR/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_TMPDIR/bin/php"
+  chmod +x "$TEST_TMPDIR/bin/php"
+
+  run env PATH="$TEST_TMPDIR/bin:$PATH" zsh -c '
+    for f in 01-core 02-validation 07-templates; do
+      source "$PROJECT_ROOT/lib/$f.sh" 2>/dev/null || true
+    done
+    source "$PROJECT_ROOT/lib/commands/services.sh" 2>/dev/null || true
+    svc_load_config 2>/dev/null
+    svc_stop_app() { return 0; }
+    svc_start_app() { touch "$TEST_TMPDIR/started"; }
+    cmd_services_switch myapp feature-login
+  '
+  [ "$status" -ne 0 ]
+  [ ! -L "$HERD_ROOT/myapp-current" ]
+  [ ! -e "$TEST_TMPDIR/started" ]
+  [[ "$output" == *"left stopped"* ]]
 }
