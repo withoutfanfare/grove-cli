@@ -12664,7 +12664,8 @@ bundled_removal_check() { python3 -I - "$@" <<'GROVE_PYTHON_HELPER'
 #!/usr/bin/env python3
 """wt-removal-check — would removing this worktree lose anything?
 
-    wt-removal-check [dir]        exit 0 clear · exit 1 blocked, reasons on stdout
+    wt-removal-check [dir]        exit 0 clear · exit 1 blocked · exit 2 could not
+                                  tell (treat as blocked), reasons on stdout
 
 Three questions, answered from git and the lease file alone; nothing is
 recorded anywhere:
@@ -12707,6 +12708,18 @@ def listing(lines, indent="      "):
     return shown
 
 
+def head_ref(directory: str) -> str:
+    """HEAD's branch ref, also on a branch with no commits yet; "" when detached."""
+    out = subprocess.run(["git", "-C", directory, "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True, timeout=20)
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def unborn(directory: str) -> bool:
+    """On a branch that has no commits yet (a new repository or an orphan worktree)."""
+    verify = subprocess.run(["git", "-C", directory, "rev-parse", "-q", "--verify", "HEAD"], capture_output=True, timeout=20)
+    return verify.returncode != 0 and bool(head_ref(directory))
+
+
 def uncommitted(directory: str):
     # Explicit flags: user config such as status.showUntrackedFiles=no must not hide work.
     status = git(directory, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
@@ -12716,13 +12729,15 @@ def uncommitted(directory: str):
 
 
 def unsaved_commits(directory: str):
+    if unborn(directory):
+        return []  # no commits exist, so none can be lost
     remotes = git(directory, "remote")
     if remotes is None:
         return None
     if remotes.strip():
         exclude = ["--remotes"]
     else:
-        head = git(directory, "rev-parse", "--symbolic-full-name", "HEAD").strip()
+        head = head_ref(directory)
         branches = (git(directory, "for-each-ref", "--format=%(refname)", "refs/heads") or "").split()
         exclude = [ref for ref in branches if ref != head]
     log = git(directory, "log", "--oneline", "HEAD", "--not", *exclude, "--")
@@ -12775,7 +12790,7 @@ def assess(directory):
         if not common.is_absolute():
             common = Path(directory) / common
         paths = [admin / "index.lock", admin / "HEAD.lock", common / "packed-refs.lock", common / "shallow.lock"]
-        ref = git(directory, "rev-parse", "--symbolic-full-name", "HEAD").strip()
+        ref = head_ref(directory)
         if ref.startswith("refs/heads/"):
             paths.append(common / (ref + ".lock"))
         found = []
@@ -12787,8 +12802,8 @@ def assess(directory):
                 pass
         return "Git locks exist: " + ", ".join(found) if found else None
     check("git_lock", "Git locks", locks)
-    check("uncommitted", "Uncommitted work", lambda: "\n".join(uncommitted(directory)))
-    check("unsaved_commits", "Commit coverage in local remote-tracking refs", lambda: "\n".join(unsaved_commits(directory)))
+    check("uncommitted", "Uncommitted work", lambda: "\n".join(listing(uncommitted(directory), indent="")))
+    check("unsaved_commits", "Commit coverage in local remote-tracking refs", lambda: "\n".join(listing(unsaved_commits(directory), indent="")))
     check("lease", "Live agent lease", lambda: live_lease(directory))
     verdict = "unknown" if any(c["state"] == "unknown" for c in checks) else "blocked" if any(c["state"] == "blocked" for c in checks) else "clear"
     return {"path": directory, "verdict": verdict, "checks": checks}
