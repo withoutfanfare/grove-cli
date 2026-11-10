@@ -165,6 +165,7 @@ assert [t["name"] for t in plan["targets"]] == ["merged"], plan'
   git -C "$TEST_TEMP_DIR/repo" commit -qm initial --allow-empty
   git -C "$TEST_TEMP_DIR/repo" branch a
   git -C "$TEST_TEMP_DIR/repo" branch b
+  git -C "$TEST_TEMP_DIR/repo" branch c
   run python3 - "$GROVE_ROOT/tools/prune-plan.py" "$TEST_TEMP_DIR" <<'PY'
 import importlib.util,json,sys
 spec = importlib.util.spec_from_file_location("prune_plan", sys.argv[1])
@@ -179,7 +180,8 @@ def flaky(r):
     return real(r)
 m.checked_out = flaky
 result = m.execute("fixture", root, "main", ["main"], sys.argv[2] + "/plan.json")
-assert [(b["name"], b["status"]) for b in result["branches"]] == [("a", "deleted"), ("b", "refused")], result
+assert [(b["name"], b["status"]) for b in result["branches"]] == [("a", "deleted"), ("b", "refused"), ("c", "refused")], result
+assert len(calls) == 3, calls  # the failed listing is not retried for c
 PY
   [ "$status" -eq 0 ]
 }

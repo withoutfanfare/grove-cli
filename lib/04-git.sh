@@ -166,9 +166,18 @@ git_status_bounded() {
   [[ -z "${_GROVE_STATUS_UNREADABLE[$wt_path]:-}" ]] || return 1
   local limit="${GROVE_STATUS_TIMEOUT:-10}"
   [[ "$limit" == <1-> ]] || limit=10   # alarm treats anything else as "no limit"
-  local -a bound=(perl -e 'alarm shift; exec @ARGV or exit 127' "$limit")
-  # shortcut: no time limit without perl, use timeout/gtimeout if such hosts start hanging
-  command -v perl >/dev/null 2>&1 || bound=()
+  # shortcut: no time limit when perl, timeout and gtimeout are all missing; refuse instead if such hosts start hanging
+  local -a bound=()
+  local tool
+  if command -v perl >/dev/null 2>&1; then
+    bound=(perl -e 'alarm shift; exec @ARGV or exit 127' "$limit")
+  else
+    for tool in timeout gtimeout; do
+      command -v "$tool" >/dev/null 2>&1 || continue
+      bound=("$tool" "$limit")
+      break
+    done
+  fi
   # Size and modified time only: reading content would download every offloaded file.
   "${bound[@]}" git --no-optional-locks \
     -c core.checkStat=minimal -c core.trustctime=false -C "$wt_path" status "$@"

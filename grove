@@ -1698,9 +1698,18 @@ git_status_bounded() {
   [[ -z "${_GROVE_STATUS_UNREADABLE[$wt_path]:-}" ]] || return 1
   local limit="${GROVE_STATUS_TIMEOUT:-10}"
   [[ "$limit" == <1-> ]] || limit=10   # alarm treats anything else as "no limit"
-  local -a bound=(perl -e 'alarm shift; exec @ARGV or exit 127' "$limit")
-  # shortcut: no time limit without perl, use timeout/gtimeout if such hosts start hanging
-  command -v perl >/dev/null 2>&1 || bound=()
+  # shortcut: no time limit when perl, timeout and gtimeout are all missing; refuse instead if such hosts start hanging
+  local -a bound=()
+  local tool
+  if command -v perl >/dev/null 2>&1; then
+    bound=(perl -e 'alarm shift; exec @ARGV or exit 127' "$limit")
+  else
+    for tool in timeout gtimeout; do
+      command -v "$tool" >/dev/null 2>&1 || continue
+      bound=("$tool" "$limit")
+      break
+    done
+  fi
   # Size and modified time only: reading content would download every offloaded file.
   "${bound[@]}" git --no-optional-locks \
     -c core.checkStat=minimal -c core.trustctime=false -C "$wt_path" status "$@"
@@ -2465,6 +2474,7 @@ worktree_database_is_private() {
       REPLY="worktree '$other_path' is registered but its folder is missing, so its database cannot be checked; restore it, or run 'grove prune $repo' if it is gone for good"
       return 1
     fi
+    REPLY="cannot read the database selected or recorded by worktree '$other_path'"
     other_db="$(_read_config_pairs "$other_path/.env" _database_env_pair)" || return 1
     sidecar="$(worktree_database_file "$other_path")" || return 1
     [[ ! -e "$sidecar" || -r "$sidecar" ]] || return 1
@@ -5568,11 +5578,16 @@ cmd_move() {
     new_url="https://${GROVE_URL_SUBDOMAIN}.${new_site_name}.test"
   fi
 
+  # The undo restores what .env held, which need not be the resolved $old_url
+  # (quoted values, a configured subdomain, a rejected URL).
+  local env_app_url=""
+  env_app_url="$(grep -m1 '^APP_URL=' "$new_wt_path/.env" 2>/dev/null)" || true
+
   # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
   if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
     dim "  Updated APP_URL in .env"
     # Runs before the move undo, so the file is still at the new path.
-    transaction_register _update_env_app_url "$new_wt_path/.env" "$old_url"
+    transaction_register _update_env_app_url "$new_wt_path/.env" "${env_app_url#APP_URL=}"
   elif (( $? != 1 )); then
     error_exit "IO_ERROR" "could not update APP_URL in '$new_wt_path/.env'" 5
   fi
@@ -12929,12 +12944,19 @@ def execute(repo, root, base, protected, filename):
             raise RuntimeError("A confirmed branch changed, became protected or is checked out; preview again")
         seen.add(pair[0])
     results = []
-    for item in targets:
+    for index, item in enumerate(targets):
         ref, sha = item["ref"], item["sha"]
         name = ref.removeprefix("refs/heads/")
         try:
             # Recheck at the write boundary, then let Git enforce its checked-out-branch guard.
-            if ref in checked_out(root):
+            occupied = checked_out(root)
+        except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
+            # Nothing was deleted here, and a listing that failed once would fail for every later branch too.
+            reason = "Could not list worktrees, so nothing further was deleted: " + str(error)
+            results.extend({"name": rest["ref"].removeprefix("refs/heads/"), "status": "refused", "reason": reason} for rest in targets[index:])
+            break
+        try:
+            if ref in occupied:
                 results.append({"name": name, "status": "refused", "reason": "Branch is now checked out"})
                 continue
             if git(root, "rev-parse", "--verify", ref) != sha:

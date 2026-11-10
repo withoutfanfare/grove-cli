@@ -678,11 +678,16 @@ cmd_move() {
     new_url="https://${GROVE_URL_SUBDOMAIN}.${new_site_name}.test"
   fi
 
+  # The undo restores what .env held, which need not be the resolved $old_url
+  # (quoted values, a configured subdomain, a rejected URL).
+  local env_app_url=""
+  env_app_url="$(grep -m1 '^APP_URL=' "$new_wt_path/.env" 2>/dev/null)" || true
+
   # Update APP_URL in .env if it exists (line-anchored — preserves all other keys)
   if _update_env_app_url "$new_wt_path/.env" "$new_url"; then
     dim "  Updated APP_URL in .env"
     # Runs before the move undo, so the file is still at the new path.
-    transaction_register _update_env_app_url "$new_wt_path/.env" "$old_url"
+    transaction_register _update_env_app_url "$new_wt_path/.env" "${env_app_url#APP_URL=}"
   elif (( $? != 1 )); then
     error_exit "IO_ERROR" "could not update APP_URL in '$new_wt_path/.env'" 5
   fi

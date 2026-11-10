@@ -202,3 +202,12 @@ run_zsh() {
   [ "$status" -eq 0 ]
   [[ "$output" == *read-without-perl* ]]
 }
+
+@test "git_status_bounded: without perl, timeout carries the time limit" {
+  mkdir -p "$TEST_TEMP_DIR/noperl"
+  printf '#!/bin/sh\necho "limit=$1 via timeout"\n' > "$TEST_TEMP_DIR/noperl/timeout"
+  chmod +x "$TEST_TEMP_DIR/noperl/timeout"
+  run env PATH="$TEST_TEMP_DIR/noperl" GROVE_STATUS_TIMEOUT=7 "$(command -v zsh)" -c "source '$GIT_FNS'; git_status_bounded '$REPO' --porcelain"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"limit=7 via timeout"* ]]
+}

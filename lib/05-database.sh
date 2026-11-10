@@ -131,6 +131,7 @@ worktree_database_is_private() {
       REPLY="worktree '$other_path' is registered but its folder is missing, so its database cannot be checked; restore it, or run 'grove prune $repo' if it is gone for good"
       return 1
     fi
+    REPLY="cannot read the database selected or recorded by worktree '$other_path'"
     other_db="$(_read_config_pairs "$other_path/.env" _database_env_pair)" || return 1
     sidecar="$(worktree_database_file "$other_path")" || return 1
     [[ ! -e "$sidecar" || -r "$sidecar" ]] || return 1

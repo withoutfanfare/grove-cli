@@ -322,6 +322,7 @@ NPM
   grove_run removal-check -f demo staging --json
   [ "$status" -eq 0 ]
   [[ "$output" != *'Protected branch requires'* ]]
+  [[ "$output" == *'"verdict":"clear"'* ]]
 }
 
 @test "rm --drop-db refuses while a sibling's folder is missing, and names it" {
@@ -340,15 +341,17 @@ NPM
 }
 
 @test "rm --drop-db refuses when a sibling's recorded database cannot be read" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads a mode-000 file"
   add_worktree feature/owner feature-owner
   add_worktree feature/locked feature-locked
   printf 'owned\n' > "$(git -C "$HERD_ROOT/demo-worktrees/feature-owner" rev-parse --git-path grove-database)"
   local sidecar; sidecar="$(git -C "$HERD_ROOT/demo-worktrees/feature-locked" rev-parse --git-path grove-database)"
-  printf 'owned\n' > "$sidecar"
+  # A different name, so only the unreadable read itself can block the drop.
+  printf 'other\n' > "$sidecar"
   chmod 000 "$sidecar"
   grove_run rm demo feature/owner --force --drop-db --json
   assert_json_error
-  [[ "$output" == *DATABASE_UNSAFE* ]]
+  [[ "$output" == *DATABASE_UNSAFE* && "$output" == *"cannot read"*feature-locked* ]]
   [ -d "$HERD_ROOT/demo-worktrees/feature-owner" ]
 }
 
