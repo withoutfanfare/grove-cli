@@ -1696,7 +1696,7 @@ typeset -gA _GROVE_STATUS_UNREADABLE=()
 git_status_bounded() {
   local wt_path="$1"; shift
   [[ -z "${_GROVE_STATUS_UNREADABLE[$wt_path]:-}" ]] || return 1
-  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git -C "$wt_path" status "$@"
+  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git --no-optional-locks -C "$wt_path" status "$@"
 }
 
 # _worktree_status_record — Gather one worktree's status in three git calls
@@ -12643,7 +12643,7 @@ LIMIT = 10
 
 def git(directory: str, *args: str):
     try:
-        out = subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, timeout=20)
+        out = subprocess.run(["git", "--no-optional-locks", "-C", directory, *args], capture_output=True, text=True, timeout=20)
     except (subprocess.SubprocessError, OSError):
         raise RuntimeError("Git query failed: " + " ".join(args))
     if out.returncode != 0:

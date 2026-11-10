@@ -164,7 +164,7 @@ typeset -gA _GROVE_STATUS_UNREADABLE=()
 git_status_bounded() {
   local wt_path="$1"; shift
   [[ -z "${_GROVE_STATUS_UNREADABLE[$wt_path]:-}" ]] || return 1
-  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git -C "$wt_path" status "$@"
+  perl -e 'alarm shift; exec @ARGV' "${GROVE_STATUS_TIMEOUT:-10}" git --no-optional-locks -C "$wt_path" status "$@"
 }
 
 # _worktree_status_record — Gather one worktree's status in three git calls

@@ -27,7 +27,7 @@ LIMIT = 10
 
 def git(directory: str, *args: str):
     try:
-        out = subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, timeout=20)
+        out = subprocess.run(["git", "--no-optional-locks", "-C", directory, *args], capture_output=True, text=True, timeout=20)
     except (subprocess.SubprocessError, OSError):
         raise RuntimeError("Git query failed: " + " ".join(args))
     if out.returncode != 0:
