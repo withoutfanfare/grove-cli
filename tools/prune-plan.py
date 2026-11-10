@@ -109,12 +109,19 @@ def execute(repo, root, base, protected, filename):
             raise RuntimeError("A confirmed branch changed, became protected or is checked out; preview again")
         seen.add(pair[0])
     results = []
-    for item in targets:
+    for index, item in enumerate(targets):
         ref, sha = item["ref"], item["sha"]
         name = ref.removeprefix("refs/heads/")
         try:
             # Recheck at the write boundary, then let Git enforce its checked-out-branch guard.
-            if ref in checked_out(root):
+            occupied = checked_out(root)
+        except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
+            # Nothing was deleted here, and a listing that failed once would fail for every later branch too.
+            reason = "Could not list worktrees, so nothing further was deleted: " + str(error)
+            results.extend({"name": rest["ref"].removeprefix("refs/heads/"), "status": "refused", "reason": reason} for rest in targets[index:])
+            break
+        try:
+            if ref in occupied:
                 results.append({"name": name, "status": "refused", "reason": "Branch is now checked out"})
                 continue
             if git(root, "rev-parse", "--verify", ref) != sha:

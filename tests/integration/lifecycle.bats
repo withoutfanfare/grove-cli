@@ -195,7 +195,8 @@ make_bare_with_worktree() {
 @test "cmd_move: a failure after the APP_URL rewrite puts the old APP_URL back" {
   local git_dir="$TEST_TEMP_DIR/app.git" wt_path="$TEST_TEMP_DIR/old"
   make_bare_with_worktree "$git_dir" "$wt_path" "feature/env"
-  printf 'APP_URL=https://old.test\nPRIVATE=dummy\n' > "$wt_path/.env"
+  # Quoted: the undo must restore the line as written, not the resolved URL.
+  printf 'APP_URL="https://old.test"\nPRIVATE=dummy\n' > "$wt_path/.env"
 
   run_zsh "
     git_dir_for() { print -r -- '$git_dir'; }
@@ -212,7 +213,7 @@ make_bare_with_worktree() {
   [ "$status" -ne 0 ]
   [ -d "$wt_path" ]
   [ ! -d "$TEST_TEMP_DIR/new" ]
-  grep -q '^APP_URL=https://old.test$' "$wt_path/.env"
+  grep -q '^APP_URL="https://old.test"$' "$wt_path/.env"
 }
 
 @test "cmd_restructure: a failed migration produces a failing command status" {
