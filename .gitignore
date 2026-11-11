@@ -16,7 +16,7 @@
 grove-dev
 
 # Test dependencies
-test_modules/
+test_modules
 
 .claude/
 
